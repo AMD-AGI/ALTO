@@ -12,6 +12,16 @@ hf_context_key: text
 ```
 
 ```yaml
+name: ptb_text_only
+subset_name: penn_treebank
+split: train
+download: True
+download_mode: reuse_dataset_if_exists
+cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/ptb
+hf_context_key: sentence
+```
+
+```yaml
 name: wikitext
 subset_name: wikitext-2-raw-v1
 split: train

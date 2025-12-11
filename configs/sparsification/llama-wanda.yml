@@ -8,67 +8,80 @@ model:
 
 calib:
   dataset:
-    name: wikitext
-    subset_name: wikitext-2-raw-v1
+    name: allenai/c4
+    subset_name: default
+    data_files:
+      train: "en/c4-train.00000-of-01024.json.gz"
     split: train
     download: True
     download_mode: reuse_dataset_if_exists
-    cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/wikitext2
+    cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/c4
+    revision: 607bd4c8450a42878aa9ddc051a65a055450ef87
     hf_context_key: text
   processing:
-    n_samples: 8
+    n_samples: 128
     bs: 1
-    seq_len: 512
-    preproc: wikitext2_gptq
+    seq_len: 4096
+    preproc: calib_truncated_long_text_random
     seed: *seed
 
-eval_perplexity:
-  data_configs:
-    - dataset:
-        name: allenai/c4
-        subset_name: default
-        data_files:
-            validation: "en/c4-validation.00000-of-00008.json.gz"
-        split: validation[:1100]
-        download: True
-        download_mode: reuse_dataset_if_exists
-        cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/c4
-        revision: 607bd4c8450a42878aa9ddc051a65a055450ef87
-        hf_context_key: text
-      processing:
-        bs: 1
-        seq_len: 2048
-        preproc: wikitext2_test
-    - dataset:
-        name: wikitext
-        subset_name: wikitext-2-raw-v1
-        split: test
-        download: True
-        download_mode: reuse_dataset_if_exists
-        cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/wikitext2
-        hf_context_key: text
-      processing:
-        bs: 1
-        seq_len: 2048
-        preproc: wikitext2_test
+# eval:
+#   eval_perplexity:
+#     data_configs:
+#       - dataset:
+#           name: allenai/c4
+#           subset_name: default
+#           data_files:
+#             validation: "en/c4-validation.00000-of-00008.json.gz"
+#           split: validation[:1100]
+#           download: True
+#           download_mode: reuse_dataset_if_exists
+#           cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/c4
+#           revision: 607bd4c8450a42878aa9ddc051a65a055450ef87
+#           hf_context_key: text
+#         processing:
+#           bs: 1
+#           seq_len: 2048
+#           preproc: test_jointdoc
+#           preproc_kwargs:
+#             sep: ' '
+#           num_samples: 128
+#           max_num_eval_tokens: 1024
 
-  eval_type: [prefill]
-  eval_checkpoints: [pretrained, transformed]
-  bs: 1
-  seq_len: 2048
+#       - dataset:
+#           name: wikitext
+#           subset_name: wikitext-2-raw-v1
+#           split: test
+#           download: True
+#           download_mode: reuse_dataset_if_exists
+#           cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/wikitext2
+#           hf_context_key: text
+#         processing:
+#           bs: 1
+#           seq_len: 2048
+#           preproc: test_jointdoc
+#           preproc_kwargs:
+#             sep: '\n\n'
+#           num_samples: 128
+#           max_num_eval_tokens: 1024
 
-eval_downstream:
-  eval_checkpoints: [pretrained, transformed]
-  task_names: [openbookqa, arc_challenge]
-  num_fewshots: [0, 0]
-  batch_size: 1
+#     eval_type: [prefill]
+
+#   eval_downstream:
+#     task_names: [openbookqa, arc_challenge]
+#     num_fewshots: [0, 0]
+#     batch_size: 1
+
+#   eval_checkpoints: [pretrained, transformed]
 
 optimization:
   sparse:
     method: Wanda
     weight:
       sparsity: 0.5
-    sparsity_out: False
+      N: 2
+      M: 4
+    sparsity_out: True
 
 save:
   save_trans: False

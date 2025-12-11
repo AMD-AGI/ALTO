@@ -1,1 +1,1 @@
-from .blockwise_optimization import BlockwiseOpt
+from .blockwise_optimization import BlockwiseOptimizer

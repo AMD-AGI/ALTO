@@ -175,7 +175,7 @@ class BaseModel(metaclass=ABCMeta):
         return f'\nConfig: \n{str(self.model_config)} \nModel: \n{str(self.model)}'
 
     @torch.no_grad()
-    def collect_first_block_input(self, calib_data, padding_mask=None):
+    def collect_first_block_input(self, calib_data):
         first_block_input = defaultdict(list)
 
         Catcher = self.get_catcher(first_block_input)
@@ -196,19 +196,6 @@ class BaseModel(metaclass=ABCMeta):
                 pass
         self.first_block_input = first_block_input
         assert len(self.first_block_input) > 0, 'Catch input data failed.'
-        if padding_mask:
-            for idx in range(len(self.first_block_input['data'])):
-                token_num = self.first_block_input['data'][idx].shape[1]
-                if token_num != padding_mask[idx].shape[1]:
-                    padding_mask[idx] = F.pad(
-                        padding_mask[idx],
-                        self.get_one_pad_setting(
-                            self.tokenizer.padding_side,
-                            token_num - padding_mask[idx].shape[1]
-                        ),
-                        value=1
-                    )
-        self.padding_mask = padding_mask
 
         self.first_block_input = {
             k: v.cpu() if torch.is_tensor(v) else
@@ -222,19 +209,8 @@ class BaseModel(metaclass=ABCMeta):
             self.move_embed_to_device('cpu')
         self.blocks[0] = self.blocks[0].module
 
-    def get_one_pad_setting(self, padding_side, length):
-        if padding_side == 'left':
-            return [0, length]
-        elif padding_side == 'right':
-            return [length, 0]
-        else:
-            raise Exception(f'Not support padding_side: {padding_side}.')
-
     def get_first_block_input(self):
         return self.first_block_input
-
-    def get_padding_mask(self):
-        return self.padding_mask
 
     def get_model_config(self):
         return self.model_config

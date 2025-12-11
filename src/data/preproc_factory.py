@@ -18,6 +18,11 @@ def wikitext2_gptq(calib_dataset, tokenizer, n_samples, seq_len):
         samples.append(inp)
     return samples
 
+@PREPROC_REGISTRY
+def wikitext2_test(calib_dataset, tokenizer):
+    testenc = tokenizer('\n\n'.join(calib_dataset['text']), return_tensors='pt')
+    return testenc
+
 
 @PREPROC_REGISTRY
 def ptb_gptq(calib_dataset, tokenizer, n_samples, seq_len):
@@ -98,15 +103,6 @@ def pileval_omni(calib_dataset, tokenizer, n_samples, seq_len):
         j = i + seq_len
         inp = trainenc.input_ids[:, i:j]
         samples.append(inp)
-    return samples
-
-
-@PREPROC_REGISTRY
-def img_general(calib_dataset, tokenizer, batch_process, n_samples):
-    random.shuffle(calib_dataset)
-    if len(calib_dataset) > n_samples:
-        calib_dataset = calib_dataset[:n_samples]
-    samples = batch_process(calib_dataset)
     return samples
 
 

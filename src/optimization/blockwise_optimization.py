@@ -6,10 +6,10 @@ from loguru import logger
 
 
 class BlockwiseOpt(metaclass=ABCMeta):
-    def __init__(self, model, compress_config, input, padding_mask, config):
+    def __init__(self, model, optimization_config, input, padding_mask, config):
         self.model = model
         self.blocks = model.get_blocks()
-        self.compress_config = compress_config
+        self.optimization_config = optimization_config
         self.input = input
         self.padding_mask = padding_mask
         self.data_free = False if self.input else True

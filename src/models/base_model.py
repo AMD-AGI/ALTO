@@ -25,14 +25,37 @@ class BaseModel(metaclass=ABCMeta):
         self.torch_dtype = torch_dtype if torch_dtype == 'auto' else eval(torch_dtype)
         self.device_map = device_map
         self.use_cache = use_cache
-        self.vision_model = None
-        self.vision_projector = None
-        self.modality = 'language'
         self.kvcache_buffer = []
         self.build_tokenizer()
         self.build_model()
         self.model.eval()
         self.update_key_info()
+
+    def build_tokenizer(self):
+        assert self.tokenizer_mode in ['fast', 'slow']
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_path, use_fast=self.tokenizer_mode, trust_remote_code=self.trust_remote_code
+        )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def build_model(self):
+        self.model_config = AutoConfig.from_pretrained(
+            self.model_path, trust_remote_code=self.trust_remote_code
+        )
+        if not self.use_cache:
+            if hasattr(self.model_config, 'use_cache'):
+                self.model_config.use_cache = False
+        logger.info(f'self.model_config : {self.model_config}')
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_path,
+            config=self.model_config,
+            device_map=self.device_map,
+            trust_remote_code=self.trust_remote_code,
+            torch_dtype=self.torch_dtype,
+            low_cpu_mem_usage=True,
+        )
+        logger.info(f'self.model : {self.model}')
 
     @abstractmethod
     def find_blocks(self):
@@ -61,15 +84,6 @@ class BaseModel(metaclass=ABCMeta):
     @abstractmethod
     def has_bias(self):
         pass
-
-    def get_modality(self):
-        assert self.modality in ['vision', 'language']
-        return self.modality
-    
-    def set_modality(self, modality='language'):
-        assert modality in ['vision', 'language']
-        self.modality = modality
-        self.update_key_info()
 
     def update_key_info(self):
         self.find_blocks()
@@ -100,14 +114,6 @@ class BaseModel(metaclass=ABCMeta):
 
     def get_blocks(self):
         return self.blocks
-
-    def build_tokenizer(self):
-        assert self.tokenizer_mode in ['fast', 'slow']
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_path, use_fast=self.tokenizer_mode, trust_remote_code=self.trust_remote_code
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def get_tokenizer(self):
         return self.tokenizer
@@ -167,24 +173,6 @@ class BaseModel(metaclass=ABCMeta):
 
     def __str__(self):
         return f'\nConfig: \n{str(self.model_config)} \nModel: \n{str(self.model)}'
-
-    def build_model(self):
-        self.model_config = AutoConfig.from_pretrained(
-            self.model_path, trust_remote_code=self.trust_remote_code
-        )
-        if not self.use_cache:
-            if hasattr(self.model_config, 'use_cache'):
-                self.model_config.use_cache = False
-        logger.info(f'self.model_config : {self.model_config}')
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_path,
-            config=self.model_config,
-            device_map=self.device_map,
-            trust_remote_code=self.trust_remote_code,
-            torch_dtype=self.torch_dtype,
-            low_cpu_mem_usage=True,
-        )
-        logger.info(f'self.model : {self.model}')
 
     @torch.no_grad()
     def collect_first_block_input(self, calib_data, padding_mask=None):

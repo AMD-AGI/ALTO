@@ -6,7 +6,7 @@ import torch
 from loguru import logger
 
 from src.utils import copy_files
-from src.utils.registry_factory import KV_REGISTRY
+from src.utils import KV_REGISTRY
 
 from ..blockwise_optimization import BlockwiseOpt
 
@@ -14,6 +14,7 @@ from ..blockwise_optimization import BlockwiseOpt
 class BlockwiseSparsification(BlockwiseOpt):
     def __init__(self, model, sparsity_config, input, padding_mask, config):
         super().__init__(model, sparsity_config, input, padding_mask, config)
+        self.sparsity_config = self.optimization_config
         self.set_sparsity_config()
 
     def block_init(self, block):

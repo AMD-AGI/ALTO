@@ -1,6 +1,6 @@
 from src.utils.registry_factory import MODEL_REGISTRY
 
-from .base import BaseModel
+from .base_model import BaseModel
 
 
 @MODEL_REGISTRY

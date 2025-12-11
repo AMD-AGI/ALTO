@@ -12,32 +12,32 @@ from .preproc_factory import PREPROC_REGISTRY
 
 
 class BaseDataset(metaclass=ABCMeta):
-    def __init__(self, tokenizer, calib_cfg, batch_process=None):
-        # calib_cfg
-        logger.info(f'calib_cfg : {calib_cfg}')
+    def __init__(self, tokenizer, data_config, batch_process=None):
+        # data_config
+        logger.info(f'data_config : {data_config}')
         self.tokenizer = tokenizer
         self.batch_process = batch_process
         # calib dataset config
-        self.calib_dataset_name  = calib_cfg['dataset']['name']
-        self.calib_subset_name   = calib_cfg['dataset'].get('subset_name', None)
-        self.calib_data_files    = calib_cfg['dataset'].get('data_files', None)
-        self.calib_split         = calib_cfg['dataset'].get('split', 'train')
-        self.calib_download      = calib_cfg['dataset'].get('download', True)
-        self.calib_download_mode = calib_cfg['dataset'].get('download_mode', 'reuse_dataset_if_exists')
-        self.calib_cache_dir     = calib_cfg['dataset'].get('cache_dir', None)
-        self.calib_revision      = calib_cfg['dataset'].get('revision', None)
-        self.calib_key           = calib_cfg['dataset'].get('hf_context_key', 'text')
-        self.calib_dataset_path  = calib_cfg['dataset'].get('path', None)
+        self.calib_dataset_name  = data_config['dataset']['name']
+        self.calib_subset_name   = data_config['dataset'].get('subset_name', None)
+        self.calib_data_files    = data_config['dataset'].get('data_files', None)
+        self.calib_split         = data_config['dataset'].get('split', 'test')
+        self.calib_download      = data_config['dataset'].get('download', True)
+        self.calib_download_mode = data_config['dataset'].get('download_mode', 'reuse_dataset_if_exists')
+        self.calib_cache_dir     = data_config['dataset'].get('cache_dir', None)
+        self.calib_revision      = data_config['dataset'].get('revision', None)
+        self.calib_key           = data_config['dataset'].get('hf_context_key', 'text')
+        self.calib_dataset_path  = data_config['dataset'].get('path', None)
         assert self.calib_dataset_path is not None or self.calib_download == True
         
         # calib processing config
-        self.padding             = calib_cfg['processing'].get('padding', False)
-        self.apply_chat_template = calib_cfg['processing'].get('apply_chat_template', False)
-        self.n_samples           = calib_cfg['processing'].get('n_samples', None)
-        self.calib_bs            = calib_cfg['processing']['bs']
-        self.seq_len             = calib_cfg['processing'].get('seq_len', None)
-        self.preproc             = calib_cfg['processing'].get('preproc', False)
-        self.seed                = calib_cfg['processing']['seed']
+        self.padding             = data_config['processing'].get('padding', False)
+        self.apply_chat_template = data_config['processing'].get('apply_chat_template', False)
+        self.n_samples           = data_config['processing'].get('n_samples', None)
+        self.calib_bs            = data_config['processing'].get('bs', 1)
+        self.seq_len             = data_config['processing'].get('seq_len', None)
+        self.preproc             = data_config['processing'].get('preproc', False)
+        self.seed                = data_config['processing'].get('seed', 0)
         
         self.build_calib_dataset()
 
@@ -58,6 +58,23 @@ class BaseDataset(metaclass=ABCMeta):
             else:
                 self.calib_dataset = load_from_disk(self.calib_dataset_path)
 
+    def get_input_ids(self):
+        if self.calib_dataset_name == 'custom_txt':
+            txts = self.batch_process(
+                samples,
+                calib_or_eval='calib',
+                apply_chat_template=self.apply_chat_template,
+                return_inputs=False,
+            )
+        else:
+            txts = self.calib_dataset
+        preproc = PREPROC_REGISTRY[self.preproc]
+        preproc_param_dict = {
+            'calib_dataset': txts,
+            'tokenizer': self.tokenizer,
+        }
+        return preproc(**preproc_param_dict)
+    
     def get_calib_model_inputs(self, samples):
         if not self.padding:
             if self.calib_dataset_name == 'custom_txt':

@@ -33,15 +33,15 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
             )
             self.optimize_block(self.blocks[self.block_idx])
 
-    def cache_input_hook(self, m, x, y, name, feat_dict):
-        inputs = [i.detach().cpu() for i in x]
-        if len(inputs) == 1:
-            inp = inputs[0]
+    def cache_input_hook(self, module, inputs, outputs, name, feat_dict):
+        module_inputs = [i.detach().cpu() for i in inputs]
+        if len(module_inputs) == 1:
+            inp = module_inputs[0]
             if len(inp.shape) == 2:
                 inp = inp.unsqueeze(0)
             feat_dict[name].append(inp)
         else:
-            feat_dict[name].append(tuple(inputs))
+            feat_dict[name].append(tuple(module_inputs))
 
     @abstractmethod
     def optimize_block(self, block):

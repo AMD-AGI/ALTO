@@ -18,38 +18,26 @@ def seed_all(seed):
     torch.backends.cudnn.deterministic = True
 
 
-def check_config(config):
-    if config.get('sparse', False):
-        logger.info('Use sparsification method')
-    else:
+def to_device(x, device, *, non_blocking: bool = False):
+    if torch.is_tensor(x):
+        return x.to(device, non_blocking=non_blocking)
+    if isinstance(x, torch.nn.Module):
+        return x.to(device)
+    if isinstance(x, dict):
+        return {k: to_device(v, device, non_blocking=non_blocking) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return type(x)(to_device(v, device, non_blocking=non_blocking) for v in x)
+    return x
 
-        def check_weight_setting(weight_setting):
-            if weight_setting.granularity == 'per_group':
-                assert weight_setting.group_size > 0
-            elif weight_setting.granularity == 'per_head':
-                assert weight_setting.head_num > 0
 
-        for _, modality_config in config.quant.items():
-            if not isinstance(modality_config, dict) or not modality_config.get('weight', False):
-                continue
-            if modality_config.weight.get('granularity', False):
-                weight_setting = modality_config.weight
-                check_weight_setting(weight_setting)
-            if modality_config.weight.get('w_1', False):
-                weight_setting = modality_config.weight.w_1
-                check_weight_setting(weight_setting)
-            if modality_config.weight.get('w_2', False):
-                weight_setting = modality_config.weight.w_2
-                check_weight_setting(weight_setting)
-    if config.model.get('tokenizer_mode', False):
-        assert (
-            config.model.tokenizer_mode == 'slow'
-            or config.model.tokenizer_mode == 'fast'
-        ), 'Tokenizer_mode should be slow or fast.'
-        logger.info(f'Tokenizer_mode is set to {config.model.tokenizer_mode}.')
-    else:
-        config.model.tokenizer_mode = 'slow'
-        logger.info('Tokenizer_mode is set to slow.')
+def module_device(m):
+    p = next(m.parameters(), None)
+    if p is not None:
+        return p.device
+    b = next(m.buffers(), None)
+    if b is not None:
+        return b.device
+    raise RuntimeError(f'{m.__class__.__name__} has no parameters or buffers; cannot infer device.')
 
 
 def mkdirs(path):
@@ -75,23 +63,3 @@ def print_important_package_version():
     logger.info(f"tokenizers : {version('tokenizers')}")
     logger.info(f"huggingface-hub : {version('huggingface-hub')}")
     logger.info(f"datasets : {version('datasets')}")
-
-
-def get_modality(config):
-    modalities = []
-    modality_configs = []
-    compression_config = config.quant if 'quant' in config else config.sparse
-    for modality in ['vision', 'language',]:
-        if modality in compression_config:
-            compression_config[modality].modality = modality
-            modalities.append(modality)
-            modality_configs.append(compression_config[modality])
-    if not modalities:
-        compression_config.modality = 'language'
-        return ['language'], [compression_config]
-    return modalities, modality_configs
-
-
-def deploy_all_modality(blockwise_opts, quant_format):
-    for blockwise_opt in blockwise_opts:
-        blockwise_opt.deploy(quant_format)

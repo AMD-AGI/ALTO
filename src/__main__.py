@@ -12,13 +12,11 @@ from easydict import EasyDict
 from loguru import logger
 from torch.distributed import destroy_process_group, init_process_group
 
-from src.optimization.quantization import *
-from src.optimization.sparsification import *
-from src.data.base_dataset import BaseDataset
 from src.models import *
-from src.utils.utils import seed_all, mkdirs
-from src.utils.registry_factory import ALGO_REGISTRY, MODEL_REGISTRY
+from src.optimization import *
+from src.data import BaseDataset
 from src.eval import calc_evaluate
+from src.utils import seed_all, mkdirs, ALGO_REGISTRY, MODEL_REGISTRY
 
 
 def main(config):
@@ -30,7 +28,7 @@ def main(config):
 
     calc_evaluate(model, config, 'pretrained')
 
-    for optimization_type, optimization_config in config["optimization"].items():
+    for optimization_type, optimization_config in config['optimization'].items():
         if not config.get('calib', False):
             blockwise_optimizer = ALGO_REGISTRY[config['optimization'][optimization_type]['method']](
                 model,

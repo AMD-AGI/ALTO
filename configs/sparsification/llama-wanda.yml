@@ -19,7 +19,7 @@ calib:
     revision: 607bd4c8450a42878aa9ddc051a65a055450ef87
     hf_context_key: text
   processing:
-    n_samples: 128
+    n_samples: 2
     bs: 1
     seq_len: 4096
     preproc: calib_truncated_long_text_random
@@ -72,7 +72,7 @@ calib:
 #     num_fewshots: [0, 0]
 #     batch_size: 1
 
-#   eval_checkpoints: [pretrained, transformed]
+  eval_checkpoints: [pretrained, transformed]
 
 optimization:
   sparse:
@@ -81,7 +81,7 @@ optimization:
       sparsity: 0.5
       N: 2
       M: 4
-    sparsity_out: True
+    error_accumulation: True
 
 save:
   save_trans: False

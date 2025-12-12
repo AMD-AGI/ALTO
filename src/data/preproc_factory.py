@@ -4,7 +4,7 @@ import random
 
 import torch
 
-from src.utils.registry_factory import PREPROC_REGISTRY
+from src.utils import PREPROC_REGISTRY
 
 
 @PREPROC_REGISTRY

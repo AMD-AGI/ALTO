@@ -32,10 +32,10 @@ class BaseDataset(metaclass=ABCMeta):
         
         # calib processing config
         self.apply_chat_template = data_config['processing'].get('apply_chat_template', False)
-        self.n_samples           = data_config['processing'].get('n_samples', None)
+        self.n_samples           = data_config['processing'].get('n_samples', 1)
         self.calib_bs            = data_config['processing'].get('bs', 1)
-        self.seq_len             = data_config['processing'].get('seq_len', None)
-        self.preproc             = data_config['processing'].get('preproc', False)
+        self.seq_len             = data_config['processing'].get('seq_len', 1024)
+        self.preproc             = data_config['processing'].get('preproc', 'calib_truncated_jointdoc_random')
         self.preproc_kwargs      = data_config['processing'].get('preproc_kwargs', {})
         self.seed                = data_config['processing'].get('seed', 0)
         

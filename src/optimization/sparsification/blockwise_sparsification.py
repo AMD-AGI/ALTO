@@ -81,7 +81,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             gc.collect()
             torch.cuda.empty_cache()
         else:
-            self.block_transform(block)
+            self.block_transform(block, None, None)
 
     def block_transform(self, block, input_feat, block_kwargs):
         logger.info(f'Start transform the {self.block_idx+1}-th block')

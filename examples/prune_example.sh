@@ -7,7 +7,7 @@ export PYTHONPATH=$workspace:$PYTHONPATH
 
 
 task_name=phi_awq_w_a
-config=${workspace}/configs/sparsification/llama-wanda.yml
+config=${workspace}/configs/sparsification/llama-magnitude.yml
 
 
 nnodes=1
@@ -17,4 +17,4 @@ nproc_per_node=1
 torchrun \
 --nnodes $nnodes \
 --nproc_per_node $nproc_per_node \
-${workspace}/src/__main__.py --config $config | tee log.txt
+${workspace}/src/__main__.py --config $config

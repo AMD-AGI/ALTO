@@ -17,43 +17,46 @@ class BaseDataset(metaclass=ABCMeta):
         logger.info(f'data_config : {data_config}')
         self.tokenizer = tokenizer
         self.batch_process = batch_process
+        
         # calib dataset config
-        self.calib_dataset_name  = data_config['dataset']['name']
-        self.calib_subset_name   = data_config['dataset'].get('subset_name', None)
-        self.calib_data_files    = data_config['dataset'].get('data_files', None)
-        self.calib_split         = data_config['dataset'].get('split', 'test')
-        self.calib_download      = data_config['dataset'].get('download', True)
-        self.calib_download_mode = data_config['dataset'].get('download_mode', 'reuse_dataset_if_exists')
-        self.calib_cache_dir     = data_config['dataset'].get('cache_dir', None)
-        self.calib_revision      = data_config['dataset'].get('revision', None)
-        self.calib_key           = data_config['dataset'].get('hf_context_key', 'text')
-        self.calib_dataset_path  = data_config['dataset'].get('path', None)
-        assert self.calib_dataset_path is not None or self.calib_download == True
+        dataset_config     = data_config.get('dataset', {})
+        self.dataset_name  = dataset_config['name']
+        self.subset_name   = dataset_config.get('subset_name', None)
+        self.data_files    = dataset_config.get('data_files', None)
+        self.split         = dataset_config.get('split', 'test')
+        self.download      = dataset_config.get('download', True)
+        self.download_mode = dataset_config.get('download_mode', 'reuse_dataset_if_exists')
+        self.cache_dir     = dataset_config.get('cache_dir', None)
+        self.revision      = dataset_config.get('revision', None)
+        self.key           = dataset_config.get('hf_context_key', 'text')
+        self.dataset_path  = dataset_config.get('path', None)
+        assert self.dataset_path is not None or self.download == True
         
         # calib processing config
-        self.apply_chat_template = data_config['processing'].get('apply_chat_template', False)
-        self.n_samples           = data_config['processing'].get('n_samples', 1)
-        self.calib_bs            = data_config['processing'].get('bs', 1)
-        self.seq_len             = data_config['processing'].get('seq_len', 1024)
-        self.preproc             = data_config['processing'].get('preproc', 'calib_truncated_jointdoc_random')
-        self.preproc_kwargs      = data_config['processing'].get('preproc_kwargs', {})
-        self.seed                = data_config['processing'].get('seed', 0)
+        processing_config        = data_config.get('processing', {})
+        self.apply_chat_template = processing_config.get('apply_chat_template', False)
+        self.n_samples           = processing_config.get('n_samples', 1)
+        self.calib_bs            = processing_config.get('bs', 1)
+        self.seq_len             = processing_config.get('seq_len', 1024)
+        self.preproc             = processing_config.get('preproc', 'calib_truncated_jointdoc_random')
+        self.preproc_kwargs      = processing_config.get('preproc_kwargs', {})
+        self.seed                = processing_config.get('seed', 0)
         
         self.build_calib_dataset()
 
     def build_calib_dataset(self):
-        if self.calib_download:
+        if self.download:
             self.calib_dataset = load_dataset(
-                path=self.calib_dataset_name,
-                name=self.calib_subset_name,
-                data_files=self.calib_data_files,
-                split=self.calib_split,
-                cache_dir=self.calib_cache_dir,
-                download_mode=self.calib_download_mode,
-                revision=self.calib_revision
+                path=self.dataset_name,
+                name=self.subset_name,
+                data_files=self.data_files,
+                split=self.split,
+                cache_dir=self.cache_dir,
+                download_mode=self.download_mode,
+                revision=self.revision
             )
         else:
-            self.calib_dataset = load_from_disk(self.calib_dataset_path)
+            self.calib_dataset = load_from_disk(self.dataset_path)
 
     def get_input_ids(self):
         txts = self.calib_dataset
@@ -63,7 +66,7 @@ class BaseDataset(metaclass=ABCMeta):
             'tokenizer': self.tokenizer,
             'n_samples': self.n_samples,
             'seq_len': self.seq_len,
-            'hf_context_key': self.calib_key
+            'hf_context_key': self.key
         }
         return preproc(**preproc_param_dict, **self.preproc_kwargs)
     

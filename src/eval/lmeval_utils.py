@@ -11,14 +11,13 @@ from transformers import StoppingCriteria, StoppingCriteriaList
 
 
 class EvalModel(TemplateLM):
-    def __init__(self, model, batch_size=1, device="cuda", **kwargs):
+    def __init__(self, model, batch_size=1, **kwargs):
         super().__init__()
         self.batch_size = batch_size
-        self.model = model.model.to(device)
+        self.model = model.model
         self.dtype = model.torch_dtype
         self.tokenizer = model.tokenizer
-        self.device_map = model.device_map
-        self.device = device
+        self.device = self.model.get_input_embeddings().weight.device
 
     def tok_encode(self, string: str, **kwargs):
         return self.tokenizer.encode(string, add_special_tokens=False, **kwargs)
@@ -30,12 +29,12 @@ class EvalModel(TemplateLM):
         results = []
         for (context, continuation), context_enc, continuation_enc in tqdm(requests, disable=disable_tqdm):
             input_ids = torch.tensor([context_enc + continuation_enc]).to(self.device)
-            target_ids = torch.tensor([continuation_enc]).to(self.device)
+            target_ids = torch.tensor([continuation_enc])
             with torch.no_grad():
                 outputs = self.model(input_ids=input_ids)
                 logits = outputs.logits[:, len(context_enc)-1:-1, :]
                 log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-                selected_log_probs = log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)
+                selected_log_probs = log_probs.gather(-1, target_ids.to(outputs.logits.device).unsqueeze(-1)).squeeze(-1)
                 total_log_prob = selected_log_probs.sum().item()
             results.append((total_log_prob, False))
         return results
@@ -79,7 +78,7 @@ class EvalModel(TemplateLM):
                 if t_end < t_start:
                     continue
 
-                positions = torch.arange(t_start, t_end + 1, device=self.device)
+                positions = torch.arange(t_start, t_end + 1, device=log_probs.device)
                 selected_log_probs = log_probs[:, positions, :].gather(
                     -1, labels[:, positions].unsqueeze(-1)
                 ).squeeze(-1) 

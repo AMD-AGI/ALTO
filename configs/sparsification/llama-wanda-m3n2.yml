@@ -6,6 +6,25 @@ model:
   path: /group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B
   torch_dtype: auto
 
+calib:
+  dataset:
+    name: allenai/c4
+    subset_name: default
+    data_files:
+      train: "en/c4-train.00000-of-01024.json.gz"
+    split: train
+    download: True
+    download_mode: reuse_dataset_if_exists
+    cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/c4
+    revision: 607bd4c8450a42878aa9ddc051a65a055450ef87
+    hf_context_key: text
+  processing:
+    n_samples: 32
+    bs: 1
+    seq_len: 4096
+    preproc: calib_truncated_long_text_random
+    seed: *seed
+
 eval:
   eval_perplexity:
     data_configs:
@@ -28,13 +47,12 @@ eval:
 
 optimization:
   sparse:
-    method: Magnitude
+    method: Wanda
     weight:
-      sparsity: 0.5
-      block_sparsity:
-        block_width: 8
-        block_height: 8
-        saliency_metric: absmean
+      sparsity: 0.33
+      N: 2
+      M: 3
+    error_accumulation: True
 
 save:
   save_trans: False

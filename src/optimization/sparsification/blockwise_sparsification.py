@@ -16,7 +16,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
         self.sparsity_config = self.optimization_config
         self.error_accumulation = self.sparsity_config.get('error_accumulation', False)
         logger.info(f'use error_accumulation {self.error_accumulation}')
-        self.W_mask = None
+        self.W_mask = {}
         self.sparsity = self.sparsity_config['weight']['sparsity']
         self.N = self.sparsity_config['weight'].get('N', -1)
         self.M = self.sparsity_config['weight'].get('M', -1)
@@ -33,6 +33,10 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             assert isinstance(self.block_sparsity_config, dict) and \
                 {'block_height', 'block_width'} <= self.block_sparsity_config.keys(), \
                 'block_sparsity must be a dict with block_height and block_width.'
+            self.block_height = self.block_sparsity_config.get('block_height', 1)
+            self.block_width = self.block_sparsity_config.get('block_width', 1)
+            self.block_saliency_metric = self.block_sparsity_config.get('block_saliency_metric', 'absmean')
+            assert self.block_saliency_metric in ('absmean', 'absmax')
 
 
     def block_forward(self, block, input_data=None):

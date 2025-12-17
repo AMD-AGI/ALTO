@@ -43,6 +43,7 @@ eval:
           preproc_kwargs:
             sep: '\n\n'
     eval_type: [prefill]
+    offload: True
   eval_checkpoints: [pretrained, transformed]
 
 optimization:

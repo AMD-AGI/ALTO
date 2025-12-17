@@ -42,6 +42,7 @@ def main(config):
                 model.get_tokenizer(), config.calib, model.batch_process
             )
             calib_data = dataset.get_calib_dataset()
+            import pdb; pdb.set_trace()
             model.collect_first_block_input(calib_data)
             del calib_data
             gc.collect()

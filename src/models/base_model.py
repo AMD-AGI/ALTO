@@ -74,6 +74,14 @@ class BaseModel(metaclass=ABCMeta):
         pass
 
     @abstractmethod
+    def get_layers_before_blocks(self):
+        pass
+
+    @abstractmethod
+    def get_layers_after_blocks(self):
+        pass
+
+    @abstractmethod
     def get_subsets_in_block(self, block):
         pass
 

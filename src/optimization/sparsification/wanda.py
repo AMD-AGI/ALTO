@@ -10,8 +10,8 @@ from .blockwise_sparsification import BlockwiseSparsification
 
 @ALGO_REGISTRY
 class Wanda(BlockwiseSparsification):
-    def __init__(self, model, sparsity_config, input):
-        super().__init__(model, sparsity_config, input)
+    def __init__(self, model, sparsity_config, global_config, input):
+        super().__init__(model, sparsity_config, global_config, input)
 
     @torch.no_grad()
     def get_row_scale(self, layer, act, scaler_row):

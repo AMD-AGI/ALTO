@@ -1,5 +1,6 @@
 import functools
 import gc
+import os
 from collections import defaultdict
 
 import torch
@@ -11,8 +12,8 @@ from ..blockwise_optimization import BlockwiseOptimizer
 
 
 class BlockwiseSparsification(BlockwiseOptimizer):
-    def __init__(self, model, sparsity_config, input):
-        super().__init__(model, sparsity_config, input)
+    def __init__(self, model, sparsity_config, global_config, input):
+        super().__init__(model, sparsity_config, global_config, input)
         self.sparsity_config = self.optimization_config
         self.error_accumulation = self.sparsity_config.get('error_accumulation', False)
         logger.info(f'use error_accumulation {self.error_accumulation}')
@@ -106,3 +107,31 @@ class BlockwiseSparsification(BlockwiseOptimizer):
                 subset_kwargs
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')
+
+    def save_optimization_metadata(self):
+        sparse_mask_save_dir = self.global_config.save.get('save_optimization_metadata_path', None)
+        if sparse_mask_save_dir:
+            if self.optimized:
+                os.makedirs(sparse_mask_save_dir, exist_ok=False)
+                torch.save(
+                    {k: v.detach().cpu() for k, v in self.W_mask.items()},
+                    os.path.join(sparse_mask_save_dir, "sparse_mask.pt")
+                )
+                logger.info(f'Sparse mask saved to {sparse_mask_save_dir}.')
+            else:
+                logger.warning('Please optimize your model first.')
+        else:
+            logger.warning('Optimization metadata did not saved.')
+
+    def save_transformed_model(self):
+        transformed_model_save_dir = self.global_config.save.get('save_transformed_path', None)
+        if transformed_model_save_dir:
+            if self.optimized:
+                os.makedirs(transformed_model_save_dir, exist_ok=False)
+                self.model.model.save_pretrained(transformed_model_save_dir)
+                self.model.tokenizer.save_pretrained(transformed_model_save_dir)
+                logger.info(f"Transformed model & tokenizer saved to {transformed_model_save_dir}.")
+            else:
+                logger.warning('Please optimize your model first.')
+        else:
+            logger.warning('Transformed model did not saved.')

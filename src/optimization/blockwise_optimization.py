@@ -5,14 +5,16 @@ from loguru import logger
 
 
 class BlockwiseOptimizer(metaclass=ABCMeta):
-    def __init__(self, model, optimization_config, input):
+    def __init__(self, model, optimization_config, global_config, input):
         self.model = model
         self.blocks = model.get_blocks()
         self.optimization_config = optimization_config
+        self.global_config = global_config
         self.input = input
         self.data_free = False if self.input else True
         self.block_idx = None
         self.num_blocks = len(self.blocks)
+        self.optimized = False
         if self.input:
             for i in range(len(input['kwargs'])):
                 if 'use_cache' in input['kwargs'][i]:
@@ -32,6 +34,7 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
                 f'\nblock: {self.blocks[self.block_idx]}'
             )
             self.optimize_block(self.blocks[self.block_idx])
+        self.optimized = True
 
     def cache_input_hook(self, module, inputs, outputs, name, feat_dict):
         module_inputs = [i.detach().cpu() for i in inputs]
@@ -45,6 +48,15 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
 
     @abstractmethod
     def optimize_block(self, block):
+        pass
+
+    def save_optimization_metadata(self):
+        pass
+
+    def save_optimized_model(self):
+        pass
+
+    def save_transformed_model(self):
         pass
 
     def layer_init(self, layer):

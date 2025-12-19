@@ -46,7 +46,7 @@ def prefill_perplexity_offload(model, testenc, seq_len, bs, device="cuda"):
         nlls.append(neg_log_likelihood)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * seq_len))
     
-    testenc = to_device(testenc.input_ids, 'cpu')
+    testenc = to_device(testenc, 'cpu')
     torch.cuda.empty_cache()
     
     return ppl.item()

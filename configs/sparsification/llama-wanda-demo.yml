@@ -56,5 +56,6 @@ optimization:
     error_accumulation: True
 
 save:
-  save_trans: False
-  save_path: /tmp
+  save_optimization_metadata_path: /group/ossdphi_algo_scratch_13/guanchen/AMD-Model-Optimizer/save_wanda/masks
+  save_transformed_path: /group/ossdphi_algo_scratch_13/guanchen/AMD-Model-Optimizer/save_wanda/hf
+  save_optimized_path: /group/ossdphi_algo_scratch_13/guanchen/AMD-Model-Optimizer/save_wanda/compressed

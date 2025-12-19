@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Copyright (c) Advanced Micro Devices, Inc.
 # All rights reserved.
 
 # This source code is licensed under the BSD-style license found in the

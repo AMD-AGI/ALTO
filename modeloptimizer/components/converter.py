@@ -36,7 +36,6 @@ def replace_to_light(
     if original_type in mapping.keys():
         lmodule = new_lightmodule(original_type, mapping[original_type], model,
                                   name, config)
-        print(name, type(lmodule))
         return lmodule
     for n, mod in model.named_children():
         model.add_module(

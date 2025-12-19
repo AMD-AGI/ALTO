@@ -57,6 +57,12 @@ scale_int_bit = 16
 block_size = 128
 dynamic_mode = true
 
+[quantization.layer_config.output.input]
+quantizer = "origin"
+
+[quantization.layer_config.output.weight]
+quantizer = "origin"
+
 [optimizer]
 name = "AdamW"
 lr = 8e-4

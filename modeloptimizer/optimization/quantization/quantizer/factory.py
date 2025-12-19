@@ -13,7 +13,8 @@ def get_quantizer(
 
     """
 
-    if quant_config is None or quant_config.quantizer.lower() == "origin":
+    if quant_config is None or quant_config.quantizer is None or quant_config.quantizer.lower(
+    ) == "origin":
         quantizer = HolderQuantizer()
         return quantizer
     quantizer_cls = QUANTIZERS[quant_config.quantizer]

@@ -1,5 +1,3 @@
-# NOTE: this toml config is a preset for 64 A100 GPUs.
-
 [job]
 dump_folder = "./outputs"
 description = "Instella 3B training"
@@ -93,4 +91,6 @@ mode = "none"
 enable = true
 dataset = "wikitext_test"
 freq = 10
+local_batch_size = 8
+seq_len = 2048
 steps = -1

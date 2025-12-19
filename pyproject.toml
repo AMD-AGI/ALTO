@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "ModelOptimizer"
+description = "AMD AIG-Models Research toolkit"
+version = "0.0.0"
+homepage = "https://github.com/AMD-AGI/ModelOptimizer"
+authors = [
+    "Guanchen Li <GuanChen.Li@amd.com>",
+    "Han Wang <Han.Wang@amd.com>",
+    "Yixing Xu <Yixing.Xu@amd.com>",
+    "Xuanwu Yin <Xuanwu.Yin@amd.com>",
+    "Dong Li <d.li@amd.com>",
+]
+license = "BSD-3"
+readme = "README.md"
+packages = [{ include = "modeloptimizer" }]
+include = [
+    { path = "README.md", format = [
+        "sdist",
+        "wheel",
+    ] },
+    { path = "version.txt", format = [
+        "sdist",
+        "wheel",
+    ] },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.9.0"
+torch = ">=2.9.0"
+safetensors = "*"
+yapf = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
+
+[tool.poetry-dynamic-versioning]
+enable = true
+[tool.poetry-dynamic-versioning.from-file]
+source = "version.txt"

@@ -1,0 +1,3 @@
+[submodule "3rdparty/torchtitan"]
+	path = 3rdparty/torchtitan
+	url = https://github.com/AMD-AGI/torchtitan-fa-fp8.git

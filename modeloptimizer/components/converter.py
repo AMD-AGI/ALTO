@@ -24,16 +24,11 @@ from modeloptimizer.config import QuantConfig
 
 
 class ModelOptConverter(QuantizationConverter):
-    """Converts the linear layers of `model` to `MXLinear`."""
-
-    filter_fqns: List[str]
-    mx_config: Any  # MXLinearConfig type when imported
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         super().__init__(job_config, parallel_dims)
 
         self.quant_config: QuantConfig = job_config.quantization
-        self.mxfp4_recipe = None
 
         # TODO: set gmm alignment to quantization blocksize
         # set_token_group_alignment_size_m(ALIGN_SIZE_M)

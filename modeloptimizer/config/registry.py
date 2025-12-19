@@ -3,7 +3,7 @@ import functools
 LAYER_MAPPINGS = {}
 MODULE_QUANT_DEFAULTS = {}
 QUANTIZERS = {}
-OPTIMIZERS = {}
+OBSERVERS = {}
 
 
 def register_layer_mapping(old_layer):
@@ -29,9 +29,9 @@ def register_quantizers(cls):
     return cls
 
 
-def register_optimizers(cls):
+def register_observers(cls):
     cls_name = cls.__name__
-    if cls_name in OPTIMIZERS:
+    if cls_name in OBSERVERS:
         raise RuntimeError(f'Class {cls} has been registered already.')
-    OPTIMIZERS[cls_name] = cls
+    OBSERVERS[cls_name] = cls
     return cls

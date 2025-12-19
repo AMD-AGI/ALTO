@@ -7,50 +7,71 @@ from torch import Tensor
 from .registry import MODULE_QUANT_DEFAULTS
 
 
+RoundModes = Literal["EVEN", "AWAY", "CEIL", "INF", "TRUNC", "FLOOR",
+                     "STOCHASTIC", "ADAROUND"]
+Granularities = Literal["per-tensor", "per-channel", "per-block"]
+ScaleTypes = Literal["fp32", "PoT"]
+BiasModes = Literal["ieee_wo_inf_and_nan"]
+Quantizers = Literal["origin", "INTQuantizer", "WeightINTQuantizer",
+                     "InputINTQuantizer", "OCPMXFPQuantizer"]
+Observers = Literal["MinMax", "MSE", "Percentile"]
+
+
 @dataclass
-class QuantConfig:
-    global_config: "ModuleQuantConfig"
-    layer_config: dict[str, "ModuleQuantConfig"] = field(default_factory=dict)
-    type_config: dict[str, "ModuleQuantConfig"] = field(default_factory=dict)
+class TensorQuantConfig:
+    quantizer: Optional[Quantizers] = None
+    bit: Optional[int] = None
+    bit_e: Optional[int] = None
+    round_mode: Optional[RoundModes] = None
+    bias_mode: Optional[BiasModes] = None
+    sym_mode: Optional[bool] = None
+    narrow_range: Optional[bool] = None
+    scale_PoT_round_mode: Optional[RoundModes] = None
+    use_qoperator: Optional[bool] = None
+    granularity: Optional[Granularities] = None
+    group_channel_axis: Optional[int] = None
+    group_channel_size: Optional[int] = None
+    signed_mode: Optional[bool] = None
+    scale: Optional[float | Tensor] = None
+    zero_point: Optional[int | float | Tensor] = None
+    scale_type: Optional[ScaleTypes] = None
+    scale_int_bit: Optional[int] = None
+    block_size: Optional[int] = None
+    axis: Optional[int] = None
+    group_for_group_conv: Optional[int] = None
+    dynamic_mode: Optional[bool] = None
+    observers: Optional[list[Observers]] = None
+    num_calib_samples: Optional[int] = None
+    num_calib_mse_bins: int = 256
+    calib_percentile_percentage: float = 99.99999
 
-    def __post_init__(self):
-        self.merge_module_defaults()
+    def get_not_none(self, key: str):
+        value = self.__dict__.get(key)
+        assert value is not None, f"Expecting config entry: {key}"
+        return value
 
-    def merge_module_defaults(self):
-        for module_type_name, default_config in MODULE_QUANT_DEFAULTS.items():
-            current_config = self.type_config.get(module_type_name, None)
-            if current_config is None:
-                current_config = deepcopy(self.global_config)
-            else:
-                current_config |= self.global_config
-                pass
-            self.type_config[module_type_name] = current_config | default_config
-
-    def get_layer_config(self, name: str,
-                         type_name: str) -> "ModuleQuantConfig":
-        current_config = self.layer_config.get(name, None)
-        if current_config is None:
-            self.layer_config[name] = deepcopy(self.type_config[type_name])
-        else:
-            self.layer_config[name] |= self.type_config[type_name]
-        return self.layer_config[name]
+    def __or__(self, other: "TensorQuantConfig"):
+        # merging non-None entries from other into self
+        for key, value in other.__dict__.items():
+            if value is not None:
+                if self.__dict__[key] is None:
+                    self.__dict__[key] = value
+                else:
+                    if value != self.__dict__[key]:
+                        warnings.warn(
+                            f"Conflict value ({self.__dict__[key]} vs. {value}) found for config entry `{key}`. Opt for {self.__dict__[key]}.",
+                            UserWarning)
+        return self
 
 
 @dataclass
 class ModuleQuantConfig:
-    input: Optional["TensorQuantConfig"] = None
-    inputx: Optional["TensorQuantConfig"] = None
-    inputy: Optional["TensorQuantConfig"] = None
-    weight: Optional["TensorQuantConfig"] = None
-    bias: Optional["TensorQuantConfig"] = None
-    output: Optional["TensorQuantConfig"] = None
-
-    def __post_init__(self):
-        if self.input is not None:
-            if self.inputx is None:
-                self.inputx = deepcopy(self.input)
-            if self.inputy is None:
-                self.inputy = deepcopy(self.input)
+    input: TensorQuantConfig = field(default_factory=TensorQuantConfig)
+    inputx: TensorQuantConfig = field(default_factory=TensorQuantConfig)
+    inputy: TensorQuantConfig = field(default_factory=TensorQuantConfig)
+    weight: TensorQuantConfig = field(default_factory=TensorQuantConfig)
+    bias: TensorQuantConfig = field(default_factory=TensorQuantConfig)
+    output: TensorQuantConfig = field(default_factory=TensorQuantConfig)
 
     def __or__(self, other: "ModuleQuantConfig"):
         # merge non-None entries from other into self
@@ -107,59 +128,29 @@ class ModuleQuantConfig:
             weight=TensorQuantConfig(**kwargs),
         )
 
-
-RoundModes = Literal["EVEN", "AWAY", "CEIL", "INF", "TRUNC", "FLOOR",
-                     "STOCHASTIC", "ADAROUND"]
-Granularities = Literal["per-tensor", "per-channel", "per-block"]
-ScaleTypes = Literal["fp32", "PoT"]
-BiasModes = Literal["ieee_wo_inf_and_nan"]
-Quantizers = Literal["origin", "INTQuantizer", "WeightINTQuantizer",
-                     "InputINTQuantizer", "OCPMXFPQuantizer"]
-Observers = Literal["MinMax", "MSE", "Percentile"]
-
-
 @dataclass
-class TensorQuantConfig:
-    quantizer: Optional[Quantizers] = None
-    bit: Optional[int] = None
-    bit_e: Optional[int] = None
-    round_mode: Optional[RoundModes] = None
-    bias_mode: Optional[BiasModes] = None
-    sym_mode: Optional[bool] = None
-    narrow_range: Optional[bool] = None
-    scale_PoT_round_mode: Optional[RoundModes] = None
-    use_qoperator: Optional[bool] = None
-    granularity: Optional[Granularities] = None
-    group_channel_axis: Optional[int] = None
-    group_channel_size: Optional[int] = None
-    signed_mode: Optional[bool] = None
-    scale: Optional[float | Tensor] = None
-    zero_point: Optional[int | float | Tensor] = None
-    scale_type: Optional[ScaleTypes] = None
-    scale_int_bit: Optional[int] = None
-    block_size: Optional[int] = None
-    axis: Optional[int] = None
-    group_for_group_conv: Optional[int] = None
-    dynamic_mode: Optional[bool] = None
-    observers: Optional[list[Observers]] = None
-    num_calib_samples: Optional[int] = None
-    num_calib_mse_bins: int = 256
-    calib_percentile_percentage: float = 99.99999
+class QuantConfig:
+    global_config: ModuleQuantConfig = field(default_factory=ModuleQuantConfig)
+    layer_config: dict[str, ModuleQuantConfig] = field(default_factory=dict)
+    type_config: dict[str, ModuleQuantConfig] = field(default_factory=dict)
 
-    def get_not_none(self, key: str):
-        value = self.__dict__.get(key)
-        assert value is not None, f"Expecting config entry: {key}"
-        return value
+    def __post_init__(self):
+        self.merge_module_defaults()
 
-    def __or__(self, other: "TensorQuantConfig"):
-        # merging non-None entries from other into self
-        for key, value in other.__dict__.items():
-            if value is not None:
-                if self.__dict__[key] is None:
-                    self.__dict__[key] = value
-                else:
-                    if value != self.__dict__[key]:
-                        warnings.warn(
-                            f"Conflict value ({self.__dict__[key]} vs. {value}) found for config entry `{key}`. Opt for {self.__dict__[key]}.",
-                            UserWarning)
-        return self
+    def merge_module_defaults(self):
+        for module_type_name, default_config in MODULE_QUANT_DEFAULTS.items():
+            current_config = self.type_config.get(module_type_name, None)
+            if current_config is None:
+                current_config = deepcopy(self.global_config)
+            else:
+                current_config |= self.global_config
+            self.type_config[module_type_name] = current_config | default_config
+
+    def get_layer_config(self, name: str,
+                         type_name: str) -> "ModuleQuantConfig":
+        current_config = self.layer_config.get(name, None)
+        if current_config is None:
+            self.layer_config[name] = deepcopy(self.type_config[type_name])
+        else:
+            self.layer_config[name] |= self.type_config[type_name]
+        return self.layer_config[name]

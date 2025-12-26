@@ -27,6 +27,7 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
                 self.n_samples += input['data'][i].shape[0]
 
     def optimize(self):
+        self.befor_optimize_blocks()
         for i in range(len(self.blocks)):
             self.block_idx = i
             logger.info(
@@ -34,6 +35,7 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
                 f'\nblock: {self.blocks[self.block_idx]}'
             )
             self.optimize_block(self.blocks[self.block_idx])
+        self.after_optimize_blocks()
         self.optimized = True
 
     def cache_input_hook(self, module, inputs, outputs, name, feat_dict):
@@ -48,6 +50,12 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
 
     @abstractmethod
     def optimize_block(self, block):
+        pass
+
+    def befor_optimize_blocks(self):
+        pass
+
+    def after_optimize_blocks(self):
         pass
 
     def save_optimization_metadata(self):

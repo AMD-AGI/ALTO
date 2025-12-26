@@ -48,6 +48,27 @@ class Llama(BaseModel):
 
     def has_bias(self):
         return False
+    
+    def get_query_projection_name(self):
+        return 'self_attn.q_proj'
+    
+    def get_key_projection_name(self):
+        return 'self_attn.k_proj'
+    
+    def get_value_projection_name(self):
+        return 'self_attn.v_proj'
+    
+    def get_out_projection_name(self):
+        return 'self_attn.o_proj'
+    
+    def get_up_projection_name(self):
+        return 'mlp.up_proj'
+    
+    def get_gate_projection_name(self):
+        return 'mlp.gate_proj'
+    
+    def get_down_projection_name(self):
+        return 'mlp.down_proj'
 
     def get_layernorms_in_block(self, block):
         return {

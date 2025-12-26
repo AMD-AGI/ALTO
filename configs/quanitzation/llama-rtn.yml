@@ -1,0 +1,51 @@
+base:
+  seed: &seed 42
+
+model:
+  type: Llama
+  path: /group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B
+  torch_dtype: auto
+
+eval:
+  eval_perplexity:
+    data_configs:
+      - dataset:
+          name: wikitext
+          subset_name: wikitext-2-raw-v1
+          split: test
+          download: True
+          download_mode: reuse_dataset_if_exists
+          cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/wikitext2
+          hf_context_key: text
+        processing:
+          bs: 1
+          seq_len: 2048
+          preproc: test_jointdoc
+          preproc_kwargs:
+            sep: '\n\n'
+    eval_type: [prefill]
+  eval_checkpoints: [pretrained, transformed]
+
+optimization:
+  method: Rtn
+    weight:
+        quant_type: float-quant
+        bit: e2m1
+        scale_bit: e4m3
+        symmetric: True
+        granularity: per_group
+        group_size: 16
+        global_scaling: True
+        scale_bit: auto
+    act:
+        quant_type: float-quant
+        bit: e2m1
+        scale_bit: e4m3
+        symmetric: True
+        granularity: per_group
+        group_size: 16
+        global_scaling: True
+        scale_bit: auto
+    kvcache:
+
+save:

@@ -2,7 +2,7 @@ import gc
 import torch
 from loguru import logger
 from typing import Any, Dict, Optional, Union
-from .utils import ceil_div
+from .numerical_utils import ceil_div
 
 
 class BaseQuantizer(object):

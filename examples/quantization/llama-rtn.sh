@@ -4,8 +4,8 @@ export CUDA_VISIBLE_DEVICES=1
 export PYTHONPATH=$workspace:$PYTHONPATH
 workspace=/group/ossdphi_algo_scratch_13/guanchen/AMD-Model-Optimizer
 
-task_name=llama-wanda-demo
-config=${workspace}/configs/sparsification/llama-wanda-demo.yml
+task_name=llama-rtn
+config=${workspace}/configs/quantization/llama-rtn.yml
 
 
 nnodes=1

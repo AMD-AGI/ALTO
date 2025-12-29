@@ -39,7 +39,6 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             self.block_saliency_metric = self.block_sparsity_config.get('block_saliency_metric', 'absmean')
             assert self.block_saliency_metric in ('absmean', 'absmax')
 
-
     def block_forward(self, block, input_data=None):
         output = []
         if input_data is None:
@@ -59,18 +58,8 @@ class BlockwiseSparsification(BlockwiseOptimizer):
         if not self.data_free:
             named_linears = self.model.get_block_linears(block)
             logger.info(f'named_linears: {named_linears}')
-            # {'named_linear': [batch_1, ... batch_n]}
             input_feat = defaultdict(list)
-            handles = []
-            self.block_init(block)
-            for name in named_linears:
-                handles.append(
-                    named_linears[name].register_forward_hook(
-                        functools.partial(
-                            self.cache_input_hook, name=name, feat_dict=input_feat
-                        )
-                    )
-                )
+            handles = self.register_hooks(named_linears, input_feat)
             if not self.error_accumulation:
                 self.input['data'] = self.block_forward(block)
             else:
@@ -78,7 +67,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             for h in handles:
                 h.remove()
             torch.cuda.empty_cache()
-            self.block_transform(block, input_feat, self.input['kwargs'])
+            self.optimize_block_subsets(block, input_feat, self.input['kwargs'])
             if self.error_accumulation:
                 self.input['data'] = self.block_forward(block)
             block = block.cpu()
@@ -86,9 +75,9 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             gc.collect()
             torch.cuda.empty_cache()
         else:
-            self.block_transform(block, None, None)
+            self.optimize_block_subsets(block, None, None)
 
-    def block_transform(self, block, input_feat, block_kwargs):
+    def optimize_block_subsets(self, block, input_feat, block_kwargs):
         logger.info(f'Start transform the {self.block_idx+1}-th block')
         subsets = self.model.get_subsets_in_block(block)
         for index, subset in enumerate(subsets):
@@ -98,7 +87,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             inspect_module = subset['inspect']
             inspect_has_kwargs = subset['has_kwargs']
             subset_kwargs = block_kwargs if inspect_has_kwargs else {}
-            self.subset_transform(
+            self.optimize_subset(
                 layers_dict,
                 input_feat,
                 prev_op,
@@ -107,6 +96,9 @@ class BlockwiseSparsification(BlockwiseOptimizer):
                 subset_kwargs
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')
+
+    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, subset_kwargs):
+        pass
 
     def save_optimization_metadata(self):
         sparse_mask_save_dir = self.global_config.save.get('save_optimization_metadata_path', None)

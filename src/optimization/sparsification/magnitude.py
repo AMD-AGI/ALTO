@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 from loguru import logger
 
 from src.utils import ALGO_REGISTRY
@@ -13,7 +13,7 @@ class Magnitude(BlockwiseSparsification):
         super().__init__(model, sparsity_config, global_config, input)
 
     @torch.no_grad()
-    def subset_transform(
+    def optimize_subset(
         self,
         layers_dict,
         input_feat,
@@ -22,8 +22,7 @@ class Magnitude(BlockwiseSparsification):
         inspect_module,
         subset_kwargs,
     ):
-        layers = list(layers_dict.values())
-        for layer in layers:
+        for layer_name, layer in layers_dict.items():
             W_metric = torch.abs(layer.weight.data)
             W_mask = (torch.zeros_like(W_metric) == 1)
 

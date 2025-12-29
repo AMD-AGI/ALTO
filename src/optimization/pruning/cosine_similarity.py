@@ -71,7 +71,7 @@ class CosineSimilarity(BlockwisePruning):
         return sorted(result) 
 
     @torch.no_grad()
-    def after_optimize_blocks(self):
+    def after_optimize_backbone(self):
         num_layers_to_prune = int(self.sparsity * self.total_layers)
         self.compute_bi_matrix()
         layers_to_prune = self.find_toprune_layers(num_layers_to_prune)

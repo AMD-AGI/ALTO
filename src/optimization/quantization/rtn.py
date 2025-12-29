@@ -8,21 +8,21 @@ from .blockwise_quantization import BlockwiseQuantization
 
 @ALGO_REGISTRY
 class RTN(BlockwiseQuantization):
-    def __init__(self, model, quant_config, input, padding_mask, config):
-        super().__init__(model, quant_config, input, padding_mask, config)
+    def __init__(self, model, quant_config, global_config, input):
+        super().__init__(model, quant_config, global_config, input)
 
     @torch.no_grad()
     def block_opt(self, block, *opt_kwargs):
-        if self.quant_kvcache:
-            self.register_kv_cache(block)
-        if self.act_static:
-            super().block_opt(block, *opt_kwargs)
+        super().block_opt(block, *opt_kwargs)
 
     @torch.no_grad()
     def subset_transform(
         self,
-        subset,
-        input_feat,
-        subset_kwargs,
+        layers_dict, 
+        input_feat, 
+        prev_op, 
+        input_name, 
+        inspect_module, 
+        subset_kwargs
     ):
         pass

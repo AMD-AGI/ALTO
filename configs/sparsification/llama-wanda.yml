@@ -68,8 +68,8 @@ eval:
     eval_type: [prefill]
 
   eval_downstream:
-    task_names: [arc_easy, arc_challenge, mmlu]
-    num_fewshots: [     0,             0,    5]
+    task_names: [arc_easy, arc_challenge, openbookqa]
+    num_fewshots: [     0,             0,          5]
     batch_size: 1
 
   eval_checkpoints: [pretrained, transformed]

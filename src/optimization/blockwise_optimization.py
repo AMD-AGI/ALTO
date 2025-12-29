@@ -1,6 +1,5 @@
-import os
+import functools
 from abc import ABCMeta, abstractmethod
-import torch
 from loguru import logger
 
 
@@ -27,15 +26,17 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
                 self.n_samples += input['data'][i].shape[0]
 
     def optimize(self):
-        self.befor_optimize_blocks()
+        self.befor_optimize_backbone()
         for i in range(len(self.blocks)):
             self.block_idx = i
             logger.info(
                 f'\nblock index: {self.block_idx}/{len(self.blocks)} '
                 f'\nblock: {self.blocks[self.block_idx]}'
             )
+            self.befor_optimize_block(self.blocks[self.block_idx])
             self.optimize_block(self.blocks[self.block_idx])
-        self.after_optimize_blocks()
+            self.after_optimize_block(self.blocks[self.block_idx])
+        self.after_optimize_backbone()
         self.optimized = True
 
     def cache_input_hook(self, module, inputs, outputs, name, feat_dict):
@@ -48,14 +49,33 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
         else:
             feat_dict[name].append(tuple(module_inputs))
 
+    def register_hooks(self, modules, input_feat):
+        handles = []
+        if not self.data_free:
+            for name in modules:
+                handles.append(
+                    modules[name].register_forward_hook(
+                        functools.partial(
+                            self.cache_input_hook, name=name, feat_dict=input_feat
+                        )
+                    )
+                )
+        return handles
+
     @abstractmethod
     def optimize_block(self, block):
         pass
 
-    def befor_optimize_blocks(self):
+    def befor_optimize_backbone(self):
         pass
 
-    def after_optimize_blocks(self):
+    def after_optimize_backbone(self):
+        pass
+
+    def befor_optimize_block(self, block):
+        pass
+
+    def after_optimize_block(self, block):
         pass
 
     def save_optimization_metadata(self):
@@ -65,13 +85,4 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
         pass
 
     def save_transformed_model(self):
-        pass
-
-    def layer_init(self, layer):
-        pass
-
-    def subset_init(self, subset):
-        pass
-
-    def block_init(self, block):
         pass

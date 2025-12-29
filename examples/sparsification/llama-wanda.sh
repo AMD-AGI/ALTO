@@ -5,7 +5,7 @@ export PYTHONPATH=$workspace:$PYTHONPATH
 workspace=/group/ossdphi_algo_scratch_13/guanchen/AMD-Model-Optimizer
 
 task_name=llama-wanda
-config=${workspace}/configs/pruning/llama-wanda.yml
+config=${workspace}/configs/sparsification/llama-wanda.yml
 
 
 nnodes=1

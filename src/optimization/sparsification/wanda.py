@@ -29,7 +29,7 @@ class Wanda(BlockwiseSparsification):
         return scaler_row
 
     @torch.no_grad()
-    def subset_transform(
+    def optimize_subset(
         self,
         layers_dict,
         input_feat,

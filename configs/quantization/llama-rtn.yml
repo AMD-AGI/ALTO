@@ -27,25 +27,17 @@ eval:
   eval_checkpoints: [pretrained, transformed]
 
 optimization:
-  method: Rtn
+  quantization:
+    method: RTN
     weight:
-        quant_type: float-quant
-        bit: e2m1
-        scale_bit: e4m3
-        symmetric: True
-        granularity: per_group
-        group_size: 16
-        global_scaling: True
-        scale_bit: auto
+      quant_dtype: int
+      bit: 4
+      symmetric: True
+      granularity: per_tensor
     act:
-        quant_type: float-quant
-        bit: e2m1
-        scale_bit: e4m3
-        symmetric: True
-        granularity: per_group
-        group_size: 16
-        global_scaling: True
-        scale_bit: auto
-    kvcache:
-
+      quant_dtype: int
+      bit: 4
+      symmetric: True
+      granularity: per_tensor
+        
 save:

@@ -1,11 +1,11 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=7
 export PYTHONPATH=$workspace:$PYTHONPATH
 workspace=/wekafs/guanchen/Model-Optimizer
 
-task_name=llama-wanda-demo
-config=${workspace}/configs/sparsification/llama-wanda-demo.yml
+task_name=llama-obs
+config=${workspace}/configs/pruning/llama-obs.yml
 
 
 nnodes=1

@@ -81,7 +81,6 @@ class FloatQuantizer(BaseQuantizer):
                 tensor, tensor_range, tensor.device
             )
             zeros, qmin, qmax = torch.tensor(0), self.qmin, self.qmax
-
             return tensor, scales, zeros, qmax, qmin
 
     def quant(self, tensor, scales, zeros, qmax, qmin):
@@ -99,23 +98,6 @@ class FloatQuantizer(BaseQuantizer):
         tensor = self.quant(tensor, scales, zeros, qmax, qmin)
         tensor = self.dequant(tensor, scales, zeros)
         return tensor
-
-    def fake_quant_act_static(self, act, args={}):
-        q_act = act
-        org_act_shape = q_act.shape
-        org_act_dtype = q_act.dtype
-
-        scales, zeros, qmax, qmin = (
-            args['scales'],
-            args['zeros'],
-            args['qmax'],
-            args['qmin'],
-        )
-        q_act = self.reshape_tensor(q_act)
-        q_act = self.quant_dequant(q_act, scales, zeros, qmax, qmin)
-        q_act = self.restore_tensor(q_act, org_act_shape).to(org_act_dtype)
-
-        return q_act
 
     def fake_quant_act_dynamic(self, act, args={}):
         q_act = act

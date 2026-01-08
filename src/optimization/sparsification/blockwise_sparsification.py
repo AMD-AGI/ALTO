@@ -1,6 +1,7 @@
 import functools
 import gc
 import os
+import json
 from collections import defaultdict
 
 import torch
@@ -19,10 +20,16 @@ class BlockwiseSparsification(BlockwiseOptimizer):
         logger.info(f'use error_accumulation {self.error_accumulation}')
         self.W_mask = {}
         self.sparsity = self.sparsity_config['weight']['sparsity']
+        self.sparsity_dict = None
+        sparsity_dict_path = self.sparsity_config['weight'].get('sparsity_dict_path', None)
+        if sparsity_dict_path:
+            with open(sparsity_dict_path, "r", encoding="utf-8") as f:
+                self.sparsity_dict = json.load(f)
         self.N = self.sparsity_config['weight'].get('N', -1)
         self.M = self.sparsity_config['weight'].get('M', -1)
         self.block_sparsity_config = self.sparsity_config['weight'].get('block_sparsity', False)
         if self.N > 0 or self.M > 0:
+            assert self.sparsity_dict is None and not isinstance(self.sparsity, list), 'Can not use non-uniform sparsity.'
             assert isinstance(self.N, int) and isinstance(self.M, int) and self.N > 0 and self.M > 0, \
                 'Invalid N:M sparsity: N and M must be positive integers.'
             assert self.N < self.M, 'Invalid N:M sparsity: N must be strictly less than M.'
@@ -93,11 +100,12 @@ class BlockwiseSparsification(BlockwiseOptimizer):
                 prev_op,
                 input_name,
                 inspect_module,
-                subset_kwargs
+                self.block_idx,
+                subset_kwargs,
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')
 
-    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, subset_kwargs):
+    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, block_idx, subset_kwargs):
         pass
 
     def save_optimization_metadata(self):

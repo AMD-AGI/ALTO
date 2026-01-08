@@ -1,5 +1,6 @@
 import functools
 import gc
+import json
 import os
 from collections import defaultdict
 
@@ -18,6 +19,11 @@ class BlockwisePruning(BlockwiseOptimizer):
         self.error_accumulation = self.pruning_config.get('error_accumulation', False)
         logger.info(f'use error_accumulation {self.error_accumulation}')
         self.sparsity = self.pruning_config['weight']['sparsity']
+        self.sparsity_dict = None
+        sparsity_dict_path = self.pruning_config['weight'].get('sparsity_dict_path', None)
+        if sparsity_dict_path:
+            with open(sparsity_dict_path, "r", encoding="utf-8") as f:
+                self.sparsity_dict = json.load(f)
         self.W_mask = {}
         # pruning dimensions
         self.prune_attn      = self.pruning_config['weight'].get('prune_attn', False)
@@ -80,23 +86,24 @@ class BlockwisePruning(BlockwiseOptimizer):
                 prev_op,
                 input_name,
                 inspect_module,
+                self.block_idx,
                 subset_kwargs
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')
 
-    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, subset_kwargs):
+    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, block_idx, subset_kwargs):
         pass
 
     def save_optimization_metadata(self):
-        sparse_mask_save_dir = self.global_config.save.get('save_optimization_metadata_path', None)
-        if sparse_mask_save_dir:
+        pruning_mask_save_dir = self.global_config.save.get('save_optimization_metadata_path', None)
+        if pruning_mask_save_dir:
             if self.optimized:
-                os.makedirs(sparse_mask_save_dir, exist_ok=False)
+                os.makedirs(pruning_mask_save_dir, exist_ok=False)
                 torch.save(
                     {k: v.detach().cpu() for k, v in self.W_mask.items()},
-                    os.path.join(sparse_mask_save_dir, "sparse_mask.pt")
+                    os.path.join(pruning_mask_save_dir, "pruning_mask.pt")
                 )
-                logger.info(f'Sparse mask saved to {sparse_mask_save_dir}.')
+                logger.info(f'Pruning mask saved to {pruning_mask_save_dir}.')
             else:
                 logger.warning('Please optimize your model first.')
         else:

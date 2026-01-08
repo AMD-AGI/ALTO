@@ -2,7 +2,7 @@
 
 export CUDA_VISIBLE_DEVICES=0
 export PYTHONPATH=$workspace:$PYTHONPATH
-workspace=/group/ossdphi_algo_scratch_13/guanchen/AMD-Model-Optimizer
+workspace=/wekafs/guanchen/Model-Optimizer
 
 task_name=llama-cosine-similarity
 config=${workspace}/configs/pruning/llama-cosine-similarity.yml

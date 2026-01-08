@@ -28,7 +28,6 @@ class WandaStructured(BlockwisePruning):
             if len(act.shape) == 3:
                 act = act.reshape((-1, act.shape[-1]))
             act = act.t()
-
         act = act.type(torch.float32).to(scaler_row.device)
         scaler_row += torch.norm(act, p=2, dim=1) ** 2
         return scaler_row
@@ -41,12 +40,27 @@ class WandaStructured(BlockwisePruning):
         prev_op,
         input_name,
         inspect_module,
+        block_idx,
         subset_kwargs,
     ):
-        for layer_name, layer in layers_dict.items():        
-            if layer_name not in (self.model.get_out_projection_name(), self.model.get_down_projection_name(),):
-                continue
-            else:
+        for layer_name, layer in layers_dict.items():  
+            global_layer_name = f'layers.{block_idx}.{layer_name}'
+            out_name  = self.model.get_out_projection_name()
+            down_name = self.model.get_down_projection_name()
+            allowed = (
+                (layer_name == out_name  and self.prune_attn) or
+                (layer_name == down_name and self.prune_mlp)
+            )
+
+            if allowed:
+                if self.sparsity_dict is not None:
+                    sparsity = self.sparsity_dict[global_layer_name]
+                elif isinstance(self.sparsity, list):
+                    sparsity = self.sparsity[block_idx]
+                else:
+                    sparsity = self.sparsity
+                logger.info(f"Sparsity of {layer_name} is {sparsity}.")
+
                 columns = layer.weight.data.shape[1]
                 scaler_row = torch.zeros((columns), device=layer.weight.device)
                 nsamples = 0
@@ -59,6 +73,7 @@ class WandaStructured(BlockwisePruning):
                 if layer_name == self.model.get_out_projection_name():
                     if self.prune_attn == False:
                         continue
+                    logger.info(f"precessing {layer_name} ...")
                     num_attention_heads = getattr(self.model.model.config, "num_attention_heads", None)
                     num_key_value_heads = getattr(self.model.model.config, "num_key_value_heads", None)
                     W_mask = (torch.zeros(num_attention_heads, device=layer.weight.device) == 1)
@@ -66,7 +81,7 @@ class WandaStructured(BlockwisePruning):
                     W_metric = W_metric.view(-1, num_attention_heads, hidden_dim).mean(dim=(0, 2))
                     group_size = num_attention_heads // num_key_value_heads
                     W_metric_group = W_metric.view(num_key_value_heads, group_size).mean(dim=1) 
-                    group_idx = W_metric_group.topk(k=int(self.sparsity * num_key_value_heads), largest=False).indices
+                    group_idx = W_metric_group.topk(k=int(sparsity * num_key_value_heads), largest=False).indices
                     for g in group_idx:
                         start = g * group_size
                         end = min(start + group_size, num_attention_heads)
@@ -77,10 +92,13 @@ class WandaStructured(BlockwisePruning):
                 else:
                     if self.prune_mlp == False:
                         continue
+                    logger.info(f"precessing {layer_name} ...")
                     W_mask = (torch.zeros(W_metric[1].shape, device=layer.weight.device) == 1)
                     W_metric = W_metric.mean(dim=0)
-                    idx = W_metric.topk(int(self.sparsity * W_metric.numel()), largest=False).indices                    
+                    idx = W_metric.topk(int(sparsity * W_metric.numel()), largest=False).indices                    
                     W_mask[idx] = True
                     layer.weight.data[:, idx] = 0
+            else:
+                continue
             
-            self.W_mask[layer_name] = W_mask
+            self.W_mask[global_layer_name] = W_mask

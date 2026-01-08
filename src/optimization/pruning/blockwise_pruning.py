@@ -52,7 +52,8 @@ class BlockwisePruning(BlockwiseOptimizer):
             named_linears = self.model.get_block_linears(block)
             logger.info(f'named_linears: {named_linears}')
             input_feat = defaultdict(list)
-            handles = self.register_hooks(named_linears, input_feat)
+            output_feat = defaultdict(list)
+            handles = self.register_hooks(named_linears, input_feat, output_feat)
             if not self.error_accumulation:
                 self.input['data'] = self.block_forward(block)
             else:
@@ -60,7 +61,7 @@ class BlockwisePruning(BlockwiseOptimizer):
             for h in handles:
                 h.remove()
             torch.cuda.empty_cache()
-            self.optimize_block_subsets(block, input_feat, self.input['kwargs'])
+            self.optimize_block_subsets(block, input_feat, output_feat, self.input['kwargs'])
             if self.error_accumulation:
                 self.input['data'] = self.block_forward(block)
             block = block.cpu()
@@ -70,7 +71,7 @@ class BlockwisePruning(BlockwiseOptimizer):
         else:
             self.optimize_block_subsets(block, None, None)
 
-    def optimize_block_subsets(self, block, input_feat, block_kwargs):
+    def optimize_block_subsets(self, block, input_feat, output_feat, block_kwargs):
         logger.info(f'Start transform the {self.block_idx+1}-th block')
         subsets = self.model.get_subsets_in_block(block)
         for index, subset in enumerate(subsets):
@@ -83,6 +84,7 @@ class BlockwisePruning(BlockwiseOptimizer):
             self.optimize_subset(
                 layers_dict,
                 input_feat,
+                output_feat,
                 prev_op,
                 input_name,
                 inspect_module,
@@ -91,7 +93,7 @@ class BlockwisePruning(BlockwiseOptimizer):
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')
 
-    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, block_idx, subset_kwargs):
+    def optimize_subset(self, layers_dict, input_feat, output_feat, prev_op, input_name, inspect_module, block_idx, subset_kwargs):
         pass
 
     def save_optimization_metadata(self):
@@ -123,4 +125,17 @@ class BlockwisePruning(BlockwiseOptimizer):
             logger.warning('Transformed model did not saved.')
 
     def save_optimized_model(self):
-        pass
+        if self.prune_layer:
+            optimized_model_save_dir = self.global_config.save.get('save_optimized_path', None)
+            if optimized_model_save_dir:
+                if self.optimized:
+                    os.makedirs(optimized_model_save_dir, exist_ok=False)
+                    self.model.model.save_pretrained(optimized_model_save_dir)
+                    self.model.tokenizer.save_pretrained(optimized_model_save_dir)
+                    logger.info(f"Optimized model & tokenizer saved to {optimized_model_save_dir}.")
+                else:
+                    logger.warning('Please optimize your model first.')
+            else:
+                logger.warning('Optimized model did not saved.')
+        else:
+            pass

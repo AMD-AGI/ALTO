@@ -33,6 +33,7 @@ class Wanda(BlockwiseSparsification):
         self,
         layers_dict,
         input_feat,
+        output_feat,
         prev_op,
         input_name,
         inspect_module,

@@ -39,24 +39,32 @@ class BlockwiseOptimizer(metaclass=ABCMeta):
         self.after_optimize_backbone()
         self.optimized = True
 
-    def cache_input_hook(self, module, inputs, outputs, name, feat_dict):
+    def cache_input_hook(self, module, inputs, outputs, name, input_feat_dict, output_feat_dict):
         module_inputs = [i.detach().cpu() for i in inputs]
+        module_outputs = [o.detach().cpu() for o in outputs]
         if len(module_inputs) == 1:
             inp = module_inputs[0]
+            out = module_outputs[0]
             if len(inp.shape) == 2:
                 inp = inp.unsqueeze(0)
-            feat_dict[name].append(inp)
+                out = out.unsqueeze(0)
+            input_feat_dict[name].append(inp)
+            output_feat_dict[name].append(out)
         else:
-            feat_dict[name].append(tuple(module_inputs))
+            input_feat_dict[name].append(tuple(module_inputs))
+            output_feat_dict[name].append(tuple(module_outputs))
 
-    def register_hooks(self, modules, input_feat):
+    def register_hooks(self, modules, input_feat, output_feat):
         handles = []
         if not self.data_free:
             for name in modules:
                 handles.append(
                     modules[name].register_forward_hook(
                         functools.partial(
-                            self.cache_input_hook, name=name, feat_dict=input_feat
+                            self.cache_input_hook, 
+                            name=name, 
+                            input_feat_dict=input_feat,
+                            output_feat_dict=output_feat
                         )
                     )
                 )

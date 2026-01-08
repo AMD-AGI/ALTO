@@ -66,7 +66,8 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             named_linears = self.model.get_block_linears(block)
             logger.info(f'named_linears: {named_linears}')
             input_feat = defaultdict(list)
-            handles = self.register_hooks(named_linears, input_feat)
+            output_feat = defaultdict(list)
+            handles = self.register_hooks(named_linears, input_feat, output_feat)
             if not self.error_accumulation:
                 self.input['data'] = self.block_forward(block)
             else:
@@ -74,7 +75,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             for h in handles:
                 h.remove()
             torch.cuda.empty_cache()
-            self.optimize_block_subsets(block, input_feat, self.input['kwargs'])
+            self.optimize_block_subsets(block, input_feat, output_feat, self.input['kwargs'])
             if self.error_accumulation:
                 self.input['data'] = self.block_forward(block)
             block = block.cpu()
@@ -84,7 +85,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
         else:
             self.optimize_block_subsets(block, None, None)
 
-    def optimize_block_subsets(self, block, input_feat, block_kwargs):
+    def optimize_block_subsets(self, block, input_feat, output_feat, block_kwargs):
         logger.info(f'Start transform the {self.block_idx+1}-th block')
         subsets = self.model.get_subsets_in_block(block)
         for index, subset in enumerate(subsets):
@@ -97,6 +98,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             self.optimize_subset(
                 layers_dict,
                 input_feat,
+                output_feat,
                 prev_op,
                 input_name,
                 inspect_module,
@@ -105,7 +107,7 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')
 
-    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, block_idx, subset_kwargs):
+    def optimize_subset(self, layers_dict, input_feat, output_feat, prev_op, input_name, inspect_module, block_idx, subset_kwargs):
         pass
 
     def save_optimization_metadata(self):

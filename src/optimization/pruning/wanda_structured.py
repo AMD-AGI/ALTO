@@ -90,6 +90,7 @@ class WandaStructured(BlockwisePruning):
                     idx = W_mask.nonzero(as_tuple=True)[0]
                     channels = idx[:, None] * hidden_dim + torch.arange(hidden_dim, device=idx.device)
                     layer.weight.data[:, channels.reshape(-1)] = 0
+                    W_mask = W_mask[::group_size]
                 else:
                     if self.prune_mlp == False:
                         continue

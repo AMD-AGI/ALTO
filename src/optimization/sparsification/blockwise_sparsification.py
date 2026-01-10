@@ -137,3 +137,22 @@ class BlockwiseSparsification(BlockwiseOptimizer):
                 logger.warning('Please optimize your model first.')
         else:
             logger.warning('Transformed model did not saved.')
+
+    def save_optimized_model(self):
+        optimized_model_save_dir = self.global_config.save.get('save_optimized_path', None)
+        if optimized_model_save_dir:
+            if self.optimized:
+                os.makedirs(optimized_model_save_dir, exist_ok=False)
+                self.model.tokenizer.save_pretrained(optimized_model_save_dir)
+                from llmcompressor.transformers.compression.compressed_tensors_utils import modify_save_pretrained
+                modify_save_pretrained(self.model.model) 
+                self.model.model.save_pretrained(
+                    save_directory=optimized_model_save_dir, 
+                    save_compressed=True,
+                    skip_sparsity_compression_stats=False,
+                )
+                logger.info(f"Optimized model & tokenizer saved to {optimized_model_save_dir}.")
+            else:
+                logger.warning('Please optimize your model first.')
+        else:
+            logger.warning('Optimized model did not saved.')

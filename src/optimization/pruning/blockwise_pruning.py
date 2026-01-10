@@ -3,15 +3,16 @@ import gc
 import json
 import os
 from collections import defaultdict
-
+ 
 import torch
+import torch.nn as nn
 from loguru import logger
-
+ 
 from src.utils import module_device, to_device
-
+ 
 from ..blockwise_optimization import BlockwiseOptimizer
-
-
+ 
+ 
 class BlockwisePruning(BlockwiseOptimizer):
     def __init__(self, model, pruning_config, global_config, input):
         super().__init__(model, pruning_config, global_config, input)
@@ -31,7 +32,7 @@ class BlockwisePruning(BlockwiseOptimizer):
         self.prune_layer     = self.pruning_config['weight'].get('prune_layer', False)
         self.prune_sublayer  = self.pruning_config['weight'].get('prune_sublayer', False)
         self.prune_embedding = self.pruning_config['weight'].get('prune_embedding', False)
-
+ 
     def block_forward(self, block, input_data=None):
         output = []
         if input_data is None:
@@ -45,7 +46,7 @@ class BlockwisePruning(BlockwiseOptimizer):
                 out = block(input_data[i], **self.input['kwargs'][i])[0]
                 output.append(out)
         return output
-
+ 
     def optimize_block(self, block):
         to_device(block, torch.device('cuda'))
         if not self.data_free:
@@ -70,7 +71,7 @@ class BlockwisePruning(BlockwiseOptimizer):
             torch.cuda.empty_cache()
         else:
             self.optimize_block_subsets(block, None, None)
-
+ 
     def optimize_block_subsets(self, block, input_feat, output_feat, block_kwargs):
         logger.info(f'Start transform the {self.block_idx+1}-th block')
         subsets = self.model.get_subsets_in_block(block)
@@ -92,10 +93,10 @@ class BlockwisePruning(BlockwiseOptimizer):
                 subset_kwargs
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')
-
+ 
     def optimize_subset(self, layers_dict, input_feat, output_feat, prev_op, input_name, inspect_module, block_idx, subset_kwargs):
         pass
-
+ 
     def save_optimization_metadata(self):
         pruning_mask_save_dir = self.global_config.save.get('save_optimization_metadata_path', None)
         if pruning_mask_save_dir:
@@ -110,7 +111,7 @@ class BlockwisePruning(BlockwiseOptimizer):
                 logger.warning('Please optimize your model first.')
         else:
             logger.warning('Optimization metadata did not saved.')
-
+ 
     def save_transformed_model(self):
         transformed_model_save_dir = self.global_config.save.get('save_transformed_path', None)
         if transformed_model_save_dir:
@@ -123,19 +124,103 @@ class BlockwisePruning(BlockwiseOptimizer):
                 logger.warning('Please optimize your model first.')
         else:
             logger.warning('Transformed model did not saved.')
-
+ 
     def save_optimized_model(self):
-        if self.prune_layer:
-            optimized_model_save_dir = self.global_config.save.get('save_optimized_path', None)
-            if optimized_model_save_dir:
-                if self.optimized:
-                    os.makedirs(optimized_model_save_dir, exist_ok=False)
-                    self.model.model.save_pretrained(optimized_model_save_dir)
-                    self.model.tokenizer.save_pretrained(optimized_model_save_dir)
-                    logger.info(f"Optimized model & tokenizer saved to {optimized_model_save_dir}.")
+        optimized_model_save_dir = self.global_config.save.get('save_optimized_path', None)
+        if optimized_model_save_dir:
+            if self.optimized:
+                os.makedirs(optimized_model_save_dir, exist_ok=False)
+                if self.prune_layer:
+                    logger.info(f'Transformed model is already real-optimized, please set save_transformed_path.')
+                elif self.prune_attn or self.prune_mlp:
+                    self.save_attn_mlp_pruned_model(optimized_model_save_dir)
                 else:
-                    logger.warning('Please optimize your model first.')
+                    pass # todo
+                logger.info(f"Optimized model & tokenizer saved to {optimized_model_save_dir}.")
             else:
-                logger.warning('Optimized model did not saved.')
+                logger.warning('Please optimize your model first.')
         else:
-            pass
+            logger.warning('Optimized model did not saved.')
+ 
+    @torch.no_grad()
+    def prune_linear_out(self, linear: nn.Linear, idx: torch.Tensor):
+        idx = idx.to(linear.weight.device)
+        W = linear.weight.index_select(0, idx).contiguous()
+        pruner_linear = nn.Linear(W.shape[1], W.shape[0], bias=(linear.bias is not None),
+                        device=linear.weight.device, dtype=linear.weight.dtype)
+        pruner_linear.weight.copy_(W)
+        if linear.bias is not None:
+            pruner_linear.bias.copy_(linear.bias.index_select(0, idx).contiguous())
+        return pruner_linear
+ 
+    @torch.no_grad()
+    def prune_linear_in(self, linear: nn.Linear, idx: torch.Tensor):
+        idx = idx.to(linear.weight.device)
+        W = linear.weight.index_select(1, idx).contiguous()
+        pruned_linear = nn.Linear(W.shape[1], W.shape[0], bias=(linear.bias is not None),
+                        device=linear.weight.device, dtype=linear.weight.dtype)
+        pruned_linear.weight.copy_(W)
+        if linear.bias is not None:
+            pruned_linear.bias.copy_(linear.bias)
+        return pruned_linear
+ 
+    def head_idx(head_ids, head_dim):
+        # expand head ids -> feature indices in [0, num_heads*head_dim)
+        return torch.cat([torch.arange(h * head_dim, (h + 1) * head_dim) for h in head_ids.tolist()], dim=0).long()
+ 
+    @torch.no_grad()
+    def save_attn_mlp_pruned_model(self, optimized_model_save_dir):
+        cfg = self.model.model.config
+        old_num_heads   = int(cfg.num_attention_heads)
+        old_num_kvheads = int(getattr(cfg, "num_key_value_heads", old_num_heads))
+        hidden_size     = int(cfg.hidden_size)
+        head_dim        = hidden_size // old_num_heads
+        kv_groups = old_num_heads // old_num_kvheads
+        layers = self.model.blocks
+ 
+        new_num_kvheads, new_num_heads, new_inter_dimension = None, None, None
+        for i, layer in enumerate(layers):
+            if self.prune_attn:
+                head_key = f"layers.{i}.self_attn.o_proj"
+                head_mask = self.W_mask[head_key].detach().bool().cpu()  
+                keep_kv  = (~head_mask).nonzero(as_tuple=False).flatten().long()
+                new_num_kvheads = int(keep_kv.numel())
+                new_num_heads  = int(new_num_kvheads * kv_groups)
+                
+                keep_q = torch.cat([torch.arange(j * kv_groups, (j + 1) * kv_groups) for j in keep_kv.tolist()], dim=0).long()
+                q_idx  = self.head_idx(keep_q, head_dim)  
+                kv_idx = self.head_idx(keep_kv, head_dim)
+
+                attn = layer.self_attn
+                attn.q_proj = self.prune_linear_out(attn.q_proj, q_idx)
+                attn.k_proj = self.prune_linear_out(attn.k_proj, kv_idx)
+                attn.v_proj = self.prune_linear_out(attn.v_proj, kv_idx)
+                attn.o_proj = self.prune_linear_in(attn.o_proj, q_idx)
+                if hasattr(attn, "num_heads"):            attn.num_heads = new_num_heads
+                if hasattr(attn, "num_key_value_heads"):  attn.num_key_value_heads = new_num_kvheads
+                if hasattr(attn, "num_key_value_groups"): attn.num_key_value_groups = new_num_heads // new_num_kvheads
+                if hasattr(attn, "head_dim"):             attn.head_dim = head_dim
+            
+            if self.prune_mlp:
+                mlp_key  = f"layers.{i}.mlp.down_proj"
+                mlp_mask  = self.W_mask[mlp_key].detach().bool().cpu()
+                keep_mlp = (~mlp_mask ).nonzero(as_tuple=False).flatten().long()
+                new_inter_dimension = int(keep_mlp.numel())
+ 
+                mlp = layer.mlp
+                if hasattr(mlp, "gate_proj"): mlp.gate_proj = self.prune_linear_out(mlp.gate_proj, keep_mlp)
+                if hasattr(mlp, "up_proj"):   mlp.up_proj   = self.prune_linear_out(mlp.up_proj, keep_mlp)
+                mlp.down_proj = self.prune_linear_in(mlp.down_proj, keep_mlp)
+ 
+        if self.prune_attn:
+            cfg.num_attention_heads = new_num_heads
+            if hasattr(cfg, "num_key_value_heads"):
+                cfg.num_key_value_heads = new_num_kvheads
+            setattr(cfg, "head_dim", head_dim)
+        
+        if self.prune_mlp:
+            cfg.intermediate_size = new_inter_dimension
+ 
+        os.makedirs(optimized_model_save_dir, exist_ok=False)
+        self.model.model.save_pretrained(optimized_model_save_dir)
+        self.model.tokenizer.save_pretrained(optimized_model_save_dir)

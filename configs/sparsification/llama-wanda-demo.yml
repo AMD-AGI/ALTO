@@ -51,6 +51,8 @@ optimization:
     method: Wanda
     weight:
       sparsity: 0.5
+      M: 4
+      N: 2
       # sparsity_dict_path: /wekafs/guanchen/Model-Optimizer/configs/sparsification/sparsity_dict_example.json
     error_accumulation: True
 

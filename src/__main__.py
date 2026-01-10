@@ -55,12 +55,12 @@ def main(config):
             blockwise_optimizer.optimize()
 
         dist.barrier()
+
+        calc_evaluate(model, config, 'transformed')
+        
         blockwise_optimizer.save_optimization_metadata()
         blockwise_optimizer.save_transformed_model()
         blockwise_optimizer.save_optimized_model()
-        
-
-    calc_evaluate(model, config, 'transformed')
 
     dist.barrier()
 

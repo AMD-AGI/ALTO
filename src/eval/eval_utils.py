@@ -18,7 +18,7 @@ def calc_evaluate(model, config, eval_checkpoint='pretrained'):
                     testdata = BaseDataset(model.get_tokenizer(), data_config, model.batch_process)
                     testenc = testdata.get_input_ids()
                     if eval_type == 'prefill':
-                        if get(config.eval.eval_perplexity, 'offload'):
+                        if config.eval.eval_perplexity.get('offload', False):
                             res = prefill_perplexity_offload(
                                 model, 
                                 testenc, 
@@ -36,7 +36,7 @@ def calc_evaluate(model, config, eval_checkpoint='pretrained'):
                             )
                         logger.info(f'EVAL: Prefill Perplexity on {data_config.dataset.name} is {res}')
                     elif eval_type == 'decode':
-                        if get(config.eval.eval_perplexity, 'offload'):
+                        if config.eval.eval_perplexity.get('offload', False):
                             res = decode_perplexity_offload(
                                 model, 
                                 testenc, 

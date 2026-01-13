@@ -43,20 +43,19 @@ eval:
           preproc_kwargs:
             sep: '\n\n'
     eval_type: [prefill]
-    offload: True
   eval_checkpoints: [pretrained, transformed]
 
 optimization:
-  sparse:
-    method: Wanda
+  pruning:
+    method: CosineSimilarity
     weight:
-      sparsity: 0.5
-      M: 4
-      N: 2
-      # sparsity_dict_path: /wekafs/guanchen/Model-Optimizer/configs/sparsification/sparsity_dict_example.json
-    error_accumulation: True
+      sparsity: 0.125
+      prune_attn: False
+      prune_mlp: False
+      prune_embedding: False
+      prune_layer: True
+      prune_sublayer: False
 
 save:
-  save_optimization_metadata_path: /wekafs/guanchen/Model-Optimizer/save/wanda/masks
-  save_transformed_path: /wekafs/guanchen/Model-Optimizer/save/wanda/hf
-  save_optimized_path: /wekafs/guanchen/Model-Optimizer/save/wanda/compressed
+  save_trans: False
+  save_path: /tmp

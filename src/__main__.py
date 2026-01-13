@@ -33,16 +33,15 @@ def main(config):
             blockwise_optimizer = ALGO_REGISTRY[config['optimization'][optimization_type]['method']](
                 model,
                 optimization_config,
-                input=None,
+                config,
+                None,
             )
             blockwise_optimizer.optimize()
-            dist.barrier()
         else:
             dataset = BaseDataset(
                 model.get_tokenizer(), config.calib, model.batch_process
             )
             calib_data = dataset.get_calib_dataset()
-            import pdb; pdb.set_trace()
             model.collect_first_block_input(calib_data)
             del calib_data
             gc.collect()
@@ -50,12 +49,18 @@ def main(config):
             blockwise_optimizer = ALGO_REGISTRY[config['optimization'][optimization_type]['method']](
                 model,
                 optimization_config,
-                model.get_first_block_input(),
+                config,
+                model.get_first_block_input()
             )
             blockwise_optimizer.optimize()
-            dist.barrier()
 
-    calc_evaluate(model, config, 'transformed')
+        dist.barrier()
+
+        calc_evaluate(model, config, 'transformed')
+        
+        blockwise_optimizer.save_optimization_metadata()
+        blockwise_optimizer.save_transformed_model()
+        blockwise_optimizer.save_optimized_model()
 
     dist.barrier()
 

@@ -93,6 +93,34 @@ class BaseModel(metaclass=ABCMeta):
     def has_bias(self):
         pass
 
+    @abstractmethod
+    def get_query_projection_name(self):
+        return 'q_proj'
+    
+    @abstractmethod
+    def get_key_projection_name(self):
+        return 'k_proj'
+    
+    @abstractmethod
+    def get_value_projection_name(self):
+        return 'v_proj'
+    
+    @abstractmethod
+    def get_out_projection_name(self):
+        return 'o_proj'
+    
+    @abstractmethod
+    def get_up_projection_name(self):
+        return 'up_proj'
+    
+    @abstractmethod
+    def get_gate_projection_name(self):
+        return 'gate_proj'
+    
+    @abstractmethod
+    def get_down_projection_name(self):
+        return 'down_proj'
+
     def update_key_info(self):
         self.find_blocks()
         self.find_embed_layers()

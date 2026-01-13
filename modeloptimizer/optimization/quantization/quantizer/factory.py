@@ -14,7 +14,7 @@ def get_quantizer(
     """
 
     if quant_config is None or quant_config.quantizer is None or quant_config.quantizer.lower(
-    ) == "origin":
+    ) == "none":
         quantizer = HolderQuantizer()
         return quantizer
     quantizer_cls = QUANTIZERS[quant_config.quantizer]
@@ -35,7 +35,7 @@ def QuantizerFactory(
     r"""Generate the specific quantizer with observers using the given configuration. it will return a QuantizerSolver class
 
     Args:
-        quant_mode: the name of the specific quantizer. if the value is ``origin``, it will return a HolderQuantizer which does not do any observer and Default: ``origin``, 
+        quant_mode: the name of the specific quantizer. if the value is ``none``, it will return a HolderQuantizer which does not do any observer and Default: ``none``, 
         quant_observer_mode: it is a dict which the key is quantizer and the name is corresponding observer methods. Default: ``{}``
         **kwargs: the arguments for the specific quantizer
 

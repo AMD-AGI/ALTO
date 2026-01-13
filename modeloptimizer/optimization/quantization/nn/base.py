@@ -6,9 +6,7 @@ from modeloptimizer.optimization.quantization.quantizer.factory import Quantizer
 from modeloptimizer.optimization.quantization.quantizer.int import BiasINTQuantizer
 import torch
 
-__all__ = [
-    'LCommonLayer', 'LWeightInputLayer'
-]
+__all__ = ['LCommonLayer', 'LWeightInputLayer']
 
 
 class LCommonLayer(torch.nn.Module, ABC):

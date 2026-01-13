@@ -34,8 +34,7 @@ class ObserverContainer:
     def check_support_multi_observer(self):
         is_support = True
         for observer in self.observers:
-            is_support = is_support and observer.check_support_multi_observer(
-            )
+            is_support = is_support and observer.check_support_multi_observer()
         return is_support
 
     def before_quant(self, t, quantizer):

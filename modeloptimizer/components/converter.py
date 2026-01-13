@@ -14,8 +14,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.quantization import (
-    QuantizationConverter,
-)
+    QuantizationConverter,)
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.moe.utils import set_token_group_alignment_size_m
@@ -96,7 +95,6 @@ class ModelOptConverter(QuantizationConverter):
         # set_token_group_alignment_size_m(ALIGN_SIZE_M)
         # logger.info(
         #     f"Setting token group alignment size to {ALIGN_SIZE_M}")
-
 
     def convert(self, model: nn.Module):
         replace_to_light(model, "", self.quant_config, self.mapping)

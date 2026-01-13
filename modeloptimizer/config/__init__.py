@@ -5,11 +5,12 @@ from .quantization_config import (
     ModuleQuantConfig,
     TensorQuantConfig,
 )
-
+from .sparsification_config import SparsificationConfig
 from .registry import (
     register_layer_mapping,
     register_observers,
     register_quantizers,
+    register_sparsification_methods,
 )
 
 from .global_config import feature_flags

@@ -53,10 +53,10 @@ block_size = 128
 dynamic_mode = true
 
 [quantization.layer_config.output.input]
-quantizer = "origin"
+quantizer = "none"
 
 [quantization.layer_config.output.weight]
-quantizer = "origin"
+quantizer = "none"
 
 [training]
 local_batch_size = 1

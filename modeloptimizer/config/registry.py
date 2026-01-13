@@ -4,6 +4,7 @@ LAYER_MAPPINGS = {}
 MODULE_QUANT_DEFAULTS = {}
 QUANTIZERS = {}
 OBSERVERS = {}
+SPARSIFICATION_METHODS = {}
 
 
 def register_layer_mapping(old_layer):
@@ -34,4 +35,12 @@ def register_observers(cls):
     if cls_name in OBSERVERS:
         raise RuntimeError(f'Class {cls} has been registered already.')
     OBSERVERS[cls_name] = cls
+    return cls
+
+
+def register_sparsification_methods(cls):
+    cls_name = cls.__name__
+    if cls_name in SPARSIFICATION_METHODS:
+        raise RuntimeError(f'Class {cls_name} has been registered already.')
+    SPARSIFICATION_METHODS[cls_name] = cls
     return cls

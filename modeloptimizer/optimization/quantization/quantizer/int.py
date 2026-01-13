@@ -7,7 +7,6 @@ from modeloptimizer.optimization.quantization.quantizer.base import Quantizer
 from modeloptimizer.optimization.quantization.quantizer.utils.round import get_round_func
 from modeloptimizer.optimization.quantization.quantizer.utils.shape import pad_shape, de_pad_shape
 
-
 __all__ = ['INTQuantizer', 'InputINTQuantizer', 'WeightINTQuantizer']
 
 

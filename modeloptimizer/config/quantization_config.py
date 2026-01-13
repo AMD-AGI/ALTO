@@ -6,13 +6,12 @@ from torch import Tensor
 
 from .registry import MODULE_QUANT_DEFAULTS
 
-
 RoundModes = Literal["EVEN", "AWAY", "CEIL", "INF", "TRUNC", "FLOOR",
                      "STOCHASTIC", "ADAROUND"]
 Granularities = Literal["per-tensor", "per-channel", "per-block"]
 ScaleTypes = Literal["fp32", "PoT"]
 BiasModes = Literal["ieee_wo_inf_and_nan"]
-Quantizers = Literal["origin", "INTQuantizer", "WeightINTQuantizer",
+Quantizers = Literal["none", "INTQuantizer", "WeightINTQuantizer",
                      "InputINTQuantizer", "OCPMXFPQuantizer"]
 Observers = Literal["MinMax", "MSE", "Percentile"]
 
@@ -127,6 +126,7 @@ class ModuleQuantConfig:
             input=TensorQuantConfig(**kwargs),
             weight=TensorQuantConfig(**kwargs),
         )
+
 
 @dataclass
 class QuantConfig:

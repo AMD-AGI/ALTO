@@ -14,7 +14,7 @@ set -ex
 NGPU=${NGPU:-"1"}
 export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./modeloptimizer/models/llama3/configs/debug_model.toml"}
-TRAIN_FILE=${TRAIN_FILE:-"torchtitan.train"}
+TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
 DRY_RUN=${DRY_RUN:-0}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}

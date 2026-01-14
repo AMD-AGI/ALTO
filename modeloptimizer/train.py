@@ -1,4 +1,4 @@
-from typing import Iterable
+from contextlib import contextmanager
 import torch
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.train import Trainer as TorchTitanTrainer, main as torchtitan_main
@@ -20,6 +20,17 @@ class Trainer(TorchTitanTrainer):
         logger.info(f"Sparsification config: {self.sparsification_config}")
         if self.sparsification_config.method != "none":
             self._enable_input_cache = True
+
+
+    @contextmanager
+    def pp_no_loss_function(self, pp_schedule):
+        loss_fn = pp_schedule._loss_fn
+        has_backward = pp_schedule._has_backward
+        pp_schedule._loss_fn = None
+        pp_schedule._has_backward = False
+        yield
+        pp_schedule._loss_fn = loss_fn
+        pp_schedule._has_backward = has_backward
 
     @torch.no_grad()
     def cache_input(self, input_dict: dict[str, torch.Tensor]):
@@ -73,52 +84,41 @@ class Trainer(TorchTitanTrainer):
         ) if parallel_dims.cp_enabled else None)
 
         if parallel_dims.pp_enabled:
-            # Pipeline Parallel forward / backward inside step() call
+            targets, losses = None, None
             with self.train_context(optional_context_parallel_ctx):
-                targets, losses = None, None
-                if self.pp_has_first_stage:
-                    self.pp_schedule.eval(
-                        inputs,
-                        **extra_inputs,
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        return_outputs=False,
-                    )
-                else:
-                    if self.pp_has_last_stage:
-                        pred = self.pp_schedule.eval(
+                with self.pp_no_loss_function(self.pp_schedule):
+                    if self.pp_has_first_stage:
+                        self.pp_schedule.eval(
+                            inputs,
+                            **extra_inputs,
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
-                            return_outputs=True,
                         )
                     else:
-                        self.pp_schedule.step(
+                        self.pp_schedule.eval(
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
-                            return_outputs=False,
                         )
-                        pred = None
         else:
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs,
-                                          **extra_kwargs)
+                    model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
-        return pred
+        return
 
     def post_training_tasks(self):
 
         self.block_optimization_step()
         self.clear_input_cache()
-        self.checkpointer.save(
-            self.step,
-            last_step=(self.step >= self.job_config.training.steps),
-        )
+        # TODO: save optimized model
+        # self.checkpointer.save(
+        #     self.step,
+        #     last_step=(self.step >= self.job_config.training.steps),
+        # )
         # run validation
         if (self.job_config.validation.enable and
                 self.validator.should_validate(self.step)):

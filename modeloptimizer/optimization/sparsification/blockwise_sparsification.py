@@ -49,6 +49,8 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             self.block_saliency_metric = self.sparsity_config.block_saliency_metric
 
     def get_block_linears(self, block):
+        if block is None:
+            return None
         return {
             name: m
             for name, m in block.named_modules()
@@ -111,24 +113,23 @@ class BlockwiseSparsification(BlockwiseOptimizer):
                     self.forward_step(input_dict)
 
                 # TODO: error_accumulation
-                # if not self.error_accumulation:
-                #     self.inputs['data'] = self.block_forward(block)
-                # else:
-                #     self.block_forward(block)
+
                 for h in handles:
                     h.remove()
                 with torch.no_grad():
                     self.optimize_block_subsets(block, block_idx, input_feat,
                                                 output_feat)
-                # if self.error_accumulation:
-                #     self.inputs['data'] = self.block_forward(block)
 
                 del input_feat, output_feat
+                torch.cuda.empty_cache()
+                gc.collect()
         else:
             self.optimize_block_subsets(block, block_idx, None, None)
 
     def optimize_block_subsets(self, block, block_idx: str, input_feat,
                                output_feat):
+        if block is None:
+            return
         logger.info(f'Start transform the block #{block_idx}')
         subsets = self.get_subsets_in_block(block)
         for index, subset in enumerate(subsets):
@@ -150,56 +151,3 @@ class BlockwiseSparsification(BlockwiseOptimizer):
     def optimize_subset(self, layers_dict, input_feat, output_feat, prev_op,
                         input_name, inspect_module, block_idx, subset_kwargs):
         pass
-
-    def save_optimization_metadata(self):
-        sparse_mask_save_dir = self.global_config.save.get(
-            'save_optimization_metadata_path', None)
-        if sparse_mask_save_dir:
-            if self.optimized:
-                os.makedirs(sparse_mask_save_dir, exist_ok=False)
-                torch.save({
-                    k: v.detach().cpu() for k, v in self.W_mask.items()
-                }, os.path.join(sparse_mask_save_dir, "sparse_mask.pt"))
-                logger.info(f'Sparse mask saved to {sparse_mask_save_dir}.')
-            else:
-                logger.warning('Please optimize your model first.')
-        else:
-            logger.warning('Optimization metadata did not saved.')
-
-    def save_transformed_model(self):
-        transformed_model_save_dir = self.global_config.save.get(
-            'save_transformed_path', None)
-        if transformed_model_save_dir:
-            if self.optimized:
-                os.makedirs(transformed_model_save_dir, exist_ok=False)
-                self.model.model.save_pretrained(transformed_model_save_dir)
-                self.model.tokenizer.save_pretrained(transformed_model_save_dir)
-                logger.info(
-                    f"Transformed model & tokenizer saved to {transformed_model_save_dir}."
-                )
-            else:
-                logger.warning('Please optimize your model first.')
-        else:
-            logger.warning('Transformed model did not saved.')
-
-    def save_optimized_model(self):
-        optimized_model_save_dir = self.global_config.save.get(
-            'save_optimized_path', None)
-        if optimized_model_save_dir:
-            if self.optimized:
-                os.makedirs(optimized_model_save_dir, exist_ok=False)
-                self.model.tokenizer.save_pretrained(optimized_model_save_dir)
-                from llmcompressor.transformers.compression.compressed_tensors_utils import modify_save_pretrained
-                modify_save_pretrained(self.model.model)
-                self.model.model.save_pretrained(
-                    save_directory=optimized_model_save_dir,
-                    save_compressed=True,
-                    skip_sparsity_compression_stats=False,
-                )
-                logger.info(
-                    f"Optimized model & tokenizer saved to {optimized_model_save_dir}."
-                )
-            else:
-                logger.warning('Please optimize your model first.')
-        else:
-            logger.warning('Optimized model did not saved.')

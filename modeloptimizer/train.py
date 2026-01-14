@@ -14,35 +14,40 @@ class Trainer(TorchTitanTrainer):
         super().__init__(job_config)
         # TODO: cache inputs when training
         self._input_cache = []
+        self._enable_input_cache = False
 
+        self.sparsification_config = self.job_config.sparsification
+        logger.info(f"Sparsification config: {self.sparsification_config}")
+        if self.sparsification_config.method != "none":
+            self._enable_input_cache = True
+
+    @torch.no_grad()
     def cache_input(self, input_dict: dict[str, torch.Tensor]):
-        self._input_cache.append(input_dict)
+        if self._enable_input_cache:
+            self._input_cache.append(input_dict)
 
     def clear_input_cache(self):
         self._input_cache = []
 
-    def get_input_cache_iter(self):
+    def get_input_cache(self):
         if not self._input_cache:
             data_iterator = self.batch_generator(self.dataloader)
             for _ in range(self.gradient_accumulation_steps):
                 input_dict = next(data_iterator)[0]
                 self.cache_input(input_dict)
-        return iter(self._input_cache)
+        return self._input_cache
 
     def block_optimization_step(self):
         # TODO: initialize before training loop
-        sparsification_config = self.job_config.sparsification
-        logger.info(f"Sparsification config: {sparsification_config}")
-        if sparsification_config.method != "none":
+        if self.sparsification_config.method != "none":
             sparsification_optimizer = SPARSIFICATION_METHODS[
-                self.job_config.sparsification.method](
+                self.sparsification_config.method](
                     self.job_config,
                     self.model_parts,
                     self.forward_step,
-                    self.get_input_cache_iter(),
+                    self.get_input_cache(),
                 )
             sparsification_optimizer.optimize()
-        raise NotImplementedError("Calibration is not implemented")
 
     def forward_step(self, input_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         model_parts = self.model_parts
@@ -72,7 +77,7 @@ class Trainer(TorchTitanTrainer):
             with self.train_context(optional_context_parallel_ctx):
                 targets, losses = None, None
                 if self.pp_has_first_stage:
-                    self.pp_schedule.step(
+                    self.pp_schedule.eval(
                         inputs,
                         **extra_inputs,
                         **extra_kwargs,
@@ -82,7 +87,7 @@ class Trainer(TorchTitanTrainer):
                     )
                 else:
                     if self.pp_has_last_stage:
-                        pred = self.pp_schedule.step(
+                        pred = self.pp_schedule.eval(
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
@@ -107,13 +112,18 @@ class Trainer(TorchTitanTrainer):
         return pred
 
     def post_training_tasks(self):
-        # # run validation
-        # if (self.job_config.validation.enable and
-        #         self.validator.should_validate(self.step)):
-        #     with self.loss_fn.no_rescale():
-        #         self.validator.validate(self.model_parts, self.step)
+
         self.block_optimization_step()
         self.clear_input_cache()
+        self.checkpointer.save(
+            self.step,
+            last_step=(self.step >= self.job_config.training.steps),
+        )
+        # run validation
+        if (self.job_config.validation.enable and
+                self.validator.should_validate(self.step)):
+            with self.loss_fn.no_rescale():
+                self.validator.validate(self.model_parts, self.step)
 
 
 if __name__ == "__main__":

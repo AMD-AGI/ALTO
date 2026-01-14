@@ -55,12 +55,53 @@ class BlockwiseSparsification(BlockwiseOptimizer):
             if isinstance(m, torch.nn.Linear)
         }
 
+    def get_subsets_in_block(self, block):
+        return [
+            {
+                'layers': {
+                    'attention.wq': block.attention.wq,
+                    'attention.wk': block.attention.wk,
+                    'attention.wv': block.attention.wv,
+                },
+                'prev_op': [block.attention_norm],
+                'input': ['attention.wq'],
+                'inspect': block.attention,
+            },
+            {
+                'layers': {
+                    'attention.wo': block.attention.wo
+                },
+                'prev_op': [block.attention.wv],
+                'input': ['attention.wo'],
+                'inspect': block.attention.wo,
+            },
+            {
+                'layers': {
+                    'feed_forward.w1': block.feed_forward.w1,
+                    'feed_forward.w3': block.feed_forward.w3,
+                },
+                'prev_op': [block.ffn_norm],
+                'input': ['feed_forward.w1'],
+                'inspect': block.feed_forward,
+                'is_mlp': True,
+            },
+            {
+                'layers': {
+                    'feed_forward.w2': block.feed_forward.w2
+                },
+                'prev_op': [block.feed_forward.w3],
+                'input': ['feed_forward.w2'],
+                'inspect': block.feed_forward.w2,
+                'is_mlp': True,
+            },
+        ]
+
     def optimize_block(self, block, block_idx: str):
         if not self.data_free:
             named_linears = self.get_block_linears(block)
             # logger.info(f'named_linears: {named_linears}')
 
-            for input_dict in self.data_iterator:
+            for input_dict in self.input_batch:
                 input_feat = defaultdict(list)
                 output_feat = defaultdict(list)
                 handles = self.register_hooks(named_linears, input_feat,
@@ -76,26 +117,25 @@ class BlockwiseSparsification(BlockwiseOptimizer):
                 #     self.block_forward(block)
                 for h in handles:
                     h.remove()
-                self.optimize_block_subsets(block, block_idx, input_feat,
-                                            output_feat)
+                with torch.no_grad():
+                    self.optimize_block_subsets(block, block_idx, input_feat,
+                                                output_feat)
                 # if self.error_accumulation:
                 #     self.inputs['data'] = self.block_forward(block)
 
                 del input_feat, output_feat
-                raise NotImplementedError
         else:
             self.optimize_block_subsets(block, block_idx, None, None)
 
     def optimize_block_subsets(self, block, block_idx: str, input_feat,
                                output_feat):
         logger.info(f'Start transform the block #{block_idx}')
-        subsets = self.model.get_subsets_in_block(block)
+        subsets = self.get_subsets_in_block(block)
         for index, subset in enumerate(subsets):
             prev_op = subset['prev_op']
             layers_dict = subset['layers']
             input_name = subset['input'][0]
             inspect_module = subset['inspect']
-            inspect_has_kwargs = subset['has_kwargs']
             self.optimize_subset(
                 layers_dict,
                 input_feat,

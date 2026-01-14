@@ -16,8 +16,7 @@ class BlockwiseOptimizer(ABC):
         job_config: "JobConfig",
         model_parts: list[torch.nn.Module],
         forward_step: Callable,
-        data_iterator: Optional[Iterable[tuple[dict[str, torch.Tensor],
-                                               torch.Tensor]]] = None,
+        input_batch: Optional[Iterable[dict[str, torch.Tensor]]] = None,
     ):
         # TODO: add PP support
         assert len(model_parts
@@ -25,8 +24,8 @@ class BlockwiseOptimizer(ABC):
         self.model = model_parts[0]
         self.job_config = job_config
         self.forward_step = forward_step
-        self.data_free = data_iterator is None
-        self.data_iterator = data_iterator
+        self.data_free = input_batch is None
+        self.input_batch = input_batch
 
         self.blocks = self.model.layers
         self.num_blocks = len(self.blocks)
@@ -46,12 +45,12 @@ class BlockwiseOptimizer(ABC):
 
     def cache_input_hook(self, module, inputs, outputs, name, input_feat_dict,
                          output_feat_dict):
-        module_inputs = [i.detach().cpu() for i in inputs]
-        module_outputs = [o.detach().cpu() for o in outputs]
+        module_inputs = [i.detach() for i in inputs]
+        module_outputs = [o.detach() for o in outputs]
         if len(module_inputs) == 1:
             inp = module_inputs[0]
             out = module_outputs[0]
-            if len(inp.shape) == 2:
+            if inp.dim() == 2:
                 inp = inp.unsqueeze(0)
                 out = out.unsqueeze(0)
             input_feat_dict[name].append(inp)

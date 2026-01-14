@@ -36,17 +36,17 @@ class Wanda(BlockwiseSparsification):
         input_name,
         inspect_module,
         block_idx,
-        subset_kwargs,
     ):
         for layer_name, layer in layers_dict.items():
             global_layer_name = f'layers.{block_idx}.{layer_name}'
-
-            if self.sparsity_dict is not None:
-                sparsity = self.sparsity_dict[global_layer_name]
-            elif isinstance(self.sparsity, list):
-                sparsity = self.sparsity[block_idx]
-            else:
-                sparsity = self.sparsity
+            # TODO: support layer-wise config
+            # if self.sparsity_dict is not None:
+            #     sparsity = self.sparsity_dict[global_layer_name]
+            # elif isinstance(self.sparsity, list):
+            #     sparsity = self.sparsity[block_idx]
+            # else:
+            #     sparsity = self.sparsity
+            sparsity = self.sparsity
             logger.info(f"Sparsity of {layer_name} is {sparsity}.")
 
             columns = layer.weight.data.shape[1]

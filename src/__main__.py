@@ -62,6 +62,8 @@ def main(config):
         blockwise_optimizer.save_transformed_model()
         blockwise_optimizer.save_optimized_model()
 
+        calc_evaluate(model, config, 'optimized')
+
     dist.barrier()
 
 

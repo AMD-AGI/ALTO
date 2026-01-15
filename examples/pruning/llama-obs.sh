@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=0
 export PYTHONPATH=$workspace:$PYTHONPATH
 workspace=/wekafs/guanchen/Model-Optimizer
 

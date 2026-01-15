@@ -164,7 +164,7 @@ class BlockwisePruning(BlockwiseOptimizer):
             pruned_linear.bias.copy_(linear.bias)
         return pruned_linear
  
-    def head_idx(head_ids, head_dim):
+    def head_idx(self, head_ids, head_dim):
         # expand head ids -> feature indices in [0, num_heads*head_dim)
         return torch.cat([torch.arange(h * head_dim, (h + 1) * head_dim) for h in head_ids.tolist()], dim=0).long()
  
@@ -220,7 +220,6 @@ class BlockwisePruning(BlockwiseOptimizer):
         
         if self.prune_mlp:
             cfg.intermediate_size = new_inter_dimension
- 
-        os.makedirs(optimized_model_save_dir, exist_ok=False)
+
         self.model.model.save_pretrained(optimized_model_save_dir)
         self.model.tokenizer.save_pretrained(optimized_model_save_dir)

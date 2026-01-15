@@ -43,14 +43,13 @@ eval:
           preproc_kwargs:
             sep: '\n\n'
     eval_type: [prefill]
-  eval_checkpoints: [pretrained, transformed]
+  eval_checkpoints: [pretrained, transformed, optimized]
 
 optimization:
   pruning:
     method: OBS
     weight:
       sparsity: 0.25
-      sparsity_dict_path: /wekafs/guanchen/Model-Optimizer/configs/pruning/sparsity_dict_example.json
       prune_attn: True
       prune_mlp: True
       prune_embedding: False
@@ -58,5 +57,6 @@ optimization:
       prune_sublayer: False
 
 save:
-  save_trans: False
-  save_path: /tmp
+  save_optimization_metadata_path: /wekafs/guanchen/Model-Optimizer/save/wanda-obs/masks
+  save_transformed_path: /wekafs/guanchen/Model-Optimizer/save/wanda-obs/hf
+  save_optimized_path: /wekafs/guanchen/Model-Optimizer/save/wanda-obs/compressed

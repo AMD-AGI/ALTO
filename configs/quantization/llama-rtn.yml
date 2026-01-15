@@ -3,7 +3,7 @@ base:
 
 model:
   type: Llama
-  path: /group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B
+  path: /wekafs/guanchen/modelzoo/meta-llama/Llama-3.2-1B
   torch_dtype: auto
 
 eval:
@@ -15,7 +15,7 @@ eval:
           split: test
           download: True
           download_mode: reuse_dataset_if_exists
-          cache_dir: /group/ossdphi_algo_scratch_13/guanchen/datasets/calibration/wikitext2
+          cache_dir: /wekafs/guanchen/datasets/calibration/wikitext2
           hf_context_key: text
         processing:
           bs: 1
@@ -33,11 +33,13 @@ optimization:
       quant_dtype: int
       bit: 4
       symmetric: True
-      granularity: per_tensor
+      granularity: per_group
+      group_size: 32
     act:
       quant_dtype: int
       bit: 4
       symmetric: True
-      granularity: per_tensor
+      granularity: per_group
+      group_size: 32
         
 save:

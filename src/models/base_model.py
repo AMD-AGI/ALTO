@@ -12,6 +12,7 @@ from loguru import logger
 from torch.nn import functional as F
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+from src.optimization.quantization.modules import LINEAR_TYPES
 
 class BaseModel(metaclass=ABCMeta):
     def __init__(self, config, device_map=None, use_cache=False):
@@ -276,3 +277,56 @@ class BaseModel(metaclass=ABCMeta):
 
     def get_moe_gate(self, block):
         return None
+
+    def replace_module_block(self, module, block, block_idx, params_dict):
+        self.replace_module_subset(module,
+                                    block,
+                                    {'layers': self.get_block_linears(block)},
+                                    block_idx,
+                                    params_dict)
+
+
+    def replace_module_subset(self, module, block, subset, block_idx, params_dict):
+        if module in LINEAR_TYPES:
+            layers_dict = {
+                name: layer for name, layer in subset['layers'].items()
+                if isinstance(layer, tuple(LINEAR_TYPES))
+            }
+        else:
+            layers_dict = subset['layers']
+        for name, m in layers_dict.items():
+            if hasattr(m, 'no_quant') and m.no_quant:
+                continue
+
+            M = module.new(m, **params_dict)
+
+            name_tmp = name.rsplit('.', 1)
+            if len(name_tmp) == 2:
+                parent_name = name_tmp[0]
+                parent = block.get_submodule(parent_name)
+                child_name = name_tmp[1]
+            elif len(name_tmp) == 1:
+                parent = block
+                child_name = name_tmp[0]
+
+            setattr(parent, child_name, M)
+            del M
+
+            logger.info(f'replace >>> {name} in {block_idx}-th block')
+
+        del layers_dict
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def replace_module_all(self, module, params_dict, keep_device=False):
+        for block_idx in range(len(self.blocks)):
+            logger.info(f'Replace block index: {block_idx}/{len(self.blocks)}')
+            if keep_device:
+                self.replace_module_block(module, self.blocks[block_idx], block_idx, params_dict)
+            else:
+                self.blocks[block_idx].cuda()
+                self.replace_module_block(module, self.blocks[block_idx], block_idx, params_dict)
+                self.blocks[block_idx].cpu()
+            gc.collect()
+            torch.cuda.empty_cache()
+        logger.info(f'The Replaced model: {self.model}')

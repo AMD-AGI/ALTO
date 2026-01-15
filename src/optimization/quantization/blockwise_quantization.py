@@ -6,6 +6,7 @@ import os
 import re
 from collections import defaultdict
 from functools import partial
+from types import NoneType
 
 import torch
 import torch.distributed as dist
@@ -43,7 +44,7 @@ class BlockwiseQuantization(BlockwiseOptimizer):
             self.act_quantizer = None
 
     def w_qdq(self, module, weight_quantizer):
-        return weight_quantizer.fake_quant_weight_dynamic(module.weight, None)
+        return weight_quantizer.fake_quant_weight_dynamic(module.weight)
 
     def a_qdq(self, act, module, act_quantizer, input_index=0):
         return act_quantizer.fake_quant_act_dynamic(act)
@@ -89,7 +90,8 @@ class BlockwiseQuantization(BlockwiseOptimizer):
         input_feat_modules = {k: v for d in [named_linears, extra_modules] for k, v in d.items()}
         logger.info(f'input_feat_modules: {input_feat_modules}')
         input_feat = defaultdict(list)
-        handles = self.register_hooks(input_feat_modules, input_feat)
+        output_feat = defaultdict(list)
+        handles = self.register_hooks(input_feat_modules, input_feat, output_feat)
         if not self.data_free:
             if self.error_accumulation:
                 self.block_forward(block)
@@ -98,9 +100,10 @@ class BlockwiseQuantization(BlockwiseOptimizer):
             for h in handles:
                 h.remove()
             torch.cuda.empty_cache()
-            self.optimize_block_subsets(block, input_feat, self.input['kwargs'])
+            self.optimize_block_subsets(block, input_feat, output_feat, self.input['kwargs'])
         else:
-            self.optimize_block_subsets(block, None, None)
+            self.optimize_block_subsets(block, None, None, None)
+        
         self.model.replace_module_block(
             FakeQuantLinear,
             block,
@@ -126,7 +129,7 @@ class BlockwiseQuantization(BlockwiseOptimizer):
             if getattr(m, 'calib', None) is not None:
                 m.calib = mode
     
-    def optimize_block_subsets(self, block, input_feat, block_kwargs):
+    def optimize_block_subsets(self, block, input_feat, output_feat, block_kwargs):
         logger.info(f'Start transform the {self.block_idx}-th block')
         subsets = self.model.get_subsets_in_block(block)
         self.set_non_linear_mode('fake_quant', block, False)
@@ -150,6 +153,7 @@ class BlockwiseQuantization(BlockwiseOptimizer):
             self.optimize_subset(
                 layers_dict,
                 input_feat,
+                output_feat,
                 prev_op,
                 input_name,
                 inspect_module,
@@ -158,6 +162,17 @@ class BlockwiseQuantization(BlockwiseOptimizer):
         self.set_non_linear_mode('fake_quant', block, True)
         logger.info(f'End transform the {self.block_idx}-th block')
 
-    def optimize_subset(self, layers_dict, input_feat, prev_op, input_name, inspect_module, subset_kwargs):
+    def optimize_subset(self, layers_dict, input_feat, output_feat, prev_op, input_name, inspect_module, subset_kwargs):
         pass
 
+    def after_optimize_backbone(self):
+        quant_format = 'fake_quant'
+        logger.info(f'quant_config : {self.quant_config}')
+        self.model.replace_module_all(
+            FakeQuantLinear,
+            self.get_replacement_params(mode=quant_format, weight_only=self.weight_only),
+            keep_device=False,
+        )
+        
+        self.set_non_linear_mode(quant_format, self.model.model, False)
+        logger.info(f'-- deploy_{quant_format}_model done --')

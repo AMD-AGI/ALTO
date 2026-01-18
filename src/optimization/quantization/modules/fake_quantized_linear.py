@@ -14,19 +14,16 @@ class FakeQuantLinear(nn.Module):
             self.bias = None
         self.a_qdq = a_qdq
         self.w_qdq = w_qdq
-
         for name, buf in ori_module.named_buffers():
             if name.startswith('buf_'):
                 self.register_buffer(name, buf.data)
         for name, buf in ori_module.named_parameters():
             if name.startswith('buf_'):
                 self.register_buffer(name, buf.data)
-
         if hasattr(self, 'buf_rotate') and self.buf_rotate:
             self.rotater = ori_module.rotater
         else:
             self.buf_rotate = False
-
         if self.weight.data.dtype == torch.float8_e4m3fn:
             self.fp8_forward = True
             self.weight_scale_inv = ori_module.weight_scale_inv
@@ -34,27 +31,15 @@ class FakeQuantLinear(nn.Module):
         else:
             self.fp8_forward = False
 
-        self.dynamic_quant_weight = False
-        self.dynamic_quant_tmp_weight = False
-
     def forward(self, x):
         if hasattr(self, 'buf_rotate') and self.buf_rotate:
             x = self.rotater.rotate(x)
-
         if self.a_qdq is not None:
             x = self.a_qdq(x, self)
-
-        if not hasattr(self, 'tmp_weight'):
-            tmp_weight = self.w_qdq(self)
-            self.register_buffer('tmp_weight', tmp_weight, persistent=False)
-            self.tmp_bias = self.bias
-        elif self.dynamic_quant_weight:
-            self.tmp_weight = self.w_qdq(self)
-            self.tmp_bias = self.bias
-        elif self.dynamic_quant_tmp_weight:
-            self.tmp_weight = self.w_qdq(self)
-
-        y = torch.functional.F.linear(x, self.tmp_weight, self.tmp_bias)
+        if not hasattr(self, 'qdq_weight'):
+            qdq_weight = self.w_qdq(self)
+            self.register_buffer('qdq_weight', qdq_weight, persistent=False)
+        y = torch.functional.F.linear(x, self.qdq_weight, self.bias)
         return y
 
     @classmethod

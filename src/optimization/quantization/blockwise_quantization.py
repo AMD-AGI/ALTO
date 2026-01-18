@@ -46,12 +46,12 @@ class BlockwiseQuantization(BlockwiseOptimizer):
     def w_qdq(self, module, weight_quantizer):
         return weight_quantizer.fake_quant_weight_dynamic(module.weight)
 
-    def a_qdq(self, act, module, act_quantizer, input_index=0):
+    def a_qdq(self, act, module, act_quantizer):
         return act_quantizer.fake_quant_act_dynamic(act)
 
     def get_replacement_params(self, mode='fake_quant', weight_only=False, name=None):
         params_dict = {}
-        if mode in ['fake_quant', 'fake_quant_wo_kv']:
+        if mode in ['fake_quant',]:
             params_dict['a_qdq'] = (
                 partial(self.a_qdq, act_quantizer=self.act_quantizer)
                 if not weight_only
@@ -60,10 +60,9 @@ class BlockwiseQuantization(BlockwiseOptimizer):
             params_dict['w_qdq'] = partial(self.w_qdq, weight_quantizer=self.weight_quantizer)
         return params_dict
 
-    def block_forward(self, block, input_data=None):
+    def block_forward(self, block):
         output = []
-        if input_data is None:
-            input_data = self.input['data']
+        input_data = self.input['data']
         for i in range(len(input_data)):
             input_data[i] = input_data[i].to(device=next(block.parameters()).device)
             for k in self.input['kwargs'][i]:
@@ -173,6 +172,5 @@ class BlockwiseQuantization(BlockwiseOptimizer):
             self.get_replacement_params(mode=quant_format, weight_only=self.weight_only),
             keep_device=False,
         )
-        
         self.set_non_linear_mode(quant_format, self.model.model, False)
         logger.info(f'-- deploy_{quant_format}_model done --')

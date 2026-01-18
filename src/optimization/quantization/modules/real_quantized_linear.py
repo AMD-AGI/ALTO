@@ -10,13 +10,7 @@ class VllmRealQuantLinear(nn.Module):
         super().__init__()
         weight_name = 'weight_packed' if need_pack else 'weight'
         self.register_buffer(weight_name, weight)
-
-        (
-            self.register_buffer('bias', bias)
-            if bias is not None
-            else setattr(self, 'bias', None)
-        )
-
+        self.register_buffer('bias', bias) if bias is not None else setattr(self, 'bias', None)
         self.register_buffer(scales_name, scales)
         self.register_buffer('input_scale', input_scale)
 
@@ -67,12 +61,6 @@ class VllmRealQuantLinear(nn.Module):
     @classmethod
     @torch.no_grad()
     def quant_pack(cls, module, w_q, quant_config):
-        if module.weight.data.dtype == torch.float8_e4m3fn:
-            module.weight.data = weight_cast_to_bf16(
-                module.weight.data,
-                module.weight_scale_inv.data,
-                module.block_size
-            ).to(torch.bfloat16)
         weight, scales, zeros = w_q(module)
         need_pack = quant_config['weight'].get('need_pack', False)
         if need_pack:

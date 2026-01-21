@@ -9,6 +9,13 @@ from typing import Set, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from compressed_tensors.quantization import (
+    DynamicType,
+    QuantizationArgs,
+    QuantizationStatus,
+    QuantizationStrategy,
+)
+
 from torchtitan.components.quantization import (
     QuantizationConverter,)
 from torchtitan.config.job_config import JobConfig
@@ -34,17 +41,24 @@ SUPPORTED_PARAM_KEYS = ("input", "weight", "bias", "output")
 def _initialize_observer(
     module: nn.Module,
     module_config: dict,
+    module_name: str,
 ):
     observers = dict[str, ObserverContainer]()
     for param_name, param_config in module_config.items():
         assert param_name in SUPPORTED_PARAM_KEYS, f"Unsupported param key: {param_name}"
         observer_container = ObserverContainer()
         for observer_name in param_config["observers"]:
-            observer = ObserverBase.from_name(observer_name, device=device_type)
+            observer = ObserverBase.from_name(
+                observer_name,
+                param_name,
+                args=QuantizationArgs(num_bits=8),
+                module=module,
+                device=device_type,
+            )
             observer_container.add_observer(observer)
         observer_container_name = f"{param_name}_observers"
         module.register_module(observer_container_name, observer_container)
-        observers[observer_container_name] = observer_container
+        observers[f"{module_name}.{observer_container_name}"] = observer_container
 
     return observers
 
@@ -81,7 +95,7 @@ class ModelOptConverter(QuantizationConverter):
         # TODO: resolve from config
         for name, module in model.named_modules(prefix=""):
             if isinstance(module, SUPPORTED_MODULES):
-                observers = ["PerChannelNorm"]
+                observers = ["PerChannelNorm", "MinMax"]
                 self._resolved_config[name] = {
                     "input": {
                         "observers": observers,
@@ -96,7 +110,7 @@ class ModelOptConverter(QuantizationConverter):
         """
         for module_name, module_config in self._resolved_config.items():
             module = model.get_submodule(module_name)
-            observers = _initialize_observer(module, module_config)
+            observers = _initialize_observer(module, module_config, module_name)
             self._observer_container_collection.update(observers)
             self._observer_hooks |= _initialize_hooks(module)
 
@@ -115,6 +129,10 @@ class ModelOptConverter(QuantizationConverter):
         self.enable_observers()
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+        for fqn, observer_container in self._observer_container_collection.items():
+            qparams = observer_container.calculate_params()
+            print(f"{fqn} qparams: {qparams}")
+
         self.disable_observers()
         raise NotImplementedError("Post step Not implemented")
 

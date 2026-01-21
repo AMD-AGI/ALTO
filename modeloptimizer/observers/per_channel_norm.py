@@ -9,9 +9,17 @@ class PerChannelNormObserver(ObserverBase):
     A custom observer that computes the L2 norm of each channel and stores it in a buffer.
     """
 
-    def __init__(self, **kwargs) -> None:
-        super().__init__()
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["should_calculate_gparam"] = False
+        kwargs["should_calculate_qparams"] = False
+        super().__init__(*args, **kwargs)
         self.register_buffer("norm", torch.tensor([], device=self.device))
+
+    def get_current_min_max(self, observed: torch.Tensor):
+        pass
+
+    def get_current_global_min_max(self, observed: torch.Tensor):
+        pass
 
     def forward(self, x_orig):
         if x_orig.numel() == 0:
@@ -33,12 +41,10 @@ class PerChannelNormObserver(ObserverBase):
                 self.norm.copy_(norm)
             else:
                 self.norm += norm
-
         return x_orig
 
     def clear_stats(self):
-        with torch.no_grad():
-            self.norm.zero_()
+        self.norm.resize_(0)
 
     def calculate_params(self):
         pass

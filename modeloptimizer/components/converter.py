@@ -4,11 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Dict, List
-from functools import partial
-from importlib.util import find_spec
-from typing import Any, List
-from inspect import signature
+from typing import Set, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -17,93 +13,114 @@ from torchtitan.components.quantization import (
     QuantizationConverter,)
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.moe.utils import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
+from torchtitan.tools.utils import device_type
 from torchtitan.tools.logging import logger
 
-from modeloptimizer.config import QuantConfig
-from modeloptimizer.optimization.quantization import nn as qnn
+from modeloptimizer.observers import (
+    ObserverBase,
+    ObserverContainer,
+    calibrate_input_hook,
+    calibrate_output_hook,
+)
+
+if TYPE_CHECKING:
+    from torch.utils.hooks import RemovableHandle
+
+SUPPORTED_MODULES = (nn.Linear)
+SUPPORTED_PARAM_KEYS = ("input", "weight", "bias", "output")
 
 
-def replace_to_light(
-    model: nn.Module,
-    name: str,
-    config: QuantConfig,
-    mapping: Dict[type, type],
-):
-    original_type = type(model)
-    if original_type in mapping.keys():
-        lmodule = new_lightmodule(original_type, mapping[original_type], model,
-                                  name, config)
-        return lmodule
-    for n, mod in model.named_children():
-        model.add_module(
-            n,
-            replace_to_light(
-                mod,
-                name + ("." if name else "") + n,
-                config,
-                mapping,
-            ),
-        )
-    return model
-
-
-def unpack(attrs, non_param_attrs, param_attrs):
-    for k, v in attrs.items():
-        if k in ["_modules"]:
-            continue
-        if k in ["_parameters", "_buffers"]:
-            unpack(v, non_param_attrs, param_attrs)
-        elif isinstance(v, nn.Parameter):
-            param_attrs.append(k)
-        else:
-            non_param_attrs[k] = v if k != 'bias' else v is not None
-    return non_param_attrs, param_attrs
-
-
-def new_lightmodule(
-    original_class: type,
-    lightmodule_class: type,
+def _initialize_observer(
     module: nn.Module,
-    name: str,
-    config: QuantConfig,
+    module_config: dict,
 ):
-    quant_config = config.get_layer_config(name, original_class.__name__)
-    non_param_attrs, param_attrs = unpack(vars(module), {}, [])
-    init_lightargs_keys = signature(lightmodule_class).parameters.keys()
-    init_lightargs = {
-        k: v for k, v in non_param_attrs.items() if k in init_lightargs_keys
-    }
-    # init light module
-    lightmodule = lightmodule_class(quant_config=quant_config, **init_lightargs)
-    # load parameters
-    for name in param_attrs + list(non_param_attrs.keys()):
-        setattr(lightmodule, name, getattr(module, name))
-    return lightmodule
+    observers = dict[str, ObserverContainer]()
+    for param_name, param_config in module_config.items():
+        assert param_name in SUPPORTED_PARAM_KEYS, f"Unsupported param key: {param_name}"
+        observer_container = ObserverContainer()
+        for observer_name in param_config["observers"]:
+            observer = ObserverBase.from_name(observer_name, device=device_type)
+            observer_container.add_observer(observer)
+        observer_container_name = f"{param_name}_observers"
+        module.register_module(observer_container_name, observer_container)
+        observers[observer_container_name] = observer_container
+
+    return observers
+
+
+def _initialize_hooks(module: torch.nn.Module,) -> Set["RemovableHandle"]:
+    hooks = set()
+    for k in SUPPORTED_PARAM_KEYS:
+        optimizer_container = getattr(module, f"{k}_observers", None)
+        if optimizer_container is None:
+            continue
+
+        match k:
+            case "input":
+                hooks.add(
+                    module.register_forward_pre_hook(calibrate_input_hook))
+            case "output":
+                hooks.add(module.register_forward_hook(calibrate_output_hook))
+            case _:
+                raise ValueError(f"Unsupported param key: {k}")
+
+    return hooks
 
 
 class ModelOptConverter(QuantizationConverter):
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         super().__init__(job_config, parallel_dims)
+        self._resolved_config = dict()
+        self._observer_hooks = set()
+        self._observer_container_collection = dict[str, ObserverContainer]()
+        self.job_config = job_config
 
-        self.quant_config: QuantConfig = job_config.quantization
-        self.mapping = {nn.Linear: qnn.LLinear}
+    def resolve_config(self, model: nn.Module, job_config: JobConfig):
+        # TODO: resolve from config
+        for name, module in model.named_modules(prefix=""):
+            if isinstance(module, SUPPORTED_MODULES):
+                observers = ["PerChannelNorm"]
+                self._resolved_config[name] = {
+                    "input": {
+                        "observers": observers,
+                    }
+                }
 
-        # TODO: set gmm alignment to quantization blocksize
-        # set_token_group_alignment_size_m(ALIGN_SIZE_M)
-        # logger.info(
-        #     f"Setting token group alignment size to {ALIGN_SIZE_M}")
+    def initialize_observers(self, model: torch.nn.Module):
+        """
+        Attach observers, register activation calibration hooks
+
+        :param model: model to prepare for calibration
+        """
+        for module_name, module_config in self._resolved_config.items():
+            module = model.get_submodule(module_name)
+            observers = _initialize_observer(module, module_config)
+            self._observer_container_collection.update(observers)
+            self._observer_hooks |= _initialize_hooks(module)
+
+    def enable_observers(self):
+        for observer_container in self._observer_container_collection.values():
+            observer_container.enable()
+
+    def disable_observers(self):
+        for observer_container in self._observer_container_collection.values():
+            observer_container.disable()
 
     def convert(self, model: nn.Module):
-        replace_to_light(model, "", self.quant_config, self.mapping)
+        self.resolve_config(model, self.job_config)
+
+    def pre_step(self, model: nn.Module | list[nn.Module]):
+        self.enable_observers()
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
-        return
+        self.disable_observers()
+        raise NotImplementedError("Post step Not implemented")
 
-    def post_initialization(self, model: nn.Module | list[nn.Module]):
-        return
+    def post_initialization(self, model: nn.Module):
+        self.initialize_observers(model)
+        logger.info(f"Model part after initialization: {model}")
 
 
 register_model_converter(ModelOptConverter, "modeloptimizer")

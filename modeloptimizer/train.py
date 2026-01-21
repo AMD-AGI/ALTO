@@ -1,26 +1,59 @@
+from typing import Iterable, Any
 from contextlib import contextmanager
+import time
 import torch
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.train import Trainer as TorchTitanTrainer, main as torchtitan_main
+from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
-from modeloptimizer.config.registry import SPARSIFICATION_METHODS
 
+def log_calibration(
+    metrics_processor: MetricsProcessor,
+    micro_step: int,
+    extra_metrics: dict[str, Any] | None = None,
+):
+    time_delta = time.perf_counter() - metrics_processor.time_last_log
+
+    device_mem_stats = metrics_processor.device_memory_monitor.get_peak_stats()
+
+    # tokens per second per device, abbreviated as tps
+    tps = metrics_processor.ntokens_since_last_log / (
+        time_delta * metrics_processor.parallel_dims.non_data_parallel_size)
+
+    metrics = {
+        "calibration_metrics/throughput(tps)":
+            tps,
+        "calibration_metrics/memory/max_active(GiB)":
+            device_mem_stats.max_active_gib,
+        "calibration_metrics/memory/max_active(%)":
+            device_mem_stats.max_active_pct,
+        "calibration_metrics/memory/max_reserved(GiB)":
+            device_mem_stats.max_reserved_gib,
+        "calibration_metrics/memory/max_reserved(%)":
+            device_mem_stats.max_reserved_pct,
+    }
+    if extra_metrics:
+        metrics.update(extra_metrics)
+    metrics_processor.logger.log(metrics, micro_step)
+
+    color = metrics_processor.color
+    logger.info(
+        f"{color.orange}calibration step: {micro_step:2}  "
+        f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+        f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+        f"{color.blue}tps: {round(tps):,}{color.reset}")
+
+    metrics_processor.ntokens_since_last_log = 0
+    metrics_processor.time_last_log = time.perf_counter()
+    metrics_processor.device_memory_monitor.reset_peak_stats()
 
 class Trainer(TorchTitanTrainer):
 
     def __init__(self, job_config: JobConfig):
         super().__init__(job_config)
-        # TODO: cache inputs when training
-        self._input_cache = []
-        self._enable_input_cache = False
-
-        self.sparsification_config = self.job_config.sparsification
-        logger.info(f"Sparsification config: {self.sparsification_config}")
-        if self.sparsification_config.method != "none":
-            self._enable_input_cache = True
-
+        self.post_training = True
 
     @contextmanager
     def pp_no_loss_function(self, pp_schedule):
@@ -33,33 +66,6 @@ class Trainer(TorchTitanTrainer):
         pp_schedule._has_backward = has_backward
 
     @torch.no_grad()
-    def cache_input(self, input_dict: dict[str, torch.Tensor]):
-        if self._enable_input_cache:
-            self._input_cache.append(input_dict)
-
-    def clear_input_cache(self):
-        self._input_cache = []
-
-    def get_input_cache(self):
-        if not self._input_cache:
-            data_iterator = self.batch_generator(self.dataloader)
-            for _ in range(self.gradient_accumulation_steps):
-                input_dict = next(data_iterator)[0]
-                self.cache_input(input_dict)
-        return self._input_cache
-
-    def block_optimization_step(self):
-        # TODO: initialize before training loop
-        if self.sparsification_config.method != "none":
-            sparsification_optimizer = SPARSIFICATION_METHODS[
-                self.sparsification_config.method](
-                    self.job_config,
-                    self.model_parts,
-                    self.forward_step,
-                    self.get_input_cache(),
-                )
-            sparsification_optimizer.optimize()
-
     def forward_step(self, input_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -110,10 +116,42 @@ class Trainer(TorchTitanTrainer):
 
         return
 
+    def train_step(self, data_iterator: Iterable[tuple[dict[str, torch.Tensor],
+                                                       torch.Tensor]]):
+        if not self.post_training:
+            return super().train_step(data_iterator)
+
+        # Keep these variables local to shorten the code as these are
+        # the major variables that are used in the training loop.
+        parallel_dims = self.parallel_dims
+
+        # If data runs out during gradient accumulation, that
+        # entire step will not be executed.
+        for _microbatch in range(self.gradient_accumulation_steps):
+            input_dict, labels = next(data_iterator)
+            self.forward_step(input_dict)
+
+            # log metrics
+            if not self.metrics_processor.should_log(_microbatch):
+                return
+
+            assert not parallel_dims.dp_cp_enabled, "CP is not supported in post-training"
+
+            global_ntokens_seen = self.ntokens_seen
+
+            extra_metrics = {
+                "n_tokens_seen": global_ntokens_seen,
+            }
+            log_calibration(self.metrics_processor, _microbatch, extra_metrics=extra_metrics)
+
+        self.model_converters.post_optimizer_hook(self.model_parts)
+
+
+
     def post_training_tasks(self):
 
-        self.block_optimization_step()
-        self.clear_input_cache()
+        # self.block_optimization_step()
+        # self.clear_input_cache()
         # TODO: save optimized model
         # self.checkpointer.save(
         #     self.step,

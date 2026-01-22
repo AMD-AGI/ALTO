@@ -10,7 +10,7 @@ from .blockwise_sparsification import BlockwiseSparsification
 
 
 @ALGO_REGISTRY
-class SparseGPT(BlockwiseSparsification):
+class ALPS(BlockwiseSparsification):
     def __init__(self, model, sparsity_config, global_config, input):
         super().__init__(model, sparsity_config, global_config, input)
         self.percdamp = sparsity_config['method_kwargs']['percdamp']
@@ -25,9 +25,8 @@ class SparseGPT(BlockwiseSparsification):
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
-        H *= nsamples / (nsamples + minibatch_size)
         nsamples += minibatch_size
-        inp = math.sqrt(2 / nsamples) * inp.float().to(H.device)
+        inp = inp.float().to(H.device)
         H += inp.matmul(inp.t())
         return H, nsamples
 
@@ -85,43 +84,43 @@ class SparseGPT(BlockwiseSparsification):
 
             W_mask = torch.zeros_like(W, dtype=torch.bool)
             Losses = torch.zeros(rows, device=device)
-            for left in range(0, columns, self.blocksize):
-                right = min(left + self.blocksize, columns)
-                count = right - left
+            for i1 in range(0, columns, self.blocksize):
+                i2 = min(i1 + self.blocksize, columns)
+                count = i2 - i1
 
-                W_local = W[:, left:right].clone()
-                Pruned_local = torch.zeros_like(W_local)
-                Error_local = torch.zeros_like(W_local)
-                Losses_local = torch.zeros_like(W_local)
-                Hinv_local = Hinv[left:right, left:right]
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+                Hinv1 = Hinv[i1:i2, i1:i2]
 
                 if self.N == -1: 
-                    Metric_local = W_local ** 2 / (torch.diag(Hinv_local).reshape((1, -1))) ** 2
-                    thresh = torch.sort(Metric_local.flatten())[0][int(Metric_local.numel() * sparsity)]
-                    Mask_local = Metric_local <= thresh
+                    tmp = W1 ** 2 / (torch.diag(Hinv1).reshape((1, -1))) ** 2
+                    thresh = torch.sort(tmp.flatten())[0][int(tmp.numel() * sparsity)]
+                    mask1 = tmp <= thresh
                 else:
-                    Mask_local = torch.zeros_like(W_local) == 1
+                    mask1 = torch.zeros_like(W1) == 1
 
                 for i in range(count):
-                    w_local_vector = W_local[:, i]
-                    hinv_local_vector = Hinv_local[i, i]
+                    w = W1[:, i]
+                    d = Hinv1[i, i]
 
                     if self.N != -1 and i % self.M == 0:
-                        Metric_local = W_local[:, i:(i + self.M)] ** 2 / (torch.diag(Hinv_local)[i:(i + self.M)].reshape((1, -1))) ** 2
-                        Mask_local.scatter_(1, i + torch.topk(Metric_local, self.N, dim=1, largest=False)[1], True)
+                        tmp = W1[:, i:(i + self.M)] ** 2 / (torch.diag(Hinv1)[i:(i + self.M)].reshape((1, -1))) ** 2
+                        mask1.scatter_(1, i + torch.topk(tmp, self.N, dim=1, largest=False)[1], True)
 
-                    pruned_local_vector = w_local_vector.clone()
-                    pruned_local_vector[Mask_local[:, i]] = 0
-                    Pruned_local[:, i] = pruned_local_vector
-                    Losses_local[:, i] = (w_local_vector - pruned_local_vector) ** 2 / hinv_local_vector ** 2
-                    error_local_vector = (w_local_vector - pruned_local_vector) / hinv_local_vector
-                    W_local[:, i:] -= error_local_vector.unsqueeze(1).matmul(Hinv_local[i, i:].unsqueeze(0))
-                    Error_local[:, i] = error_local_vector
+                    q = w.clone()
+                    q[mask1[:, i]] = 0
+                    Q1[:, i] = q
+                    Losses1[:, i] = (w - q) ** 2 / d ** 2
+                    err1 = (w - q) / d
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1
 
-                W_mask[:, left:right] = Mask_local
-                W[:, left:right] = Pruned_local
-                W[:, right:] -= Error_local.matmul(Hinv[left:right, right:])
-                Losses += torch.sum(Losses_local, 1) / 2
+                W_mask[:, i1:i2] = mask1
+                W[:, i1:i2] = Q1
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                Losses += torch.sum(Losses1, 1) / 2
 
             torch.cuda.synchronize()
             logger.info(f'Pruning gap: {torch.sum(Losses).item()}')

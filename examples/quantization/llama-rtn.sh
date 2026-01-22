@@ -5,7 +5,7 @@ export PYTHONPATH=$workspace:$PYTHONPATH
 workspace=/wekafs/guanchen/Model-Optimizer
 
 task_name=llama-rtn
-config=${workspace}/configs/quantization/llama-rtn.yml
+config=${workspace}/configs/quantization/llama-rtn-float.yml
 
 
 nnodes=1

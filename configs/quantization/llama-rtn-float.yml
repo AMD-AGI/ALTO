@@ -3,7 +3,7 @@ base:
 
 model:
   type: Llama
-  path: /wekafs/guanchen/modelzoo/meta-llama/Llama-2-7b-hf
+  path: /wekafs/guanchen/modelzoo/meta-llama/Llama-3.2-1B
   torch_dtype: auto
 
 eval:
@@ -19,26 +19,31 @@ eval:
           hf_context_key: text
         processing:
           bs: 1
-          seq_len: 4096
+          seq_len: 2048
           preproc: test_jointdoc
           preproc_kwargs:
             sep: '\n\n'
     eval_type: [prefill]
-  eval_checkpoints: [pretrained, transformed]
+  eval_checkpoints: [transformed]
 
 optimization:
   quantization:
     method: RTN
     weight:
-      quant_dtype: int
-      bit: 3
+      quant_dtype: float
+      bit: e2m1
+      scale_format: e8m0
       symmetric: True
       granularity: per_group
-      group_size: 128
-    # act:
-    #   quant_dtype: int
-    #   bit: 4
-    #   symmetric: True
-    #   granularity: per_token
+      group_size: 32
+      global_scaling: True
+    act:
+      quant_dtype: float
+      bit: e2m1
+      scale_format: e8m0
+      symmetric: True
+      granularity: per_group
+      group_size: 32
+      global_scaling: True
         
 save:

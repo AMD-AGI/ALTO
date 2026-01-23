@@ -10,6 +10,8 @@ from .blockwise_quantization import BlockwiseQuantization
 class RTN(BlockwiseQuantization):
     def __init__(self, model, quant_config, global_config, input):
         super().__init__(model, quant_config, global_config, input)
+        self.optimization_method_name = 'RTN'
+        self.applicability_message = 'RTN is suitable for any quantization pattern.'
 
     @torch.no_grad()
     def block_opt(self, block, *opt_kwargs):

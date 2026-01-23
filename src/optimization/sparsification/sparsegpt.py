@@ -13,6 +13,9 @@ from .blockwise_sparsification import BlockwiseSparsification
 class SparseGPT(BlockwiseSparsification):
     def __init__(self, model, sparsity_config, global_config, input):
         super().__init__(model, sparsity_config, global_config, input)
+        self.optimization_method_name = 'SparseGPT'
+        self.applicability_message = 'SparseGPT is only suitable for unstructured and N:M sparsity pattern.'
+        assert self.block_sparsity_config == False, self.applicability_message
         self.percdamp = sparsity_config['method_kwargs']['percdamp']
         self.blocksize = sparsity_config['method_kwargs']['blocksize']
 

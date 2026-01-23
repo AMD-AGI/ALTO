@@ -55,9 +55,12 @@ optimization:
     error_accumulation: True
     method_kwargs:
       percdamp: 0.01
-      blocksize: 128
+      rho: 0.1
+      max_iter: 300
+      update_iter: 3
+      switch_iter: 30
 
 save:
-  # save_optimization_metadata_path: /wekafs/guanchen/Model-Optimizer/save/alps/masks
-  # save_transformed_path: /wekafs/guanchen/Model-Optimizer/save/alps/hf
-  # save_optimized_path: /wekafs/guanchen/Model-Optimizer/save/alps/compressed
+  save_optimization_metadata_path: /wekafs/guanchen/Model-Optimizer/save/alps/masks
+  save_transformed_path: /wekafs/guanchen/Model-Optimizer/save/alps/hf
+  save_optimized_path: /wekafs/guanchen/Model-Optimizer/save/alps/compressed

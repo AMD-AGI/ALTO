@@ -12,10 +12,10 @@ class OBS(BlockwisePruning):
     def __init__(self, model, pruning_config, global_config, input):
         super().__init__(model, pruning_config, global_config, input)
         self.optimization_method_name = 'OBS'
-        self.applicability_error_message = 'OBS is only suitable for structured pruning of attn heads and mlp neurons.'
-        assert self.prune_embedding == False, self.applicability_error_message
-        assert self.prune_layer == False, self.applicability_error_message
-        assert self.prune_sublayer == False, self.applicability_error_message
+        self.applicability_message = 'OBS is only suitable for structured pruning of attn heads and mlp neurons.'
+        assert self.prune_embedding == False, self.applicability_message
+        assert self.prune_layer == False, self.applicability_message
+        assert self.prune_sublayer == False, self.applicability_message
 
     @torch.no_grad()
     def compute_hessian(self, inp, H, nsamples):

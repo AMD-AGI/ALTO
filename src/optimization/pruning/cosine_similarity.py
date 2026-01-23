@@ -16,10 +16,10 @@ class CosineSimilarity(BlockwisePruning):
     def __init__(self, model, pruning_config, global_config, input):
         super().__init__(model, pruning_config, global_config, input)
         self.optimization_method_name = 'CosineSimilarity'
-        self.applicability_error_message = 'Cosine Similarity is only suitable for (sub-)layer pruning).'
-        assert self.prune_embedding == False, self.applicability_error_message
-        assert self.prune_attn == False, self.applicability_error_message
-        assert self.prune_mlp == False, self.applicability_error_message
+        self.applicability_message = 'Cosine Similarity is only suitable for (sub-)layer pruning).'
+        assert self.prune_embedding == False, self.applicability_message
+        assert self.prune_attn == False, self.applicability_message
+        assert self.prune_mlp == False, self.applicability_message
         self.total_layers = len(self.model.model.model.layers)
         self.activations = []
         self.activations.append(to_device(torch.cat(input['data'], dim=0), 'cpu'))

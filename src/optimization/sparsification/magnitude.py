@@ -11,6 +11,8 @@ from .blockwise_sparsification import BlockwiseSparsification
 class Magnitude(BlockwiseSparsification):
     def __init__(self, model, sparsity_config, global_config, input):
         super().__init__(model, sparsity_config, global_config, input)
+        self.optimization_method_name = 'Magnitude'
+        self.applicability_message = 'Magnitude is suitable for any sparsity pattern.'
 
     @torch.no_grad()
     def optimize_subset(

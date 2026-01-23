@@ -13,10 +13,10 @@ class WandaStructured(BlockwisePruning):
     def __init__(self, model, pruning_config, global_config, input):
         super().__init__(model, pruning_config, global_config, input)
         self.optimization_method_name = 'WandaStructured'
-        self.applicability_error_message = 'Wanda (structured pruning) is only suitable for structured pruning of attn heads and mlp neurons.'
-        assert self.prune_embedding == False, self.applicability_error_message
-        assert self.prune_layer == False, self.applicability_error_message
-        assert self.prune_sublayer == False, self.applicability_error_message
+        self.applicability_message = 'Wanda (structured pruning) is only suitable for structured pruning of attn heads and mlp neurons.'
+        assert self.prune_embedding == False, self.applicability_message
+        assert self.prune_layer == False, self.applicability_message
+        assert self.prune_sublayer == False, self.applicability_message
 
     @torch.no_grad()
     def get_row_scale(self, layer, act, scaler_row):

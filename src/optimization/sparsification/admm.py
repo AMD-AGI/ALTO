@@ -11,6 +11,9 @@ from .blockwise_sparsification import BlockwiseSparsification
 class Admm(BlockwiseSparsification):
     def __init__(self, model, sparsity_config, global_config, input):
         super().__init__(model, sparsity_config, global_config, input)
+        self.optimization_method_name = 'Admm'
+        self.applicability_message = 'Admm is only suitable for unstructured and N:M sparsity pattern.'
+        assert self.block_sparsity_config == False, self.applicability_message
         self.percdamp = sparsity_config['method_kwargs']['percdamp']
         self.iterative_prune_granularity = sparsity_config['method_kwargs']['iterative_prune_granularity']
         self.iterations = sparsity_config['method_kwargs']['iterations']

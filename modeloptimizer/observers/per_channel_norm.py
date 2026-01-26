@@ -1,10 +1,10 @@
 import torch
 
-from .base import ObserverBase, register_observer
+from .base import Observer, register_observer
 
 
-@register_observer("PerChannelNorm")
-class PerChannelNormObserver(ObserverBase):
+@register_observer("per_channel_norm")
+class PerChannelNormObserver(Observer):
     """
     A custom observer that computes the L2 norm of each channel and stores it in a buffer.
     """

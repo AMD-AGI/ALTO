@@ -1,10 +1,18 @@
 from dataclasses import dataclass, field
-from .quantization_config import QuantConfig, ModuleQuantConfig, TensorQuantConfig
-from .sparsification_config import SparsificationConfig
+
+
+@dataclass
+class ModelOptimizerConfig:
+    recipe: str = ""
+    """
+    Path to the model optimizer recipe file.
+    """
 
 
 @dataclass
 class JobConfig:
-    quantization: QuantConfig = field(default_factory=QuantConfig)
-    sparsification: SparsificationConfig = field(
-        default_factory=SparsificationConfig)
+    model_optimizer: ModelOptimizerConfig = field(
+        default_factory=ModelOptimizerConfig)
+    """
+    Model optimizer configuration.
+    """

@@ -20,12 +20,8 @@ flavor = "8B"
 hf_assets_path = "/group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B"
 converters = ["modeloptimizer"]
 
-[sparsification]
-method = "Wanda"
-sparsity = 0.5
-M = 4
-N = 2
-error_accumulation = true
+[model_optimizer]
+recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
 
 [training]
 local_batch_size = 1

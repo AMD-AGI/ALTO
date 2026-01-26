@@ -1,6 +1,6 @@
 import torch
 
-from .base import ObserverBase, register_observer, MinMaxTuple
+from .base import Observer, register_observer, MinMaxTuple
 
 
 def _get_min_max(observed: torch.Tensor) -> MinMaxTuple:
@@ -9,8 +9,8 @@ def _get_min_max(observed: torch.Tensor) -> MinMaxTuple:
 
     return min_vals, max_vals
 
-@register_observer("MinMax")
-class MinMaxObserver(ObserverBase):
+@register_observer("minmax")
+class MinMaxObserver(Observer):
     """
     Compute quantization parameters by taking the moving average of all min/max values
 
@@ -28,7 +28,7 @@ class MinMaxObserver(ObserverBase):
         return _get_min_max(observed)
 
 
-@register_observer("MemorylessMinMax")
+@register_observer("memoryless_minmax")
 class MemorylessMinMaxObserver(MinMaxObserver):
 
     def __init__(self, *args, **kwargs) -> None:

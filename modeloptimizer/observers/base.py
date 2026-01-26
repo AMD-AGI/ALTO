@@ -27,7 +27,7 @@ def register_observer(name):
     return decorator
 
 
-class ObserverBase(ABC, nn.Module):
+class Observer(ABC, nn.Module):
 
     def __init__(
         self,
@@ -44,6 +44,7 @@ class ObserverBase(ABC, nn.Module):
         super().__init__()
         self.base_name = base_name
         self.module = ref(module) if module else None
+        self._enabled = True
         self.device = device
 
         self.args = args
@@ -70,6 +71,16 @@ class ObserverBase(ABC, nn.Module):
         else:
             self.quant_min = None
             self.quant_max = None
+            
+    def enable(self):
+        self._enabled = True
+
+    def disable(self):
+        self._enabled = False
+        self.clear_stats()
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(enabled={self._enabled})"
 
     @abstractmethod
     def get_current_min_max(self, observed: torch.Tensor) -> MinMaxTuple:
@@ -164,6 +175,9 @@ class ObserverBase(ABC, nn.Module):
         return getattr(module, f"{self.base_name}_{name}", None)
 
     def forward(self, observed: torch.Tensor) -> torch.Tensor:
+        if not self._enabled:
+            return observed
+
         with torch.no_grad():
             if self.should_calculate_gparam:
                 observed_detached = observed.detach().reshape((1, 1, -1))  # per tensor reshape
@@ -209,7 +223,7 @@ class ObserverBase(ABC, nn.Module):
             zero_points = None
             min_vals = None
             max_vals = None
-        return scales, zero_points, min_vals, max_vals, global_scale, global_min_vals, global_max_vals
+        return scales, zero_points, global_scale
 
     def clear_stats(self):
         """
@@ -235,137 +249,137 @@ class ObserverBase(ABC, nn.Module):
         return (input * (1.0 - weight)) + (end * weight)
 
     @classmethod
-    def from_name(
+    def create_instance(
         cls,
         observer_name: str,
         base_name: str,
         **kwargs: Any,
-    ) -> 'ObserverBase':
+    ) -> 'Observer':
         if observer_name not in AVAILABLE_OBSERVERS:
             raise RuntimeError(f"Observer {observer_name} not found")
         return AVAILABLE_OBSERVERS[observer_name](base_name, **kwargs)
 
 
-class ObserverContainer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.observers = []
-        self._enabled = True
+# class ObserverContainer(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.observers = []
+#         self._enabled = True
 
-    def enable(self):
-        self._enabled = True
+#     def enable(self):
+#         self._enabled = True
 
-    def disable(self):
-        self._enabled = False
-        self.calculate_params()
-        self.clear_stats()
+#     def disable(self):
+#         self._enabled = False
+#         self.calculate_params()
+#         self.clear_stats()
 
-    def add_observer(self, observer):
-        self.observers.append(observer)
+#     def add_observer(self, observer):
+#         self.observers.append(observer)
 
-    def __repr__(self):
-        if not self._enabled:
-            return "ObserverContainer(disabled)"
-        return f"ObserverContainer(\n\t{',\n\t'.join([observer.__repr__() for observer in self.observers])}\n)"
+#     def __repr__(self):
+#         if not self._enabled:
+#             return "ObserverContainer(disabled)"
+#         return f"ObserverContainer(\n\t{',\n\t'.join([observer.__repr__() for observer in self.observers])}\n)"
 
-    def forward(self, x):
-        if not self._enabled:
-            return x
-        for observer in self.observers:
-            x = observer(x)
-        return x
+#     def forward(self, x):
+#         if not self._enabled:
+#             return x
+#         for observer in self.observers:
+#             x = observer(x)
+#         return x
 
-    def calculate_params(self):
-        results = []
-        with torch.no_grad():
-            for observer in self.observers:
-                results.append(observer.calculate_params())
-        return results
+#     def calculate_params(self):
+#         results = []
+#         with torch.no_grad():
+#             for observer in self.observers:
+#                 results.append(observer.calculate_params())
+#         return results
 
-    def clear_stats(self):
-        with torch.no_grad():
-            for observer in self.observers:
-                observer.clear_stats()
-
-
-def call_observers(
-    module: nn.Module,
-    base_name: str,
-    value: Optional[torch.Tensor] = None,
-):
-    """
-    Call a module's attached input/weight/output observer using a provided value.
-    Update the module's scale and zp using the observer's return values.
-
-    :param module: torch.nn.Module
-    :param base_name: substring used to fetch the observer, scales, and zp
-    :param value: torch.Tensor to be passed to the observer for activations. If
-        param_name is "weight", then the module's weight tensor will be used
-    """
-
-    if value is None and base_name == "weight":
-        value = module.weight
-    observers: ObserverContainer = getattr(module, f"{base_name}_observers")
-
-    x = observers(value)
-    return x
+#     def clear_stats(self):
+#         with torch.no_grad():
+#             for observer in self.observers:
+#                 observer.clear_stats()
 
 
-def calibrate_activations(module: nn.Module, value: torch.Tensor,
-                          base_name: str):
-    """
-    Calibrate input or output activations by calling the a module's attached
-    observer.
+# def call_observers(
+#     module: nn.Module,
+#     base_name: str,
+#     value: Optional[torch.Tensor] = None,
+# ):
+#     """
+#     Call a module's attached input/weight/output observer using a provided value.
+#     Update the module's scale and zp using the observer's return values.
 
-    :param module: torch.nn.Module
-    :param base_name: substring used to fetch the observer, scales, and zp
-    :param value: torch.Tensor to be passed to the observer
+#     :param module: torch.nn.Module
+#     :param base_name: substring used to fetch the observer, scales, and zp
+#     :param value: torch.Tensor to be passed to the observer for activations. If
+#         param_name is "weight", then the module's weight tensor will be used
+#     """
 
-    """
-    # If empty tensor, can't update zp/scale
-    # Case for MoEs
-    if value.numel() == 0:
-        return
+#     if value is None and base_name == "weight":
+#         value = module.weight
+#     observers: ObserverContainer = getattr(module, f"{base_name}_observers")
 
-    return call_observers(
-        module=module,
-        base_name=base_name,
-        value=value,
-    )
-
-
-def calibrate_input_hook(module: nn.Module, args: tuple[torch.Tensor]):
-    """
-    Hook to calibrate input activations.
-    Will call the observers to update the scales/zp before applying
-    input QDQ in the module's forward pass.
-    """
-    assert isinstance(
-        args,
-        tuple) and len(args) == 1, "Input must be a tuple with one element"
-    arg = args[0]
-    assert isinstance(arg, torch.Tensor), "Input must be a tensor"
-    arg = calibrate_activations(module, value=arg, base_name="input")
-    return (arg,)
+#     x = observers(value)
+#     return x
 
 
-def calibrate_output_hook(module: nn.Module, _args: Any,
-                          output: torch.Tensor):
-    """
-    Hook to calibrate output activations.
-    Will call the observers to update the scales/zp before applying
-    output QDQ.
-    """
-    output = calibrate_activations(
-        module,
-        value=output,
-        base_name="output",
-    )
-    # TODO: accumulate errors?
-    # output = forward_quantize(
-    #     module=module,
-    #     value=output,
-    #     base_name="output",
-    #     args=module.quantization_scheme.output_activations,
-    # )
-    return output
+# def calibrate_activations(module: nn.Module, value: torch.Tensor,
+#                           base_name: str):
+#     """
+#     Calibrate input or output activations by calling the a module's attached
+#     observer.
+
+#     :param module: torch.nn.Module
+#     :param base_name: substring used to fetch the observer, scales, and zp
+#     :param value: torch.Tensor to be passed to the observer
+
+#     """
+#     # If empty tensor, can't update zp/scale
+#     # Case for MoEs
+#     if value.numel() == 0:
+#         return
+
+#     return call_observers(
+#         module=module,
+#         base_name=base_name,
+#         value=value,
+#     )
+
+
+# def calibrate_input_hook(module: nn.Module, args: tuple[torch.Tensor]):
+#     """
+#     Hook to calibrate input activations.
+#     Will call the observers to update the scales/zp before applying
+#     input QDQ in the module's forward pass.
+#     """
+#     assert isinstance(
+#         args,
+#         tuple) and len(args) == 1, "Input must be a tuple with one element"
+#     arg = args[0]
+#     assert isinstance(arg, torch.Tensor), "Input must be a tensor"
+#     arg = calibrate_activations(module, value=arg, base_name="input")
+#     return (arg,)
+
+
+# def calibrate_output_hook(module: nn.Module, _args: Any,
+#                           output: torch.Tensor):
+#     """
+#     Hook to calibrate output activations.
+#     Will call the observers to update the scales/zp before applying
+#     output QDQ.
+#     """
+#     output = calibrate_activations(
+#         module,
+#         value=output,
+#         base_name="output",
+#     )
+#     # TODO: accumulate errors?
+#     # output = forward_quantize(
+#     #     module=module,
+#     #     value=output,
+#     #     base_name="output",
+#     #     args=module.quantization_scheme.output_activations,
+#     # )
+#     return output

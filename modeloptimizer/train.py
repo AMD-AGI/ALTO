@@ -135,7 +135,7 @@ class Trainer(TorchTitanTrainer):
             if not self.metrics_processor.should_log(_microbatch):
                 return
 
-            assert not parallel_dims.dp_cp_enabled, "CP is not supported in post-training"
+            assert not parallel_dims.dp_cp_enabled, "DP CP is not supported in post-training"
 
             global_ntokens_seen = self.ntokens_seen
 
@@ -150,8 +150,6 @@ class Trainer(TorchTitanTrainer):
 
     def post_training_tasks(self):
 
-        # self.block_optimization_step()
-        # self.clear_input_cache()
         # TODO: save optimized model
         # self.checkpointer.save(
         #     self.step,

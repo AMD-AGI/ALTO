@@ -44,7 +44,6 @@ class ModelOptConverter(QuantizationConverter):
     def post_initialization(self, model: nn.Module):
         for modifier in self.recipe.modifiers:
             modifier.initialize(model)
-        logger.info(f"Model part after initialization: {model}")
 
 
 register_model_converter(ModelOptConverter, "modeloptimizer")

@@ -12,16 +12,14 @@ quantization_stage:
       config_groups:
         group_0:
           weights:
-            num_bits: 4
+            num_bits: 8
             type: "int"
-            symmetric: false
-            strategy: "tensor_group"
-            group_size: 128
+            symmetric: true
+            strategy: "tensor"
           input_activations:
             num_bits: 8
             type: "int"
-            symmetric: false
-            strategy: "tensor_group"
-            group_size: 128
+            symmetric: true
+            strategy: "tensor"
             observer: "minmax"
           targets: ["Linear"]

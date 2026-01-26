@@ -200,6 +200,7 @@ class QuantizationMixin(HooksMixin):
 
         return targets
 
+    @torch.no_grad()
     def initialize_quantization(self, model: torch.nn.Module):
         """
         Attach quantization schemes to modules in the model according to
@@ -224,6 +225,7 @@ class QuantizationMixin(HooksMixin):
             self._calibration_hooks |= self._initialize_hooks(module)
             reset_quantization_status(module)
 
+    @torch.no_grad()
     def start_calibration(self, model: torch.nn.Module):
         """
         Attach observers, register activation calibration hooks (including
@@ -241,6 +243,7 @@ class QuantizationMixin(HooksMixin):
         for observer in self._observers.values():
             observer.enable()
 
+    @torch.no_grad()
     def end_calibration(self, model: torch.nn.Module):
         """
         Calculate and update scales and zero points for all observers.
@@ -261,11 +264,13 @@ class QuantizationMixin(HooksMixin):
                 p.copy_(scales)
             if zero_points is not None:
                 p = observer._get_module_param("zero_point")
-                p.copy_(zero_points)
+                if p is not None:
+                    p.copy_(zero_points)
             observer.disable()
 
         model.apply(enable_quantization)  # keep quantization enabled
 
+    @torch.no_grad()
     def clear_calibration(self, model: torch.nn.Module):
         """
         Remove calibration hooks and observers, and set the model status to frozen.

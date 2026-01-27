@@ -23,7 +23,7 @@ from modeloptimizer.utils.pytorch.module import (
     match_targets,
 )
 
-LAYER_OBSERVER_BASE_NAME = "layer_sparsity"
+LAYER_OBSERVER_BASE_NAME = "sparsity"
 
 def calibrate_input_hook(module: Module, args: Any, base_name: str):
     """

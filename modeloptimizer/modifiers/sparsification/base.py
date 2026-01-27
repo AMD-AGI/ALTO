@@ -24,6 +24,7 @@ from modeloptimizer.utils.pytorch.module import (
 )
 
 LAYER_OBSERVER_BASE_NAME = "sparsity"
+OWL_OBSERVER_BASE_NAME = "sparsity_owl"
 
 def calibrate_input_hook(module: Module, args: Any, base_name: str):
     """
@@ -41,7 +42,7 @@ class SparsityModifierBase(Modifier):
     """
 
     # modifier arguments
-    sparsity: float | list[float] | None
+    sparsity: float | list[float] | dict[str, float] | None
     sparsity_profile: str | None = None
     mask_structure: str = "0:0"
     owl_m: int | None = None
@@ -63,8 +64,9 @@ class SparsityModifierBase(Modifier):
                              str] = PrivateAttr(default_factory=dict)
     _layer_observers: dict[torch.nn.Module,
                       Observer] = PrivateAttr(default_factory=dict)
-    
     _observer_name: str | None = PrivateAttr(default=None)
+    _owl_observer_name: str | None = PrivateAttr(default=None)
+    _owl_layer_observers: dict[torch.nn.Module, Observer] = PrivateAttr(default_factory=dict)
 
     @field_validator("sparsity_profile", mode="before")
     def validate_sparsity_profile(cls, value: str | None) -> bool:
@@ -105,7 +107,7 @@ class SparsityModifierBase(Modifier):
     def compress_modules(self):
         raise NotImplementedError()
 
-    def _is_dict_with_digit_keys(self, sparsity: dict) -> bool:
+    def _is_dict_with_digit_keys(self, sparsity: list | dict | float) -> bool:
         if not isinstance(sparsity, dict):
             return False
         return all(isinstance(k, int) for k in sparsity.keys())
@@ -142,22 +144,36 @@ class SparsityModifierBase(Modifier):
         self._target_layers = get_layers(self.targets,
                                          model)  # layers containing targets
 
+        self._initialize_module_name_mappings()
+
         # infer layer sparsities
         if self.sparsity_profile == "owl":
             logger.info("Using OWL to infer target layer-wise sparsities")
-            if self._observer_name is None:
-                self._observer_name = "per_channel_norm"
+            if self._observer_name != "per_channel_norm":
+                self._owl_observer_name = self._observer_name
+                # initialize observers for OWL
+                self._initialize_observers(
+                    self._owl_observer_name,
+                    OWL_OBSERVER_BASE_NAME,
+                    self._owl_layer_observers,
+                )
             else:
-                assert self._observer_name == "per_channel_norm", "OWL requires per_channel_norm observer"
+                self._owl_layer_observers = self._layer_observers
         else:
             self._initialize_module_sparsities(model)
 
-        self._initialize_observers()
+        self._initialize_observers(
+            self._observer_name,
+            LAYER_OBSERVER_BASE_NAME,
+            self._layer_observers,
+        )
         return True
 
     def pre_step(self, model: Module, **kwargs):
         self.started_ = True
         for module, observer in self._layer_observers.items():
+            observer.enable()
+        for module, observer in self._owl_layer_observers.items():
             observer.enable()
 
     def post_step(self, model: Module, **kwargs):
@@ -169,6 +185,8 @@ class SparsityModifierBase(Modifier):
             self.compress_modules()
         for module, observer in self._layer_observers.items():
             observer.disable()
+        for module, observer in self._owl_layer_observers.items():
+            observer.disable()
 
     def on_finalize(self, model: Module, **kwargs):
         self.ended_ = True
@@ -176,6 +194,9 @@ class SparsityModifierBase(Modifier):
         for module, observer in self._layer_observers.items():
             delattr(module, f"{observer.base_name}_observer")
         self._layer_observers.clear()
+        for module, observer in self._owl_layer_observers.items():
+            delattr(module, f"{observer.base_name}_observer")
+        self._owl_layer_observers.clear()
         self._module_names.clear()
         self._target_layers.clear()
         self._module_sparsities.clear()
@@ -211,6 +232,10 @@ class SparsityModifierBase(Modifier):
 
                 yield index, name, module
 
+    def _initialize_module_name_mappings(self):
+        for index, name, module in self._target_layer_iterator():
+            self._module_names[module] = name
+
     @torch.no_grad()
     def _initialize_module_sparsities(self, model: Module):
         self.validate_sparsity(model)
@@ -229,37 +254,38 @@ class SparsityModifierBase(Modifier):
                     layer_sparsity = self.sparsity
             self._module_sparsities[module] = layer_sparsity
 
-    def _initialize_observers(self):
+    def _initialize_observers(
+        self,
+        observer_name: str | None,
+        base_name: str,
+        observers: dict[str, Observer],
+    ):
         """
         initialize observers for each target layer in the model
-        also initialize the mappings between modules and their names and sparsities
+        also initialize the mappings between modules and their names
         """
 
-        observer_name = self._observer_name
-        for index, name, module in self._target_layer_iterator():
-            self._module_names[module] = name
+        if observer_name is None:
+            return
 
-            if observer_name is None:
-                continue
-
+        for module, name in self._module_names.items():
             observer = Observer.create_instance(
                 observer_name,
-                base_name=LAYER_OBSERVER_BASE_NAME,
+                base_name=base_name,
                 args=None,
                 module=module,
                 device=device_type,
             )
-            module.register_module(f"{LAYER_OBSERVER_BASE_NAME}_observer",
-                                   observer)
+            module.register_module(f"{base_name}_observer", observer)
             self.register_hook(
                 module,
                 partial(
                     calibrate_input_hook,
-                    base_name=LAYER_OBSERVER_BASE_NAME,
+                    base_name=base_name,
                 ),
                 "forward_pre",
             )
-            self._layer_observers[module] = observer
+            observers[module] = observer
 
     def _infer_sequential_targets(self,
                                   model: torch.nn.Module) -> str | list[str]:
@@ -281,8 +307,7 @@ class SparsityModifierBase(Modifier):
         for name, layer in layers.items():
             prunable_layers = get_prunable_layers(layer)
             z = [
-                m.weight.abs() * getattr(
-                    m, f"{LAYER_OBSERVER_BASE_NAME}_observer").norm.unsqueeze(0)
+                m.weight.abs() * self._owl_layer_observers[m].stats.unsqueeze(0)
                 for n, m in prunable_layers.items()
             ]
             groups[name] = torch.cat([item.flatten().cpu() for item in z])

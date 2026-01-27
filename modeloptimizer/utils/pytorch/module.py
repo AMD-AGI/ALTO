@@ -58,6 +58,7 @@ __all__ = [
     "get_matching_layer",
     "get_no_split_params",
     "get_layer_by_name",
+    "TransformerConv1D",
 ]
 
 ALL_TARGET = "__ALL__"

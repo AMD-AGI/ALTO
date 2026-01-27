@@ -10,7 +10,8 @@ from torch.nn import Module
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers.sparsification.base import SparsityModifierBase
-from modeloptimizer.observers.per_channel_norm import WANDA_PRECISION
+from modeloptimizer.observers.per_channel_norm import WANDA_PRECISION, PerChannelNormObserver
+from modeloptimizer.utils.pytorch.module import TransformerConv1D
 
 __all__ = ["WandaPruningModifier"]
 
@@ -72,10 +73,14 @@ class WandaPruningModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
+            logger.info(
+                f"Sparsifying {name} using {num_samples.item()} samples")
+            assert isinstance(
+                observer, PerChannelNormObserver
+            ), "WandaPruningModifier requires per_channel_norm observer"
             sparsified_weight = self._sparsify_weight(
                 module=module,
-                row_scalar=observer.norm,
+                row_scalar=observer.stats,
                 sparsity=sparsity,
                 prune_n=self._prune_n,
                 prune_m=self._prune_m,
@@ -104,9 +109,8 @@ class WandaPruningModifier(SparsityModifierBase):
         if isinstance(module, torch.nn.Conv2d):
             W = W.flatten(1)
 
-        # TODO: add support for Conv1D
-        # if isinstance(module, transformers.Conv1D):
-        #     W = W.t()
+        if TransformerConv1D and isinstance(module, TransformerConv1D):
+            W = W.t()
 
         W = W.to(dtype=WANDA_PRECISION)
         S = row_scalar
@@ -132,9 +136,8 @@ class WandaPruningModifier(SparsityModifierBase):
 
         W[W_mask] = 0.0  # set weights to zero
 
-        # TODO: add support for Conv1D
-        # if isinstance(module, transformers.Conv1D):
-        #     W = W.t()
+        if TransformerConv1D and isinstance(module, TransformerConv1D):
+            W = W.t()
 
         W = W.reshape(final_shape).to(final_dtype)
 

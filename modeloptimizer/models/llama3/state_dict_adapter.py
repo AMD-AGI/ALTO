@@ -14,7 +14,9 @@ class PatchedLlama3StateDictAdapter(Llama3StateDictAdapter):
             if k.endswith(".weight"):
                 layer_name = k[:-len(".weight")]
                 target_name = v[:-len(".weight")]
-                base_names = ["weight", "input", "sparsity"]
+                base_names = ["weight", "input", "output", "sparsity", "sparsity_owl"]
+                if "q_proj" in k:
+                    base_names.append("q")
                 if "k_proj" in k:
                     base_names.append("k")
                 if "v_proj" in k:
@@ -24,9 +26,9 @@ class PatchedLlama3StateDictAdapter(Llama3StateDictAdapter):
                         f"{layer_name}.{base_name}_scale"] = f"{target_name}.{base_name}_scale"
                     extra_map[
                         f"{layer_name}.{base_name}_zero_point"] = f"{target_name}.{base_name}_zero_point"
-                    if base_name == "sparsity":
+                    if base_name.startswith("sparsity"):
                         extra_map[
-                            f"{layer_name}.{base_name}_observer.norm"] = f"{target_name}.{base_name}_observer.norm"
+                            f"{layer_name}.{base_name}_observer.stats"] = f"{target_name}.{base_name}_observer.stats"
                         extra_map[
                             f"{layer_name}.{base_name}_observer.num_samples"] = f"{target_name}.{base_name}_observer.num_samples"
                     else:

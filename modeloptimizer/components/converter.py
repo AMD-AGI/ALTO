@@ -21,7 +21,7 @@ class ModelOptConverter(QuantizationConverter):
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         super().__init__(job_config, parallel_dims)
-        self.recipe = Recipe.create_instance(job_config.model_optimizer.recipe)
+        self.recipe = Recipe.create_instance(job_config.modeloptimizer.recipe)
 
     def convert(self, model: nn.Module):
         # TODO untie word embeddings

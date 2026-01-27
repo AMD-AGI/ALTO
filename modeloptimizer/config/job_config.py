@@ -11,7 +11,7 @@ class ModelOptimizerConfig:
 
 @dataclass
 class JobConfig:
-    model_optimizer: ModelOptimizerConfig = field(
+    modeloptimizer: ModelOptimizerConfig = field(
         default_factory=ModelOptimizerConfig)
     """
     Model optimizer configuration.

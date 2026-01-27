@@ -1,3 +1,6 @@
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/observers/min_max.py
+# licensed under the Apache License 2.0
+
 import torch
 
 from .base import Observer, register_observer, MinMaxTuple
@@ -8,6 +11,7 @@ def _get_min_max(observed: torch.Tensor) -> MinMaxTuple:
     max_vals = torch.amax(observed, dim=(0, -1))
 
     return min_vals, max_vals
+
 
 @register_observer("minmax")
 class MinMaxObserver(Observer):

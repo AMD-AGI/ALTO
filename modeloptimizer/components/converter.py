@@ -45,5 +45,12 @@ class ModelOptConverter(QuantizationConverter):
         for modifier in self.recipe.modifiers:
             modifier.initialize(model)
 
+    def finalize(self, model: nn.Module | list[nn.Module]):
+        if not isinstance(model, list):
+            model = [model]
+        for m in model:
+            for modifier in self.recipe.modifiers:
+                modifier.finalize(m)
+
 
 register_model_converter(ModelOptConverter, "modeloptimizer")

@@ -146,9 +146,9 @@ class Trainer(TorchTitanTrainer):
 
         self.model_converters.post_optimizer_hook(self.model_parts)
 
-
-
     def post_training_tasks(self):
+        if self.step >= self.job_config.training.steps:
+            self.model_converters.finalize(self.model_parts)
 
         # TODO: save optimized model
         # self.checkpointer.save(

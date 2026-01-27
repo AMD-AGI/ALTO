@@ -1,3 +1,6 @@
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/factory.py
+# licensed under the Apache License 2.0
+
 import importlib
 import pkgutil
 

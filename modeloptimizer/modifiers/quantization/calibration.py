@@ -1,3 +1,9 @@
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/quantization/calibration.py
+# licensed under the Apache License 2.0
+# modifications:
+# - quantization is disabled during calibration
+# - weight quantization is applied after calibration
+
 from typing import Any, Optional
 
 import torch

@@ -1,3 +1,10 @@
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/observers/base.py
+# licensed under the Apache License 2.0
+# modifications:
+# - unified memoryless and non-memoryless observers
+# - forward pass only observes data statistics (and possibly modifies the data)
+# - qparams are calculated after forwarding all data in the step
+
 from abc import ABC, abstractmethod
 from math import e
 from typing import Any, Optional
@@ -71,7 +78,7 @@ class Observer(ABC, nn.Module):
         else:
             self.quant_min = None
             self.quant_max = None
-            
+
     def enable(self):
         self._enabled = True
 

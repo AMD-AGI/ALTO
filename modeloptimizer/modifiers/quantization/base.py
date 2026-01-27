@@ -1,3 +1,11 @@
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/quantization/quantization/base.py
+# licensed under the Apache License 2.0
+# modifications:
+# - initialize: initialize observers immediately after the model is initialized
+# - pre_step: enable observers before forward step
+# - post_step: disable observers after forward step, update weights (qdq)
+# - finalize: clear observers after all steps are done
+
 import tqdm
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules

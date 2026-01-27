@@ -1,3 +1,6 @@
+# copied from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/utils/hooks.py
+# licensed under the Apache License 2.0
+
 import contextlib
 from functools import partial, wraps
 from typing import Any, Callable, ClassVar

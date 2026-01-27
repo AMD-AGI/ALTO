@@ -1,3 +1,11 @@
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/quantization/quantization/mixin.py
+# licensed under the Apache License 2.0
+# modifications:
+# - initialization is splitted into two steps: initialize observers and enable observers
+# - finalization is splitted into two steps: disable observers and delete observers
+# - quantization is disabled during calibration
+# - weight quantization is applied after calibration
+
 from typing import Any, Dict, List, Optional, Set, Union
 
 import torch
@@ -267,7 +275,7 @@ class QuantizationMixin(HooksMixin):
                 if p is not None:
                     p.copy_(zero_points)
             observer.disable()
-        model.apply(enable_quantization)  # keep quantization enabled    
+        model.apply(enable_quantization)  # keep quantization enabled
 
     @torch.no_grad()
     def clear_calibration(self, model: torch.nn.Module):

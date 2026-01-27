@@ -151,6 +151,7 @@ def update_weight_zp_scale(module: Module):
         args=module.quantization_scheme.weights,
     )
     module.weight.copy_(weight_qdq)
+    module.quantization_status = QuantizationStatus.COMPRESSED
 
 
 def calibrate_activations(module: Module, value: torch.Tensor, base_name: str):
@@ -242,7 +243,8 @@ def freeze_module_quantization(module: Module):
         if hasattr(module, obs_name):
             delattr(module, obs_name)
 
-    module.quantization_status = QuantizationStatus.FROZEN
+    if module.quantization_status != QuantizationStatus.COMPRESSED:
+        module.quantization_status = QuantizationStatus.FROZEN
 
 
 def reset_quantization_status(model: Module):

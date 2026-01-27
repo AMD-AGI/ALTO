@@ -267,8 +267,7 @@ class QuantizationMixin(HooksMixin):
                 if p is not None:
                     p.copy_(zero_points)
             observer.disable()
-
-        model.apply(enable_quantization)  # keep quantization enabled
+        model.apply(enable_quantization)  # keep quantization enabled    
 
     @torch.no_grad()
     def clear_calibration(self, model: torch.nn.Module):
@@ -285,7 +284,7 @@ class QuantizationMixin(HooksMixin):
         for _, module in match_named_modules(model, self.resolved_targets,
                                              self.ignore):
             freeze_module_quantization(module)
-
+        self._observers.clear()
         model.apply(enable_quantization)  # keep quantization enabled
 
     def has_config(self) -> bool:

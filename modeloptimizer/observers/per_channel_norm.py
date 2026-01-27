@@ -1,6 +1,10 @@
-import torch
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/pruning/wanda/wanda_sparsify.py
+# licensed under the Apache License 2.0
 
+import torch
 from .base import Observer, register_observer
+
+WANDA_PRECISION = torch.float32
 
 
 @register_observer("per_channel_norm")
@@ -13,7 +17,13 @@ class PerChannelNormObserver(Observer):
         kwargs["should_calculate_gparam"] = False
         kwargs["should_calculate_qparams"] = False
         super().__init__(*args, **kwargs)
-        self.register_buffer("norm", torch.tensor([], device=self.device))
+        self.register_buffer("norm", self.make_empty_row_scalars())
+        self.register_buffer("num_samples", torch.zeros([1], dtype=torch.int32, device=self.device))
+
+    def make_empty_row_scalars(self) -> torch.Tensor:
+        weight = self.module().weight
+        num_columns = weight.shape[1]
+        return torch.zeros(num_columns, device=self.device)
 
     def get_current_min_max(self, observed: torch.Tensor):
         pass
@@ -26,25 +36,43 @@ class PerChannelNormObserver(Observer):
             return x_orig
 
         with torch.no_grad():
-            x = x_orig.detach()  # avoid keeping autograd tape
+            module = self.module()
+            inp = x_orig.detach()
+            if inp.dim() == 2:
+                inp = inp.unsqueeze(0)
 
-            # channel_ax is always the last dimension
-            new_axis_list = [i for i in range(x.dim())]  # noqa: C416
-            new_axis_list[0], new_axis_list[-1] = new_axis_list[-1], new_axis_list[
-                0]
-            y = x.permute(new_axis_list)
-            y = torch.flatten(y, start_dim=1)
-            norm = torch.linalg.vector_norm(y, dim=1)**2
+            num_added = inp.shape[0]  # note this is the number of dataset samples, not
+            # multiplied by the sequence length
 
-            if self.norm.numel() == 0:
-                self.norm.resize_(norm.shape)
-                self.norm.copy_(norm)
-            else:
-                self.norm += norm
+            # TODO: support Conv1D
+            if isinstance(module, torch.nn.Linear):
+                if inp.dim() == 3:
+                    inp = inp.reshape((-1, inp.shape[-1]))
+                inp = inp.t()
+
+            if isinstance(module, torch.nn.Conv2d):
+                unfold = torch.nn.Unfold(
+                    module.kernel_size,
+                    dilation=module.dilation,
+                    padding=module.padding,
+                    stride=module.stride,
+                )
+                inp = unfold(inp)
+                inp = inp.permute([1, 0, 2])
+                inp = inp.flatten(1)
+
+            self.norm *= self.num_samples / (self.num_samples + num_added)
+            self.num_samples += num_added
+
+            inp = inp.type(WANDA_PRECISION)
+            self.norm += torch.norm(inp, p=2, dim=1) ** 2 / self.num_samples
+
         return x_orig
 
     def clear_stats(self):
-        self.norm.resize_(0)
+        with torch.no_grad():
+            self.norm.zero_()
+            self.num_samples.zero_()
 
     def calculate_params(self):
         pass

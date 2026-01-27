@@ -7,6 +7,8 @@
 # - finalize: clear observers after all steps are done
 
 import tqdm
+import gc
+import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
 
@@ -62,3 +64,6 @@ class QuantizationModifier(Modifier, QuantizationMixin):
     def on_finalize(self, model: Module, **kwargs) -> bool:
         self.ended_ = True
         QuantizationMixin.clear_calibration(self, model)
+
+        gc.collect()
+        torch.cuda.empty_cache()

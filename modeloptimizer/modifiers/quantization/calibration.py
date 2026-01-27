@@ -143,11 +143,11 @@ def update_weight_zp_scale(module: Module):
     observer: Observer = getattr(module, "weight_observer")
     scales, zero_points, global_scale = observer.calculate_params()
     if global_scale is not None:
-        module.weight_global_scale.copy_(global_scale)
+        module.weight_global_scale.data.copy_(global_scale)
     if scales is not None:
-        module.weight_scale.copy_(scales)
+        module.weight_scale.data.copy_(scales)
     if hasattr(module, "weight_zero_point"):
-        module.weight_zero_point.copy_(zero_points)
+        module.weight_zero_point.data.copy_(zero_points)
     observer.disable()
 
     weight_qdq = forward_quantize(
@@ -156,7 +156,7 @@ def update_weight_zp_scale(module: Module):
         base_name="weight",
         args=module.quantization_scheme.weights,
     )
-    module.weight.copy_(weight_qdq)
+    module.weight.data.copy_(weight_qdq)
     module.quantization_status = QuantizationStatus.COMPRESSED
 
 

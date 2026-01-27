@@ -266,14 +266,14 @@ class QuantizationMixin(HooksMixin):
             scales, zero_points, global_scale = observer.calculate_params()
             if global_scale is not None:
                 p = observer._get_module_param("global_scale")
-                p.copy_(global_scale)
+                p.data.copy_(global_scale)
             if scales is not None:
                 p = observer._get_module_param("scale")
-                p.copy_(scales)
+                p.data.copy_(scales)
             if zero_points is not None:
                 p = observer._get_module_param("zero_point")
                 if p is not None:
-                    p.copy_(zero_points)
+                    p.data.copy_(zero_points)
             observer.disable()
         model.apply(enable_quantization)  # keep quantization enabled
 

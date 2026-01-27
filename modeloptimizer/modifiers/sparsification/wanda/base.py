@@ -1,5 +1,9 @@
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/pruning/wanda/base.py
 # licensed under the Apache License 2.0
+# modifications:
+# - extract layer_index from layer_name (in case PP are used)
+# - isolate the calibration from sparsification into a separate observer
+# - unifies the observers used by Wanda and OWL
 
 import torch
 from torch.nn import Module
@@ -55,11 +59,10 @@ class WandaPruningModifier(SparsityModifierBase):
         quantize even if they match a target. Defaults to empty list.
     """
 
-    @property
-    def observer_name(self) -> str:
-        return "per_channel_norm"
+    def on_initialize(self, model: Module, **kwargs) -> bool:
+        self._observer_name = "per_channel_norm"
+        return super().on_initialize(model, **kwargs)
 
-    @torch.no_grad()
     def compress_modules(self):
         """
         Sparsify modules which have been calibrated
@@ -69,16 +72,15 @@ class WandaPruningModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            logger.info(f"Sparsifying {name} using {num_samples} samples")
-            with torch.no_grad():
-                sparsified_weight = self._sparsify_weight(
-                    module=module,
-                    row_scalar=observer.norm,
-                    sparsity=sparsity,
-                    prune_n=self._prune_n,
-                    prune_m=self._prune_m,
-                )
-                module.weight.data.copy_(sparsified_weight)
+            logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
+            sparsified_weight = self._sparsify_weight(
+                module=module,
+                row_scalar=observer.norm,
+                sparsity=sparsity,
+                prune_n=self._prune_n,
+                prune_m=self._prune_m,
+            )
+            module.weight.data.copy_(sparsified_weight)
 
     def _sparsify_weight(
         self,

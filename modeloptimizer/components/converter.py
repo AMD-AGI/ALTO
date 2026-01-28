@@ -24,8 +24,8 @@ class ModelOptConverter(QuantizationConverter):
         self.recipe = Recipe.create_instance(job_config.modeloptimizer.recipe)
 
     def convert(self, model: nn.Module):
-        # TODO untie word embeddings
-        pass
+        from torchtitan.components.checkpoint import CheckpointManager
+        CheckpointManager.allow_partial_load = True
 
     def pre_step(self, model: nn.Module | list[nn.Module]):
         for modifier in self.recipe.modifiers:

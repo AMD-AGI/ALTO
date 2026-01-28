@@ -26,8 +26,9 @@ recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
 [training]
 dtype = "bfloat16"
 local_batch_size = 1
+global_batch_size = 10
 seq_len = 8192
-steps = 0
+steps = 1
 dataset = "wikitext_test"
 
 [debug]
@@ -62,5 +63,5 @@ enable = true
 dataset = "wikitext_test"
 freq = 10
 local_batch_size = 1
-seq_len = 2048
-steps = -1
+seq_len = 8192
+steps = 10

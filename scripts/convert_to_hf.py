@@ -25,7 +25,7 @@ from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.protocols.model_converter import build_model_converters
 
-import modeloptimizer # noqa: F401
+import modeloptimizer  # noqa: F401
 
 
 @contextmanager
@@ -51,6 +51,15 @@ def patch_finfo():
     torch.finfo = patched_finfo
     yield
     torch.finfo = orig_finfo_func
+
+
+def hot_fix_for_tied_word_embeddings(model: torch.nn.Module,
+                                     compressor: ModelCompressor):
+    if not getattr(model, "tie_word_embeddings", False):
+        return
+    # in the current impl, lm_head is not a linear layer,
+    # so we need to add it to the ignore list manually
+    compressor.quantization_config.ignore.append("lm_head")
 
 
 @torch.inference_mode()
@@ -94,13 +103,15 @@ def convert_to_hf(
     # print(model.layers['0'].feed_forward.w1.quantization_status)
 
     compressor = ModelCompressor.from_pretrained_model(model)
-    compressed_state_dict = compressor.compress(model)
+    if compressor is not None:
+        hot_fix_for_tied_word_embeddings(model, compressor)
+        state_dict = compressor.compress(model)
 
-    # TODO: update layer name mapping in the "ignore" entry
-    compressor.update_config(output_dir)
+        # TODO: update layer name mapping in the "ignore" entry
+        compressor.update_config(output_dir)
 
     # convert state dict tt->hf
-    hf_state_dict = sd_adapter.to_hf(compressed_state_dict)
+    hf_state_dict = sd_adapter.to_hf(state_dict)
 
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
@@ -124,6 +135,7 @@ def convert_to_hf(
             storage_writer=storage_writer,
         )
 
+
 def eval_task(model_dir: str, task: str):
     from lm_eval import simple_evaluate
 
@@ -141,10 +153,11 @@ def eval_task(model_dir: str, task: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
-    parser.add_argument(
-        "config_file", type=Path, help="Path to job config file."
-    )
+    parser = argparse.ArgumentParser(
+        description="Convert DCP weights to HF format.")
+    parser.add_argument("config_file",
+                        type=Path,
+                        help="Path to job config file.")
     parser.add_argument(
         "--export_dtype",
         type=str,
@@ -156,7 +169,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config_manager = ConfigManager()
-    job_config: JobConfig = config_manager.parse_args(["--job.config_file", args.config_file.as_posix()])
+    job_config: JobConfig = config_manager.parse_args(
+        ["--job.config_file", args.config_file.as_posix()])
 
     dump_folder = Path(job_config.job.dump_folder)
     hf_assets_path = Path(job_config.model.hf_assets_path)

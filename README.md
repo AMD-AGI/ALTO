@@ -72,17 +72,20 @@ We have patched the state_dict_adapter to save the observer/modifier states in h
 
 * observers
   * [ ] mse
-  * [ ] hessian
+  * [x] hessian
 * modifiers
   * quantization
     * [ ] GPTQ
     * [ ] more quant settings: dtype, granularity, etc.
   * sparsification
+    * [x] SparseGPT
     * [ ] Magnitude
   * [ ] pruning
   * [ ] transform
 * [ ] models
 * checkpointing
-  * [ ] compressed tensors
+  * [x] compressed tensors for quantization
+  * [ ] compressed tensors for sparsification
+  * [ ] layer name mapping in the ignore list
   * [ ] permutation of Q, K scale/zero_point
     * The weight in torchtitan has a different layout

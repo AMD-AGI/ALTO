@@ -7,6 +7,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Optional
 import argparse
 from pathlib import Path
 import shutil
@@ -17,15 +18,23 @@ import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 
-from compressed_tensors import ModelCompressor
+from compressed_tensors import (
+    SparsityCompressionConfig,
+    CompressionFormat,
+    ModelCompressor,
+)
 
 from torchtitan.config.manager import ConfigManager
 from torchtitan.config.job_config import JobConfig
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.protocols.model_converter import build_model_converters
+from torchtitan.protocols.model_converter import (
+    build_model_converters,
+    ModelConvertersContainer,
+)
 
-import modeloptimizer  # noqa: F401
+from modeloptimizer.components.converter import ModelOptConverter
+from modeloptimizer.utils.compression.sparsity_metadata_config import SparsityConfigMetadata
 
 
 @contextmanager
@@ -59,7 +68,76 @@ def hot_fix_for_tied_word_embeddings(model: torch.nn.Module,
         return
     # in the current impl, lm_head is not a linear layer,
     # so we need to add it to the ignore list manually
-    compressor.quantization_config.ignore.append("lm_head")
+    if compressor.quantization_config is not None:
+        compressor.quantization_config.ignore.append("lm_head")
+    if compressor.sparsity_config is not None:
+        compressor.sparsity_config.ignore.append("lm_head")
+
+
+def get_model_compressor(
+    model: torch.nn.Module,
+    state_dict: dict[str, torch.Tensor],
+    model_converters: ModelConvertersContainer,
+    sparsity_config: Optional[SparsityCompressionConfig] = None,
+    quantization_format: Optional[str] = None,
+    save_compressed: bool = True,
+    disable_sparse_compression: bool = False,
+):
+    # modified from https://github.com/vllm-project/llm-compressor/blob/4ce1bdfc197ccd95e2be0297bfa4a7c8d7d9a614/src/llmcompressor/transformers/compression/compressed_tensors_utils.py#L152-L242
+
+    # get the first modifier of ModelOptConverter class from model_converters
+    converter = next(
+        (c for c in model_converters.converters
+         if isinstance(c, ModelOptConverter)),
+        None,
+    )
+    if converter is None:
+        raise ValueError("ModelOptConverter not found in model_converters")
+    modifiers = converter.recipe.modifiers
+
+    if sparsity_config is None:
+        sparsity_structure = SparsityConfigMetadata.infer_sparsity_structure(
+            model,
+            check_only_modifiers=True,
+            modifiers=modifiers,
+        )
+        if sparsity_structure is not None:
+            sparsity_config = SparsityConfigMetadata.from_pretrained(
+                model,
+                state_dict=state_dict,
+                compress=save_compressed,
+                quantization_format=quantization_format,
+                disable_sparse_compression=disable_sparse_compression,
+                sparsity_structure=sparsity_structure,
+            )
+        else:
+            sparsity_config = None
+    else:
+        if sparsity_config.sparsity_structure is None:
+            print(
+                "SparsityConfigMetadata provided without indicating ",
+                "the sparsity structure. Sparisty will be inferred from the model. "
+                "Consider providing the structure to skip this step ",
+            )
+            sparsity_config.sparsity_structure = (
+                SparsityConfigMetadata.infer_sparsity_structure(model))
+
+    if not save_compressed:
+        if quantization_format not in (None, CompressionFormat.dense.value):
+            raise ValueError("A quantizatiom format was provided but "
+                             "save_compressed is set to False. "
+                             "A compression format can only be applied when "
+                             "saving the model compressed")
+        quantization_format = CompressionFormat.dense.value
+        
+    print(f"sparsity_config: {sparsity_config}")
+    print(f"quantization_format: {quantization_format}")
+
+    return ModelCompressor.from_pretrained_model(
+        model,
+        sparsity_config_or_format=sparsity_config,
+        quantization_format=quantization_format,
+    )
 
 
 @torch.inference_mode()
@@ -102,7 +180,7 @@ def convert_to_hf(
     # print(model.layers['0'].feed_forward.w1.quantization_scheme)
     # print(model.layers['0'].feed_forward.w1.quantization_status)
 
-    compressor = ModelCompressor.from_pretrained_model(model)
+    compressor = get_model_compressor(model, state_dict, model_converters)
     if compressor is not None:
         hot_fix_for_tied_word_embeddings(model, compressor)
         state_dict = compressor.compress(model)

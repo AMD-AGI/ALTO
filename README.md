@@ -89,3 +89,6 @@ We have patched the state_dict_adapter to save the observer/modifier states in h
   * [ ] layer name mapping in the ignore list
   * [ ] permutation of Q, K scale/zero_point
     * The weight in torchtitan has a different layout
+* parallelization
+  * [x] PP
+  * [ ] other parallelization dims

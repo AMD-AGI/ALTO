@@ -157,6 +157,8 @@ def update_weight_zp_scale(module: Module):
         args=module.quantization_scheme.weights,
     )
     module.weight.data.copy_(weight_qdq)
+    # set it to COMPRESSED to accelerate the validation
+    # will be changed back to FROZEN status in the finalize method
     module.quantization_status = QuantizationStatus.COMPRESSED
 
 
@@ -249,7 +251,9 @@ def freeze_module_quantization(module: Module):
         if hasattr(module, obs_name):
             delattr(module, obs_name)
 
-    if module.quantization_status != QuantizationStatus.COMPRESSED:
+    # change back to FROZEN status
+    # because we have set it to COMPRESSED to accelerate the validation
+    if module.quantization_status == QuantizationStatus.COMPRESSED:
         module.quantization_status = QuantizationStatus.FROZEN
 
 

@@ -38,6 +38,9 @@ class PatchedLlama3StateDictAdapter(Llama3StateDictAdapter):
                             f"{layer_name}.{base_name}_observer.quant_max"] = f"{target_name}.{base_name}_observer.quant_max"
         self.from_hf_map.update(extra_map)
 
+        # TODO: update fqn_to_index_mapping
+        assert self.fqn_to_index_mapping is None
+
 
 def patched_get_train_spec():
     train_spec = get_train_spec()

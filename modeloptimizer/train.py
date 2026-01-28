@@ -147,14 +147,14 @@ class Trainer(TorchTitanTrainer):
         self.model_converters.post_optimizer_hook(self.model_parts)
 
     def post_training_tasks(self):
-        if self.step >= self.job_config.training.steps:
+        last_step = self.step >= self.job_config.training.steps
+        if last_step:
             self.model_converters.finalize(self.model_parts)
 
-        # TODO: save optimized model
-        # self.checkpointer.save(
-        #     self.step,
-        #     last_step=(self.step >= self.job_config.training.steps),
-        # )
+        self.checkpointer.save(
+            self.step,
+            last_step=last_step,
+        )
         # run validation
         if (self.job_config.validation.enable and
                 self.validator.should_validate(self.step)):

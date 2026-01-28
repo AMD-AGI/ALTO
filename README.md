@@ -7,6 +7,7 @@ Observe and calculate statistics of module weights/inputs/outputs.
   * minmax
 * Sparsification
   * per_channel_norm
+  * hessian
 
 ## Modifiers
 
@@ -14,6 +15,7 @@ Observe and calculate statistics of module weights/inputs/outputs.
   * QuantizationModifier
 * Sparsification
   * WandaPruningModifier
+  * SparseGPTModifier
 
 ## Installation
 
@@ -74,9 +76,13 @@ We have patched the state_dict_adapter to save the observer/modifier states in h
 * modifiers
   * quantization
     * [ ] GPTQ
+    * [ ] more quant settings: dtype, granularity, etc.
   * sparsification
-    * [ ] SparseGPT
     * [ ] Magnitude
   * [ ] pruning
   * [ ] transform
 * [ ] models
+* checkpointing
+  * [ ] compressed tensors
+  * [ ] permutation of Q, K scale/zero_point
+    * The weight in torchtitan has a different layout

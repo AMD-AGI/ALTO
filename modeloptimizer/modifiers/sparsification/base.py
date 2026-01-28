@@ -150,7 +150,7 @@ class SparsityModifierBase(Modifier):
         if self.sparsity_profile == "owl":
             logger.info("Using OWL to infer target layer-wise sparsities")
             if self._observer_name != "per_channel_norm":
-                self._owl_observer_name = self._observer_name
+                self._owl_observer_name = "per_channel_norm"
                 # initialize observers for OWL
                 self._initialize_observers(
                     self._owl_observer_name,

@@ -20,45 +20,11 @@ flavor = "8B"
 hf_assets_path = "/group/ossmodelzoo/hanwang2/meta-llama3/Meta-Llama-3-8B-hf"
 converters = ["modeloptimizer"]
 
-[quantization.global_config.input]
-quantizer = "InputINTQuantizer"
-bit = 8
-round_mode = "EVEN"
-sym_mode = true
-narrow_range = false
-scale_PoT_round_mode = "CEIL"
-use_qoperator = false
-granularity = "per-tensor"
-group_channel_size = 1
-signed_mode = true
-scale_type = "fp32"
-scale_int_bit = 16
-block_size = 128
-dynamic_mode = true
-
-[quantization.global_config.weight]
-quantizer = "WeightINTQuantizer"
-bit = 8
-round_mode = "EVEN"
-sym_mode = true
-narrow_range = false
-scale_PoT_round_mode = "CEIL"
-use_qoperator = false
-granularity = "per-tensor"
-group_channel_size = 1
-signed_mode = true
-scale_type = "fp32"
-scale_int_bit = 16
-block_size = 128
-dynamic_mode = true
-
-[quantization.layer_config.output.input]
-quantizer = "none"
-
-[quantization.layer_config.output.weight]
-quantizer = "none"
+[modeloptimizer]
+recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
 
 [training]
+dtype = "bfloat16"
 local_batch_size = 1
 seq_len = 8192
 steps = 0

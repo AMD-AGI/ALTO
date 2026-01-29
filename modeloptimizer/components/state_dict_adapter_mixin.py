@@ -1,5 +1,7 @@
 import re
 
+from torch import Tensor
+
 __all__ = ["StateDictAdapterMixin"]
 
 
@@ -12,6 +14,7 @@ class StateDictAdapterMixin:
             for k, v in self.from_hf_map.items()
             if k.endswith(".weight")
         }
+
         # construct extra mappings for model optimizer states
         bitmask_params = ["compressed", "bitmask", "shape"]
         self.extra_map = {}
@@ -45,11 +48,36 @@ class StateDictAdapterMixin:
                         f"{layer_name}.{base_name}_observer.quant_max"] = f"{target_name}.{base_name}_observer.quant_max"
         self.from_hf_map.update(self.extra_map)
 
-        # TODO: update fqn_to_index_mapping
-        assert self.fqn_to_index_mapping is None
+    def update_storage_plan(self, state_dict: dict[str, Tensor]):
+        if self.fqn_to_index_mapping is None:
+            return
+        extra_indices = {}
+        for key, idx in self.fqn_to_index_mapping.items():
+            if "layers" in key:
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                layer_num = re.search(r"\d+", key).group(0)
+            else:
+                abstract_key = key
+                layer_num = None
+            abstract_key_prefix = abstract_key[:-len("weight")]
+            # collect extra states starts with abstract_key_prefix
+            extra_keys = [
+                k.format(layer_num) if layer_num is not None else k
+                for k in self.extra_map.keys()
+                if k.startswith(abstract_key_prefix)
+            ]
+            extra_indices.update({
+                k: self.fqn_to_index_mapping.get(k, idx)
+                for k in extra_keys
+                if k in state_dict
+            })
+
+        self.fqn_to_index_mapping.update(extra_indices)
 
     def map_ignore_list_to_hf(self, ignore_list: list[str]) -> list[str]:
-        reverse_candidate_layers = {v: k for k, v in self.candidate_layers.items()}
+        reverse_candidate_layers = {
+            v: k for k, v in self.candidate_layers.items()
+        }
         new_ignore_list = []
         for key in ignore_list:
             if "layers" in key:

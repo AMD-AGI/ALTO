@@ -16,6 +16,9 @@ class Llama3StateDictAdapter(OriginalLlama3StateDictAdapter):
 
     def map_ignore_list_to_hf(self, ignore_list: list[str]) -> list[str]:
         return StateDictAdapterMixin.map_ignore_list_to_hf(self, ignore_list)
+    
+    def update_storage_plan(self, state_dict: dict[str, torch.Tensor]):
+        StateDictAdapterMixin.update_storage_plan(self, state_dict)
 
     def _permute(self, w: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         return w

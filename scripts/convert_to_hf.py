@@ -178,10 +178,6 @@ def convert_to_hf(
         checkpoint_id=input_dir,
     )
 
-    # print(model)
-    # print(model.layers['0'].feed_forward.w1.quantization_scheme)
-    # print(model.layers['0'].feed_forward.w1.quantization_status)
-
     compressor = get_model_compressor(
         model,
         state_dict,
@@ -202,7 +198,7 @@ def convert_to_hf(
 
     # convert state dict tt->hf
     hf_state_dict = sd_adapter.to_hf(state_dict)
-
+    sd_adapter.update_storage_plan(hf_state_dict)
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,

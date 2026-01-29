@@ -1,6 +1,9 @@
 # AMD Distributed Model-Optimizer
 
-## Observers
+
+## Features
+
+### Observers
 Observe and calculate statistics of module weights/inputs/outputs.
 
 * Quantization
@@ -9,13 +12,20 @@ Observe and calculate statistics of module weights/inputs/outputs.
   * per_channel_norm
   * hessian
 
-## Modifiers
+### Modifiers
 
 * Quantization
   * QuantizationModifier
 * Sparsification
   * WandaPruningModifier
   * SparseGPTModifier
+
+### Models
+
+* Llama3
+  * Patched [state_dict_adapter](modeloptimizer/models/llama3/state_dict_adapter.py) to save the observer/modifier states in hf safetensors.
+  * Patched [RoPE](modeloptimizer/models/llama3/model.py) to keep wq, wk in the transformers layout.
+
 
 ## Installation
 
@@ -31,6 +41,7 @@ Install this project:
 pip install -e .
 ```
 
+
 ## Configuration
 
 Create a recipe file following the same settings as [llm-compressor](https://github.com/vllm-project/llm-compressor/tree/bede809f388aaeb1438a4d692d2d79109f9357dc).
@@ -44,6 +55,7 @@ converters = ["modeloptimizer"]
 [model_optimizer]
 recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
 ```
+
 
 ## Run calibration
 
@@ -62,11 +74,19 @@ Start calibration by:
 CUDA_VISIBLE_DEVICES=0 NGPU=1 CONFIG_FILE=./modeloptimizer/models/llama3/configs/llama3_1b.toml ./run.sh
 ```
 
+
 ## Export
 
 By default torchtitan saves state dict in torch dcp format and converts it to hf safetensors offline.
 
-We have patched the state_dict_adapter to save the observer/modifier states in hf safetensors. See [llama3 state_dict_adapter](modeloptimizer/models/llama3/state_dict_adapter.py) for example.
+We have prepared a script for checkpoint conversion, compression and evaluation.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python ./scripts/convert_to_hf.py \
+  ./modeloptimizer/models/llama3/configs/llama3_1b.toml \
+  --tasks wikitext
+```
+
 
 ## TODO
 
@@ -85,7 +105,7 @@ We have patched the state_dict_adapter to save the observer/modifier states in h
 * [ ] models
 * checkpointing
   * [x] compressed tensors for quantization
-  * [ ] compressed tensors for sparsification
+  * [x] compressed tensors for sparsification
   * [ ] layer name mapping in the ignore list
   * [ ] include model optimizer states in fqn_to_index_mapping
   * [x] permutation of Q, K scale/zero_point

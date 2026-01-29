@@ -129,7 +129,7 @@ def get_model_compressor(
                              "A compression format can only be applied when "
                              "saving the model compressed")
         quantization_format = CompressionFormat.dense.value
-        
+
     print(f"sparsity_config: {sparsity_config}")
     print(f"quantization_format: {quantization_format}")
 
@@ -149,6 +149,8 @@ def convert_to_hf(
     model_flavor: str,
     hf_assets_path: str,
     export_dtype: str,
+    save_compressed: bool = True,
+    disable_sparse_compression: bool = False,
 ):
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
@@ -180,7 +182,13 @@ def convert_to_hf(
     # print(model.layers['0'].feed_forward.w1.quantization_scheme)
     # print(model.layers['0'].feed_forward.w1.quantization_status)
 
-    compressor = get_model_compressor(model, state_dict, model_converters)
+    compressor = get_model_compressor(
+        model,
+        state_dict,
+        model_converters,
+        save_compressed=save_compressed,
+        disable_sparse_compression=disable_sparse_compression,
+    )
     if compressor is not None:
         hot_fix_for_tied_word_embeddings(model, compressor)
         state_dict = compressor.compress(model)
@@ -214,7 +222,7 @@ def convert_to_hf(
         )
 
 
-def eval_task(model_dir: str, task: str):
+def eval_tasks(model_dir: str, tasks: list[str]):
     from lm_eval import simple_evaluate
 
     results = simple_evaluate(
@@ -222,7 +230,7 @@ def eval_task(model_dir: str, task: str):
         model_args={
             "pretrained": model_dir,
         },
-        tasks=[task],
+        tasks=tasks,
         device="cuda:0",
         batch_size=1,
         log_samples=False,
@@ -244,6 +252,28 @@ if __name__ == "__main__":
         default="float32",
         help="Export dtype for HF checkpoint (default: float32)",
     )
+    parser.add_argument(
+        "--disable_sparse_compression",
+        action="store_true",
+        help="Disable sparse compression (default: False)",
+    )
+    parser.add_argument(
+        "--save_uncompressed",
+        action="store_true",
+        help="Save uncompressed checkpoint (default: False)",
+    )
+    parser.add_argument(
+        "--skip_export",
+        action="store_true",
+        help="Skip checkpoint export (default: False)",
+    )
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        nargs="+",
+        help="Tasks to evaluate (default: ['wikitext'])",
+        default=["wikitext"],
+    )
     args = parser.parse_args()
 
     config_manager = ConfigManager()
@@ -257,22 +287,26 @@ if __name__ == "__main__":
 
     model_name = job_config.model.name
     model_flavor = job_config.model.flavor
+    
+    if not args.skip_export:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for pattern in ["*.json", "*.py"]:
+            for extra_file in hf_assets_path.glob(pattern):
+                shutil.copy(extra_file, output_dir)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for pattern in ["*.json", "*.py"]:
-        for extra_file in hf_assets_path.glob(pattern):
-            shutil.copy(extra_file, output_dir)
+        convert_to_hf(
+            job_config,
+            input_dir.as_posix(),
+            output_dir.as_posix(),
+            model_name,
+            model_flavor,
+            hf_assets_path.as_posix(),
+            args.export_dtype,
+            save_compressed=not args.save_uncompressed,
+            disable_sparse_compression=args.disable_sparse_compression,
+        )
+        sharded_output_dir = output_dir / "sharded"
+        shutil.rmtree(sharded_output_dir, ignore_errors=True)
 
-    convert_to_hf(
-        job_config,
-        input_dir.as_posix(),
-        output_dir.as_posix(),
-        model_name,
-        model_flavor,
-        hf_assets_path.as_posix(),
-        args.export_dtype,
-    )
-    sharded_output_dir = output_dir / "sharded"
-    shutil.rmtree(sharded_output_dir, ignore_errors=True)
-
-    eval_task(output_dir.as_posix(), "wikitext")
+    if args.tasks:
+        eval_tasks(output_dir.as_posix(), args.tasks)

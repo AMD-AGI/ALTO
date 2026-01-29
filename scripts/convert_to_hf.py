@@ -92,7 +92,7 @@ def get_model_compressor(
         None,
     )
     if converter is None:
-        raise ValueError("ModelOptConverter not found in model_converters")
+        return None
     modifiers = converter.recipe.modifiers
 
     if sparsity_config is None:

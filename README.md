@@ -88,8 +88,9 @@ We have patched the state_dict_adapter to save the observer/modifier states in h
   * [ ] compressed tensors for sparsification
   * [ ] layer name mapping in the ignore list
   * [ ] include model optimizer states in fqn_to_index_mapping
-  * [ ] permutation of Q, K scale/zero_point
+  * [x] permutation of Q, K scale/zero_point
     * The weight in torchtitan has a different layout
+    * We have patched torchtitan llama3 models to use the transformers layout
 * parallelization
   * [x] PP
   * [ ] other parallelization dims

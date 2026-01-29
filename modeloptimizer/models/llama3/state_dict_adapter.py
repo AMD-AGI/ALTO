@@ -1,21 +1,19 @@
-from unittest.mock import patch
-from typing import Callable
-from functools import partial
-from contextlib import contextmanager
-
 import torch
-from torchtitan.models.llama3 import Llama3StateDictAdapter, get_train_spec
-from torchtitan.models.llama3.model import model as llama3_model_module
+from torchtitan.models.llama3 import (
+    Llama3StateDictAdapter as OriginalLlama3StateDictAdapter,)
+
+__all__ = ["Llama3StateDictAdapter"]
 
 
-class PatchedLlama3StateDictAdapter(Llama3StateDictAdapter):
+class Llama3StateDictAdapter(OriginalLlama3StateDictAdapter):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # TODO: wq, wk scale/zero_point permutation
         # add quantization states
+        self.populate_extra_map()
 
+    def populate_extra_map(self):
         # collect candidate layers
         self.candidate_layers = {
             k[:-len(".weight")]: v[:-len(".weight")]
@@ -64,52 +62,3 @@ class PatchedLlama3StateDictAdapter(Llama3StateDictAdapter):
     def _reverse_permute(self, w: torch.Tensor, *args,
                          **kwargs) -> torch.Tensor:
         return w
-
-
-def patched_get_train_spec():
-    train_spec = get_train_spec()
-    train_spec.state_dict_adapter = PatchedLlama3StateDictAdapter
-    return train_spec
-
-
-patcher = patch("torchtitan.models.llama3.get_train_spec",
-                patched_get_train_spec)
-patcher.__enter__()
-
-
-def patched_apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-    func: Callable[[torch.Tensor, torch.Tensor, torch.Tensor],
-                   tuple[torch.Tensor, torch.Tensor]],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    head_dim = xq.shape[-1]
-    xq = xq.reshape(
-        *xq.shape[:-1],
-        2,
-        head_dim // 2,
-    ).transpose(-1, -2).reshape(
-        *xq.shape[:-1],
-        head_dim,
-    ).contiguous()
-    xk = xk.reshape(
-        *xk.shape[:-1],
-        2,
-        head_dim // 2,
-    ).transpose(-1, -2).reshape(
-        *xk.shape[:-1],
-        head_dim,
-    ).contiguous()
-    return func(xq, xk, freqs_cis)
-
-
-@contextmanager
-def patch_apply_rotary_emb():
-    original_apply_rotary_emb = llama3_model_module.apply_rotary_emb
-    llama3_model_module.apply_rotary_emb = partial(patched_apply_rotary_emb, func=original_apply_rotary_emb)
-    yield
-    llama3_model_module.apply_rotary_emb = original_apply_rotary_emb
-
-
-patch_apply_rotary_emb().__enter__()

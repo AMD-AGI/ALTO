@@ -190,10 +190,14 @@ def convert_to_hf(
         disable_sparse_compression=disable_sparse_compression,
     )
     if compressor is not None:
+        # adjust ignore list to match the hf state dict
+        if compressor.quantization_config is not None:
+            compressor.quantization_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.quantization_config.ignore)
+        if compressor.sparsity_config is not None:
+            compressor.sparsity_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.sparsity_config.ignore)
         hot_fix_for_tied_word_embeddings(model, compressor)
-        state_dict = compressor.compress(model)
 
-        # TODO: update layer name mapping in the "ignore" entry
+        state_dict = compressor.compress(model)
         compressor.update_config(output_dir)
 
     # convert state dict tt->hf
@@ -271,8 +275,8 @@ if __name__ == "__main__":
         "--tasks",
         type=str,
         nargs="+",
-        help="Tasks to evaluate (default: ['wikitext'])",
-        default=["wikitext"],
+        help="Tasks to evaluate (default: [])",
+        default=[],
     )
     args = parser.parse_args()
 
@@ -287,7 +291,7 @@ if __name__ == "__main__":
 
     model_name = job_config.model.name
     model_flavor = job_config.model.flavor
-    
+
     if not args.skip_export:
         output_dir.mkdir(parents=True, exist_ok=True)
         for pattern in ["*.json", "*.py"]:

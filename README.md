@@ -106,7 +106,7 @@ CUDA_VISIBLE_DEVICES=0 python ./scripts/convert_to_hf.py \
 * checkpointing
   * [x] compressed tensors for quantization
   * [x] compressed tensors for sparsification
-  * [ ] layer name mapping in the ignore list
+  * [x] layer name mapping in the ignore list
   * [ ] include model optimizer states in fqn_to_index_mapping
   * [x] permutation of Q, K scale/zero_point
     * The weight in torchtitan has a different layout

@@ -23,12 +23,12 @@ class ModelPatcher:
                     f"torchtitan.models.{model_name}.model.{patch_module}")
                 for attr_name in source_module.__all__:
                     patched_attr = getattr(source_module, attr_name)
-                    print(
-                        f"Patching {attr_name} of {model_name}: {patched_attr}")
+                    # print(
+                    #     f"Patching {attr_name} of {model_name}: {patched_attr}")
                     original_attr = getattr(target_module, attr_name)
-                    print(
-                        f"Original {attr_name} of {model_name}: {original_attr}"
-                    )
+                    # print(
+                    #     f"Original {attr_name} of {model_name}: {original_attr}"
+                    # )
                     setattr(target_module, attr_name, patched_attr)
                     patch(
                         f"torchtitan.models.{model_name}.model.{patch_module}.{attr_name}",

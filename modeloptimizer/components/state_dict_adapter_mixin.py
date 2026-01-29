@@ -1,3 +1,5 @@
+import re
+
 __all__ = ["StateDictAdapterMixin"]
 
 
@@ -45,3 +47,17 @@ class StateDictAdapterMixin:
 
         # TODO: update fqn_to_index_mapping
         assert self.fqn_to_index_mapping is None
+
+    def map_ignore_list_to_hf(self, ignore_list: list[str]) -> list[str]:
+        reverse_candidate_layers = {v: k for k, v in self.candidate_layers.items()}
+        new_ignore_list = []
+        for key in ignore_list:
+            if "layers" in key:
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                layer_num = re.search(r"\d+", key).group(0)
+                new_key = reverse_candidate_layers[abstract_key]
+                new_key = new_key.format(layer_num)
+                new_ignore_list.append(new_key)
+            else:
+                new_ignore_list.append(key)
+        return new_ignore_list

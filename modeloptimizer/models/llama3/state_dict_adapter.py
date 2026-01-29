@@ -14,6 +14,9 @@ class Llama3StateDictAdapter(OriginalLlama3StateDictAdapter):
         # add quantization states
         StateDictAdapterMixin.populate_extra_map(self)
 
+    def map_ignore_list_to_hf(self, ignore_list: list[str]) -> list[str]:
+        return StateDictAdapterMixin.map_ignore_list_to_hf(self, ignore_list)
+
     def _permute(self, w: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         return w
 

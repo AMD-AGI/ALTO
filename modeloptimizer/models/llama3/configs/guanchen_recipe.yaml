@@ -1,0 +1,39 @@
+# sparsity_stage:
+#   sparsity_modifiers:
+#     WandaModifier:
+#       sparsity: 0.5
+#       mask_structure: "2:4"
+#       targets: ["Linear"]
+#       ignore: ["output"]
+
+# sparsity_stage:
+#   sparsity_modifiers:
+#     SparseGPTModifier:
+#       sparsity: 0.5
+#       mask_structure: "2:4"
+#       targets: ["Linear"]
+#       ignore: ["output"]
+
+# sparsity_stage:
+#   sparsity_modifiers:
+#     MagnitudeModifier:
+#       sparsity: 0.5
+#       mask_structure: "2:4"
+#       targets: ["Linear"]
+#       ignore: ["output"]
+
+# sparsity_stage:
+#   sparsity_modifiers:
+#     AdmmModifier:
+#       sparsity: 0.5
+#       mask_structure: "2:4"
+#       targets: ["Linear"]
+#       ignore: ["output"]
+
+sparsity_stage:
+  sparsity_modifiers:
+    AlpsModifier:
+      sparsity: 0.5
+      mask_structure: "2:4"
+      targets: ["Linear"]
+      ignore: ["output"]

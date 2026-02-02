@@ -18,17 +18,22 @@ __all__ = ["AlpsModifier"]
 class AlpsModifier(SparsityModifierBase):
     """
     Modifier for applying the one-shot ALPS algorithm to a model
+    from the paper: https://arxiv.org/abs/2406.07831
 
     Sample yaml:
 
     ```yaml
-    test_stage:
-      sparsity_modifiers:
+    sparsity_modifiers:
         AlpsModifier:
-          sparsity: 0.5
-          mask_structure: "2:4"
-          targets: ['Linear']
-          ignore: ['re:.*lm_head']
+            sparsity: 0.5
+            mask_structure: "2:4"
+            dampening_frac: 0.01
+            rho: 1.0
+            iterations: 16
+            update_iter: 16
+            switch_iter: 16
+            targets: ['Linear']
+            ignore: ['re:.*lm_head']
     ```
 
     Lifecycle:
@@ -44,8 +49,14 @@ class AlpsModifier(SparsityModifierBase):
     :param mask_structure: String to define the structure of the mask to apply.
         Must be of the form N:M where N, M are integers that define a custom block
         shape. Defaults to 0:0 which represents an unstructured mask.
-    :param targets: list of layer names to compress during SparseGPT, or '__ALL__'
-        to compress every layer in the model. Alias for `sequential_targets`
+    :param dampening_frac: Amount of dampening to apply to H, as a fraction of the
+        diagonal norm
+    :param rho: Regularization parameter
+    :param iterations: Number of iterations to run the ALPS algorithm
+    :param update_iter: Number of iterations to update the support
+    :param switch_iter: Number of iterations to switch the support
+    :param targets: list of layer names to compress during ALPS, or '__ALL__'
+        to compress every layer in the model. 
     :param ignore: optional list of module class names or submodule names to not
         quantize even if they match a target. Defaults to empty list.
     """
@@ -71,6 +82,9 @@ class AlpsModifier(SparsityModifierBase):
             num_samples = observer.num_samples
 
             logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
+            assert isinstance(
+                observer, HessianObserver
+            ), "AlpsModifier requires hessian observer"
             sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
                 hessian=observer.stats,

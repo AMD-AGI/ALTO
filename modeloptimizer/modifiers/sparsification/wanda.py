@@ -24,11 +24,10 @@ class WandaModifier(SparsityModifierBase):
     Sample yaml:
 
     ```yaml
-    test_stage:
-      sparsity_modifiers:
-        WandaPruningModifier:
-          sparsity: 0.5
-          mask_structure: "2:4"
+    sparsity_modifiers:
+        WandaModifier:
+            sparsity: 0.5
+            mask_structure: "2:4"
     ```
 
     Lifecycle:
@@ -44,18 +43,11 @@ class WandaModifier(SparsityModifierBase):
         - remove_hooks()
 
     :param sparsity: Sparsity to compress model to
-    :param sparsity_profile: Can be set to 'owl' to use Outlier Weighed
-        Layerwise Sparsity (OWL), more information can be found
-        in the paper https://arxiv.org/pdf/2310.05175
     :param mask_structure: String to define the structure of the mask to apply.
         Must be of the form N:M where N, M are integers that define a custom block
         shape. Defaults to 0:0 which represents an unstructured mask.
-    :param owl_m: Number of outliers to use for OWL
-    :param owl_lmbda: Lambda value to use for OWL
-    :param sequential_targets: list of layer names to compress during OBCQ, or '__ALL__'
-        to compress every layer in the model. Alias for `targets`
     :param targets: list of layer names to compress during OBCQ, or '__ALL__'
-        to compress every layer in the model. Alias for `sequential_targets`
+        to compress every layer in the model. 
     :param ignore: optional list of module class names or submodule names to not
         quantize even if they match a target. Defaults to empty list.
     """
@@ -98,9 +90,12 @@ class WandaModifier(SparsityModifierBase):
         """
         Run pruning on the layer up to the target sparsity value.
 
+        :param module: module to sparsify
+        :param row_scalar: row scalar to use for sparsification
         :param sparsity: target sparsity to reach for layer
-        :param prunen: N for N:M pruning
-        :param prunem: M for N:M pruning
+        :param prune_n: N for N:M pruning
+        :param prune_m: M for N:M pruning
+        :return: sparsified weight
         """
 
         final_shape = module.weight.shape
@@ -141,4 +136,4 @@ class WandaModifier(SparsityModifierBase):
 
         W = W.reshape(final_shape).to(final_dtype)
 
-        return W
+        return W, W_mask.reshape(final_shape)

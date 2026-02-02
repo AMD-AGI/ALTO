@@ -21,31 +21,29 @@ class MagnitudeModifier(SparsityModifierBase):
     Sample yaml:
 
     ```yaml
-    test_stage:
-      sparsity_modifiers:
-        WandaPruningModifier:
-          sparsity: 0.5
-          mask_structure: "2:4"
+    sparsity_modifiers:
+        MagnitudeModifier:
+            sparsity: 0.5
+            mask_structure: "2:4"
+            targets: ['Linear']
+            ignore: ['re:.*lm_head']
     ```
 
     Lifecycle:
 
     - on_initialize
-        - register_hook(module, calibrate_module, "forward")
-        - run_sequential / run_basic
-            - make_empty_row_scalars
-            - accumulate_row_scalars
+        - data-free
     - on_sequential_batch_end
         - sparsify_weight
     - on_finalize
-        - remove_hooks()
+        - None
 
     :param sparsity: Sparsity to compress model to
     :param mask_structure: String to define the structure of the mask to apply.
         Must be of the form N:M where N, M are integers that define a custom block
         shape. Defaults to 0:0 which represents an unstructured mask.
-    :param targets: list of layer names to compress during OBCQ, or '__ALL__'
-        to compress every layer in the model. Alias for `sequential_targets`
+    :param targets: list of layer names to compress during Magnitude, or '__ALL__'
+        to compress every layer in the model.
     :param ignore: optional list of module class names or submodule names to not
         quantize even if they match a target. Defaults to empty list.
     """
@@ -61,7 +59,7 @@ class MagnitudeModifier(SparsityModifierBase):
         for module, name in self._module_names.items():
             sparsity = self._module_sparsities[module]
             logger.info(f"Sparsifying {name} to {sparsity}")
-            sparsified_weight = self._sparsify_weight(
+            sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
                 sparsity=sparsity,
                 prune_n=self._prune_n,
@@ -79,6 +77,7 @@ class MagnitudeModifier(SparsityModifierBase):
         """
         Run pruning on the layer up to the target sparsity value.
 
+        :param module: module to sparsify
         :param sparsity: target sparsity to reach for layer
         :param prunen: N for N:M pruning
         :param prunem: M for N:M pruning
@@ -119,4 +118,4 @@ class MagnitudeModifier(SparsityModifierBase):
 
         W = W.reshape(final_shape).to(final_dtype)
 
-        return W
+        return W, W_mask.reshape(final_shape)

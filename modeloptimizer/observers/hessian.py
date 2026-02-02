@@ -11,7 +11,9 @@ PRECISION = torch.float32
 @register_observer("hessian")
 class HessianObserver(Observer):
     """
-    A custom observer that computes the Hessian matrix of the activations.
+    Hessian matrix of the activations.
+        H = \sum_{i=1}^{N} x_i x_i^T / N.
+        A naive implementation of the Hessian matrix.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -78,7 +80,10 @@ class HessianObserver(Observer):
 @register_observer("hessian_obs")
 class HessianObsObserver(HessianObserver):
     """
-    A custom observer that computes the Hessian matrix of the activations.
+    Hessian matrix of the activations.
+        A normalized implementation of the Hessian matrix.
+        Sample-by-sample amplitude decay with increasing sample size.
+        Suitable for SparseGPT and GPTQ.
     """
 
     def __init__(self, *args, **kwargs) -> None:

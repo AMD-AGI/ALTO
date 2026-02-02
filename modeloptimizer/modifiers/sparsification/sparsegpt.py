@@ -15,19 +15,19 @@ __all__ = ["SparseGPTModifier"]
 class SparseGPTModifier(SparsityModifierBase):
     """
     Modifier for applying the one-shot SparseGPT algorithm to a model
+    from the paper: https://arxiv.org/abs/2301.00774
 
     Sample yaml:
 
     ```yaml
-    test_stage:
-      obcq_modifiers:
+    sparsity_modifiers:
         SparseGPTModifier:
-          sparsity: 0.5
-          mask_structure: "2:4"
-          dampening_frac: 0.001
-          block_size: 128
-          targets: ['Linear']
-          ignore: ['re:.*lm_head']
+            sparsity: 0.5
+            mask_structure: "2:4"
+            dampening_frac: 0.01
+            block_size: 128
+            targets: ['Linear']
+            ignore: ['re:.*lm_head']
     ```
 
     Lifecycle:
@@ -40,27 +40,17 @@ class SparseGPTModifier(SparsityModifierBase):
         - remove_hooks()
 
     :param sparsity: Sparsity to compress model to
-    :param sparsity_profile: Can be set to 'owl' to use Outlier Weighed
-        Layerwise Sparsity (OWL), more information can be found
-        in the paper https://arxiv.org/pdf/2310.05175
     :param mask_structure: String to define the structure of the mask to apply.
         Must be of the form N:M where N, M are integers that define a custom block
         shape. Defaults to 0:0 which represents an unstructured mask.
-    :param owl_m: Number of outliers to use for OWL
-    :param owl_lmbda: Lambda value to use for OWL
     :param block_size: Used to determine number of columns to compress in one pass
     :param dampening_frac: Amount of dampening to apply to H, as a fraction of the
         diagonal norm
     :param preserve_sparsity_mask: Whether or not to preserve the sparsity mask
         during when applying sparsegpt, this becomes useful when starting from a
         previously pruned model, defaults to False.
-    :param offload_hessians: Set to True for decreased memory usage but increased
-        runtime.
-    :param sequential_targets: list of layer names to compress
-        during SparseGPT, or '__ALL__' to compress every layer
-        in the model. Alias for `targets`
     :param targets: list of layer names to compress during SparseGPT, or '__ALL__'
-        to compress every layer in the model. Alias for `sequential_targets`
+        to compress every layer in the model. 
     :param ignore: optional list of module class names or submodule names to not
         quantize even if they match a target. Defaults to empty list.
     """
@@ -69,7 +59,6 @@ class SparseGPTModifier(SparsityModifierBase):
     block_size: int = 128
     dampening_frac: float | None = 0.01
     preserve_sparsity_mask: bool = False
-    offload_hessians: bool = False
 
     def on_initialize(self, model: Module, **kwargs) -> bool:
         self._observer_name = "hessian_obs"
@@ -86,6 +75,9 @@ class SparseGPTModifier(SparsityModifierBase):
 
             logger.info(
                 f"Sparsifying {name} using {num_samples.item()} samples")
+            assert isinstance(
+                observer, HessianObsObserver
+            ), "SparseGPTModifier requires hessian_obs observer"
             loss, sparsified_weight = self._sparsify_weight(
                 module=module,
                 hessian=observer.stats,

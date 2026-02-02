@@ -15,19 +15,19 @@ __all__ = ["AdmmModifier"]
 class AdmmModifier(SparsityModifierBase):
     """
     Modifier for applying the one-shot ADMM algorithm to a model
+    from the paper: https://arxiv.org/abs/2401.02938
 
     Sample yaml:
 
     ```yaml
-    test_stage:
-      sparsity_modifiers:
+    sparsity_modifiers:
         AdmmModifier:
-          sparsity: 0.5
-          mask_structure: "2:4"
-          dampening_frac: 0.01
-          block_size: 128
-          targets: ['Linear']
-          ignore: ['re:.*lm_head']
+            sparsity: 0.5
+            mask_structure: "2:4"
+            dampening_frac: 0.01
+            block_size: 128
+            targets: ['Linear']
+            ignore: ['re:.*lm_head']
     ```
 
     Lifecycle:
@@ -46,8 +46,10 @@ class AdmmModifier(SparsityModifierBase):
     :param block_size: Used to determine number of columns to compress in one pass
     :param dampening_frac: Amount of dampening to apply to H, as a fraction of the
         diagonal norm
-    :param targets: list of layer names to compress during SparseGPT, or '__ALL__'
-        to compress every layer in the model. Alias for `sequential_targets`
+    :param iterative_prune_granularity: Number of iterations to prune the model
+    :param iterations: Number of iterations to run the ADMM algorithm
+    :param targets: list of layer names to compress during ADMM, or '__ALL__'
+        to compress every layer in the model. 
     :param ignore: optional list of module class names or submodule names to not
         quantize even if they match a target. Defaults to empty list.
     """
@@ -71,6 +73,9 @@ class AdmmModifier(SparsityModifierBase):
             num_samples = observer.num_samples
 
             logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
+            assert isinstance(
+                observer, HessianObserver
+            ), "ADMMModifier requires hessian observer"
             sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
                 hessian=observer.stats,

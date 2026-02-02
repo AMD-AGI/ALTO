@@ -6,7 +6,7 @@ from torch.nn import Module
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers.sparsification.base import SparsityModifierBase
-from modeloptimizer.observers.hessian import SGPT_PRECISION, HessianObserver
+from modeloptimizer.observers.hessian import PRECISION, HessianObsObserver
 from modeloptimizer.utils.pytorch.module import TransformerConv1D
 
 __all__ = ["SparseGPTModifier"]
@@ -72,7 +72,7 @@ class SparseGPTModifier(SparsityModifierBase):
     offload_hessians: bool = False
 
     def on_initialize(self, model: Module, **kwargs) -> bool:
-        self._observer_name = "hessian"
+        self._observer_name = "hessian_obs"
         return super().on_initialize(model, **kwargs)
 
     def compress_modules(self):
@@ -86,9 +86,6 @@ class SparseGPTModifier(SparsityModifierBase):
 
             logger.info(
                 f"Sparsifying {name} using {num_samples.item()} samples")
-            assert isinstance(
-                observer, HessianObserver
-            ), "SparseGPTModifier requires hessian observer"
             loss, sparsified_weight = self._sparsify_weight(
                 module=module,
                 hessian=observer.stats,
@@ -128,7 +125,7 @@ class SparseGPTModifier(SparsityModifierBase):
             W = W.flatten(1)
         elif TransformerConv1D and isinstance(module, TransformerConv1D):
             W.transpose_(0, 1)
-        W = W.to(dtype=SGPT_PRECISION)
+        W = W.to(dtype=PRECISION)
         num_rows = W.shape[0]
         num_columns = W.shape[1]
 

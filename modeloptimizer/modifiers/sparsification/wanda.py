@@ -13,10 +13,10 @@ from modeloptimizer.modifiers.sparsification.base import SparsityModifierBase
 from modeloptimizer.observers.per_channel_norm import WANDA_PRECISION, PerChannelNormObserver
 from modeloptimizer.utils.pytorch.module import TransformerConv1D
 
-__all__ = ["WandaPruningModifier"]
+__all__ = ["WandaModifier"]
 
 
-class WandaPruningModifier(SparsityModifierBase):
+class WandaModifier(SparsityModifierBase):
     """
     Modifier for applying the one-shot WANDA algorithm to a model
     from the paper: https://arxiv.org/abs/2306.11695

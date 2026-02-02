@@ -24,7 +24,6 @@ from modeloptimizer.utils.pytorch.module import (
 )
 
 LAYER_OBSERVER_BASE_NAME = "sparsity"
-OWL_OBSERVER_BASE_NAME = "sparsity_owl"
 
 def calibrate_input_hook(module: Module, args: Any, base_name: str):
     """
@@ -45,8 +44,6 @@ class SparsityModifierBase(Modifier):
     sparsity: float | list[float] | dict[str, float] | None
     sparsity_profile: str | None = None
     mask_structure: str = "0:0"
-    owl_m: int | None = None
-    owl_lmbda: float | None = None
 
     # data pipeline arguments
     sequential_targets: str | list[str] | None = None
@@ -65,42 +62,14 @@ class SparsityModifierBase(Modifier):
     _layer_observers: dict[torch.nn.Module,
                       Observer] = PrivateAttr(default_factory=dict)
     _observer_name: str | None = PrivateAttr(default=None)
-    _owl_observer_name: str | None = PrivateAttr(default=None)
-    _owl_layer_observers: dict[torch.nn.Module, Observer] = PrivateAttr(default_factory=dict)
-
-    @field_validator("sparsity_profile", mode="before")
-    def validate_sparsity_profile(cls, value: str | None) -> bool:
-        if value is None:
-            return value
-
-        value = value.lower()
-
-        profile_options = ["owl"]
-        if value not in profile_options:
-            raise ValueError(f"Please choose profile from {profile_options}")
-
-        return value
 
     @model_validator(mode="after")
     def validate_model_after(
             model: "SparsityModifierBase") -> "SparsityModifierBase":
         profile = model.sparsity_profile
-        owl_m = model.owl_m
-        owl_lmbda = model.owl_lmbda
         mask_structure = model.mask_structure
-
-        has_owl_m = owl_m is not None
-        has_owl_lmbda = owl_lmbda is not None
-        has_owl = profile == "owl"
-        owl_args = (has_owl_m, has_owl_lmbda, has_owl)
-        if any(owl_args) and not all(owl_args):
-            raise ValueError(
-                'Must provide all of `profile="owl"`, `owl_m` and `owl_lmbda` or none'
-            )
-
         model._prune_n, model._prune_m = model._split_mask_structure(
             mask_structure)
-
         return model
 
     @abstractmethod
@@ -138,29 +107,13 @@ class SparsityModifierBase(Modifier):
         """
         Initialize and run the SparseGPT algorithm on the current state
         """
-
         # infer module and sequential targets
         self.sequential_targets = self._infer_sequential_targets(model)
         self._target_layers = get_layers(self.targets,
                                          model)  # layers containing targets
 
         self._initialize_module_name_mappings()
-
-        # infer layer sparsities
-        if self.sparsity_profile == "owl":
-            logger.info("Using OWL to infer target layer-wise sparsities")
-            if self._observer_name != "per_channel_norm":
-                self._owl_observer_name = "per_channel_norm"
-                # initialize observers for OWL
-                self._initialize_observers(
-                    self._owl_observer_name,
-                    OWL_OBSERVER_BASE_NAME,
-                    self._owl_layer_observers,
-                )
-            else:
-                self._owl_layer_observers = self._layer_observers
-        else:
-            self._initialize_module_sparsities(model)
+        self._initialize_module_sparsities(model)
 
         self._initialize_observers(
             self._observer_name,
@@ -173,19 +126,11 @@ class SparsityModifierBase(Modifier):
         self.started_ = True
         for module, observer in self._layer_observers.items():
             observer.enable()
-        for module, observer in self._owl_layer_observers.items():
-            observer.enable()
 
     def post_step(self, model: Module, **kwargs):
-        if self.sparsity_profile == "owl":
-            blocks = get_layers(self.sequential_targets, model)
-            self.sparsity = self._infer_owl_layer_sparsity(model, blocks)
-            self._initialize_module_sparsities(model)
         with torch.no_grad():
             self.compress_modules()
         for module, observer in self._layer_observers.items():
-            observer.disable()
-        for module, observer in self._owl_layer_observers.items():
             observer.disable()
 
     def on_finalize(self, model: Module, **kwargs):
@@ -194,9 +139,6 @@ class SparsityModifierBase(Modifier):
         for module, observer in self._layer_observers.items():
             delattr(module, f"{observer.base_name}_observer")
         self._layer_observers.clear()
-        for module, observer in self._owl_layer_observers.items():
-            delattr(module, f"{observer.base_name}_observer")
-        self._owl_layer_observers.clear()
         self._module_names.clear()
         self._target_layers.clear()
         self._module_sparsities.clear()
@@ -296,46 +238,6 @@ class SparsityModifierBase(Modifier):
                 return [self.sequential_targets]
             case _:
                 return self.sequential_targets
-
-    @torch.no_grad()
-    def _infer_owl_layer_sparsity(
-        self,
-        model: torch.nn.Module,
-        layers: dict[str, torch.nn.Module],
-    ) -> dict[str, float]:
-        groups = {}
-        for name, layer in layers.items():
-            prunable_layers = get_prunable_layers(layer)
-            z = [
-                m.weight.abs() * self._owl_layer_observers[m].stats.unsqueeze(0)
-                for n, m in prunable_layers.items()
-            ]
-            groups[name] = torch.cat([item.flatten().cpu() for item in z])
-
-        outlier_ratios = {}
-        for group in groups:
-            threshold = torch.mean(groups[group]) * self.owl_m
-            outlier_ratios[group] = (100 *
-                                     (groups[group] > threshold).sum().item() /
-                                     groups[group].numel())
-        outlier_ratios_arr = numpy.array(
-            [outlier_ratios[k] for k in outlier_ratios])
-        for k in outlier_ratios:
-            outlier_ratios[k] = (
-                outlier_ratios[k] - outlier_ratios_arr.min()) * (
-                    1 / (outlier_ratios_arr.max() - outlier_ratios_arr.min()) *
-                    self.owl_lmbda * 2)
-        outlier_ratios_arr = numpy.array(
-            [outlier_ratios[k] for k in outlier_ratios])
-        sparsities = {
-            int(k.split(".")[-1]):
-                1 - (outlier_ratios[k] - numpy.mean(outlier_ratios_arr) +
-                     (1 - float(self.sparsity))) for k in outlier_ratios
-        }
-        logger.info(f"OWL sparsities for sp={self.sparsity} are:")
-        for k in sparsities:
-            logger.info(f"Sparsity for layer #{k}: {sparsities[k]}")
-        return sparsities
 
     def _split_mask_structure(self, mask_structure: str) -> tuple[int, int]:
         n, m = mask_structure.split(":")

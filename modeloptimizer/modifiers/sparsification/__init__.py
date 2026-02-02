@@ -1,4 +1,4 @@
-from .wanda import WandaPruningModifier
-from .sgpt import SparseGPTModifier
+from .wanda import WandaModifier
+from .sparsegpt import SparseGPTModifier
 
-__all__ = ["WandaPruningModifier", "SparseGPTModifier"]
+__all__ = ["WandaModifier", "SparseGPTModifier"]

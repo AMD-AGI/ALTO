@@ -1,18 +1,18 @@
-# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/pruning/sparsegpt/base.py
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/sparsification/sparsegpt/base.py
 # licensed under the Apache License 2.0
 
 import torch
 from torch.nn import Module
 from torchtitan.tools.logging import logger
 
-from modeloptimizer.modifiers.sparsification.base import SparsityModifierBase
+from modeloptimizer.modifiers.pruning.base import PruningModifierBase
 from modeloptimizer.observers.hessian import PRECISION, HessianObsObserver
 from modeloptimizer.utils.pytorch.module import TransformerConv1D
 
-__all__ = ["SparseGPTModifier"]
+__all__ = ["CosineSimilarityModifier"]
 
 
-class SparseGPTModifier(SparsityModifierBase):
+class CosineSimilarityModifier(PruningModifierBase):
     """
     Modifier for applying the one-shot SparseGPT algorithm to a model
     from the paper: https://arxiv.org/abs/2301.00774
@@ -52,7 +52,7 @@ class SparseGPTModifier(SparsityModifierBase):
     :param targets: list of layer names to compress during SparseGPT, or '__ALL__'
         to compress every layer in the model. 
     :param ignore: optional list of module class names or submodule names to not
-        sparsify even if they match a target. Defaults to empty list.
+        quantize even if they match a target. Defaults to empty list.
     """
 
     # modifier arguments
@@ -73,9 +73,11 @@ class SparseGPTModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
-            assert isinstance(observer, HessianObsObserver), \
-                "SparseGPTModifier requires hessian_obs observer"
+            logger.info(
+                f"Sparsifying {name} using {num_samples.item()} samples")
+            assert isinstance(
+                observer, HessianObsObserver
+            ), "SparseGPTModifier requires hessian_obs observer"
             loss, sparsified_weight = self._sparsify_weight(
                 module=module,
                 hessian=observer.stats,

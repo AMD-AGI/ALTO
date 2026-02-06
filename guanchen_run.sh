@@ -17,6 +17,8 @@ CONFIG_FILE=${CONFIG_FILE:-"./modeloptimizer/models/llama3/configs/guanchen_l3_8
 TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
 DRY_RUN=${DRY_RUN:-0}
 
+rm -rf outputs/
+
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
 if [ "$DRY_RUN" = "1" ]; then

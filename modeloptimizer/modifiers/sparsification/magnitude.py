@@ -1,9 +1,5 @@
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/pruning/wanda/base.py
 # licensed under the Apache License 2.0
-# modifications:
-# - extract layer_index from layer_name (in case PP are used)
-# - isolate the calibration from sparsification into a separate observer
-# - unifies the observers used by Wanda and OWL
 
 import torch
 from torch.nn import Module
@@ -45,7 +41,7 @@ class MagnitudeModifier(SparsityModifierBase):
     :param targets: list of layer names to compress during Magnitude, or '__ALL__'
         to compress every layer in the model.
     :param ignore: optional list of module class names or submodule names to not
-        quantize even if they match a target. Defaults to empty list.
+        sparsify even if they match a target. Defaults to empty list.
     """
 
     def on_initialize(self, model: Module, **kwargs) -> bool:
@@ -53,9 +49,6 @@ class MagnitudeModifier(SparsityModifierBase):
         return super().on_initialize(model, **kwargs)
 
     def compress_modules(self):
-        """
-        Sparsify modules which have been calibrated
-        """
         for module, name in self._module_names.items():
             sparsity = self._module_sparsities[module]
             logger.info(f"Sparsifying {name} to {sparsity}")

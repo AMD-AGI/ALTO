@@ -49,11 +49,74 @@ def log_calibration(
     metrics_processor.time_last_log = time.perf_counter()
     metrics_processor.device_memory_monitor.reset_peak_stats()
 
+
+def log_stage2_optimization(
+    metrics_processor: MetricsProcessor,
+    micro_step: int,
+    extra_metrics: dict[str, Any] | None = None,
+):
+    time_delta = time.perf_counter() - metrics_processor.time_last_log
+
+    device_mem_stats = metrics_processor.device_memory_monitor.get_peak_stats()
+
+    # tokens per second per device, abbreviated as tps
+    tps = metrics_processor.ntokens_since_last_log / (
+        time_delta * metrics_processor.parallel_dims.non_data_parallel_size)
+
+    metrics = {
+        "stage2_optimization_metrics/throughput(tps)":
+            tps,
+        "stage2_optimization_metrics/memory/max_active(GiB)":
+            device_mem_stats.max_active_gib,
+        "stage2_optimization_metrics/memory/max_active(%)":
+            device_mem_stats.max_active_pct,
+        "stage2_optimization_metrics/memory/max_reserved(GiB)":
+            device_mem_stats.max_reserved_gib,
+        "stage2_optimization_metrics/memory/max_reserved(%)":
+            device_mem_stats.max_reserved_pct,
+    }
+    if extra_metrics:
+        metrics.update(extra_metrics)
+    metrics_processor.logger.log(metrics, micro_step)
+
+    color = metrics_processor.color
+    logger.info(
+        f"{color.red}stage2 optimization step: {micro_step:2}  "
+        f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+        f"({device_mem_stats.max_reserved_pct:.2f}%)  ")
+
+    metrics_processor.ntokens_since_last_log = 0
+    metrics_processor.time_last_log = time.perf_counter()
+    metrics_processor.device_memory_monitor.reset_peak_stats()
+
 class Trainer(TorchTitanTrainer):
 
     def __init__(self, job_config: JobConfig):
         super().__init__(job_config)
         self.post_training = True
+        self.enable_data_cache = True
+        self._input_cache = []
+        self._output_cache = []
+
+    def cache_input(self, data: dict[str, torch.Tensor]):
+        if self.enable_data_cache:
+            self._input_cache.append(data)
+
+    def cache_output(self, output: torch.Tensor):
+        if self.enable_data_cache:
+            self._output_cache.append(output)
+
+    def get_cached_input(self):
+        yield from self._input_cache
+
+    def get_cached_output(self):
+        yield from self._output_cache
+
+    def clear_cached_input(self):
+        self._input_cache.clear()
+
+    def clear_cached_output(self):
+        self._output_cache.clear()
 
     @contextmanager
     def pp_no_loss_function(self, pp_schedule):
@@ -91,6 +154,7 @@ class Trainer(TorchTitanTrainer):
 
         if parallel_dims.pp_enabled:
             targets, losses = None, None
+            result = None
             with self.train_context(optional_context_parallel_ctx):
                 with self.pp_no_loss_function(self.pp_schedule):
                     if self.pp_has_first_stage:
@@ -100,6 +164,13 @@ class Trainer(TorchTitanTrainer):
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
+                        )
+                    elif self.pp_has_last_stage:
+                        result = self.pp_schedule.eval(
+                            **extra_kwargs,
+                            target=targets,
+                            losses=losses,
+                            return_outputs=True,
                         )
                     else:
                         self.pp_schedule.eval(
@@ -112,9 +183,9 @@ class Trainer(TorchTitanTrainer):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
-        return
+        return result
 
     def train_step(self, data_iterator: Iterable[tuple[dict[str, torch.Tensor],
                                                        torch.Tensor]]):
@@ -129,11 +200,13 @@ class Trainer(TorchTitanTrainer):
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
-            self.forward_step(input_dict)
+            self.cache_input({k: v.detach() for k, v in input_dict.items()})
+            result = self.forward_step(input_dict)
+            self.cache_output(result.detach())
 
             # log metrics
             if not self.metrics_processor.should_log(_microbatch):
-                return
+                continue
 
             assert not parallel_dims.dp_cp_enabled, "DP CP is not supported in post-training"
 
@@ -144,7 +217,19 @@ class Trainer(TorchTitanTrainer):
             }
             log_calibration(self.metrics_processor, _microbatch, extra_metrics=extra_metrics)
 
-        self.model_converters.post_optimizer_hook(self.model_parts)
+        post_step_kwargs = {
+            "forward_step": self.forward_step,
+            "input_iterator": self.get_cached_input(),
+            "output_iterator": self.get_cached_output(),
+            "metrics_processor": self.metrics_processor,
+            "log_function": log_stage2_optimization,
+        }
+        self.model_converters.post_optimizer_hook(
+            self.model_parts,
+            **post_step_kwargs,
+        )
+        self.clear_cached_input()
+        self.clear_cached_output()
 
     def post_training_tasks(self):
         last_step = self.step >= self.job_config.training.steps

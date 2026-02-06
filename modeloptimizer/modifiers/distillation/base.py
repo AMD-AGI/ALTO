@@ -16,27 +16,9 @@ from modeloptimizer.utils.pytorch.module import (
     get_layers,
 )
 
-TEACHER_INPUT_OBSERVER_BASE_NAME = "input"
-TEACHER_OUTPUT_OBSERVER_BASE_NAME = "output"
-STUDENT_INPUT_OBSERVER_BASE_NAME = "student_input"
-STUDENT_OUTPUT_OBSERVER_BASE_NAME = "student_output"
+TEACHER_OBSERVER_BASE_NAME = "output"
+STUDENT_OBSERVER_BASE_NAME = "student_output"
 
-
-def calibrate_input_hook(module: Module, args: Any, base_name: str):
-    """
-    Hook to calibrate input activations.
-    Will call the observers to update the scales/zp before applying
-    input QDQ in the module's forward pass.
-    """
-    input_tensor = args[0] if isinstance(args, tuple) else args
-    input_tensor = calibrate_activations(module,
-                                         value=input_tensor,
-                                         base_name=base_name)
-    if isinstance(args, tuple):
-        args = (input_tensor,) + args[1:]
-    else:
-        args = input_tensor
-    return args
 
 def calibrate_output_hook(module: Module, _args: Any, output: torch.Tensor, base_name: str):
     """
@@ -67,14 +49,10 @@ class LayerWiseDistillationModifier(Modifier):
     _target_layers: dict[str,
                          torch.nn.Module] = PrivateAttr(default_factory=dict)
 
-    _teacher_input_observers: dict[torch.nn.Module,
+    _teacher_observers: dict[torch.nn.Module,
                            Observer] = PrivateAttr(default_factory=dict)
-    _teacher_output_observers: dict[torch.nn.Module,
+    _student_observers: dict[torch.nn.Module,
                            Observer] = PrivateAttr(default_factory=dict)
-    _student_input_observers: dict[torch.nn.Module,
-                           Observer] = PrivateAttr(default_factory=dict)
-    _student_output_observers: dict[torch.nn.Module,
-                               Observer] = PrivateAttr(default_factory=dict)
 
     def on_initialize(self, model: Module, **kwargs) -> bool:
         if len(self.targets) == 1 and self.targets[0] == "__all__":
@@ -86,73 +64,75 @@ class LayerWiseDistillationModifier(Modifier):
 
         self._initialize_observers(
             self._observer_name,
-            TEACHER_INPUT_OBSERVER_BASE_NAME,
-            self._teacher_input_observers,
+            TEACHER_OBSERVER_BASE_NAME,
+            self._teacher_observers,
         )
         self._initialize_observers(
             self._observer_name,
-            TEACHER_OUTPUT_OBSERVER_BASE_NAME,
-            self._teacher_output_observers,
-        )
-        self._initialize_observers(
-            self._observer_name,
-            STUDENT_INPUT_OBSERVER_BASE_NAME,
-            self._student_input_observers,
-        )
-        self._initialize_observers(
-            self._observer_name,
-            STUDENT_OUTPUT_OBSERVER_BASE_NAME,
-            self._student_output_observers,
+            STUDENT_OBSERVER_BASE_NAME,
+            self._student_observers,
         )
         return True
 
     def pre_step(self, model: Module, **kwargs):
         self.started_ = True
-        for module, observer in self._teacher_input_observers.items():
+        for name, observer in self._teacher_observers.items():
+            module = self._target_layers[name]
             observer.enable()
-        for module, observer in self._teacher_output_observers.items():
-            observer.enable()
-        for module, observer in self._student_input_observers.items():
-            observer.disable()
-        for module, observer in self._student_output_observers.items():
+        for name, observer in self._student_observers.items():
+            module = self._target_layers[name]
             observer.disable()
 
     def post_step(self, model: Module, **kwargs):
+        input_iterator = kwargs.get("input_iterator")
+        output_iterator = kwargs.get("output_iterator")
+        metrics_processor = kwargs.get("metrics_processor")
+        log_function = kwargs.get("log_function")
+        forward_step = kwargs.get("forward_step")
 
+        for name, observer in self._teacher_observers.items():
+            module = self._target_layers[name]
+            observer.disable(clear=False)
 
-        for module, observer in self._teacher_input_observers.items():
-            observer.disable(clear=False)
-        for module, observer in self._teacher_output_observers.items():
-            observer.disable(clear=False)
-        for module, observer in self._student_input_observers.items():
-            observer.enable()
-        for module, observer in self._student_output_observers.items():
-            observer.enable()
+        # TODO: obtain input/output tensors from vLLM actor
+        for _microbatch, input_dict in enumerate(input_iterator):
             
-        print("teacher: ", self._teacher_input_observers["layers.0"].activations)
-        print("student:", self._student_input_observers["layers.0"].activations)
+            
+            for name, observer in self._student_observers.items():
+                module = self._target_layers[name]
+                observer.enable()
+                
+            new_result = forward_step(input_dict)
+            old_result = next(output_iterator)
+            
+            # TODO: calculate distillation loss
 
-        # TODO: implement post-step logic
-        raise NotImplementedError("Post-step logic not implemented")
+            print(f"new_result: {new_result}, old_result: {old_result}")
+            
+            for name, observer in self._student_observers.items():
+                module = self._target_layers[name]
+                observer.disable(clear=True)
 
+            # log metrics
+            if not metrics_processor.should_log(_microbatch):
+                continue
 
-        for module, observer in self._teacher_input_observers.items():
-            observer.disable(clear=True)
-        for module, observer in self._teacher_output_observers.items():
-            observer.disable(clear=True)
-        for module, observer in self._student_input_observers.items():
-            observer.disable(clear=True)
-        for module, observer in self._student_output_observers.items():
+            log_function(metrics_processor, _microbatch)
+
+        for name, observer in self._teacher_observers.items():
+            module = self._target_layers[name]
             observer.disable(clear=True)
 
 
     def on_finalize(self, model: Module, **kwargs):
         self.ended_ = True
         self.remove_hooks()
-        for module, observer in self._teacher_observers.items():
+        for name, observer in self._teacher_observers.items():
+            module = self._target_layers[name]
             delattr(module, f"{observer.base_name}_observer")
         self._teacher_observers.clear()
-        for module, observer in self._student_observers.items():
+        for name, observer in self._student_observers.items():
+            module = self._target_layers[name]
             delattr(module, f"{observer.base_name}_observer")
         self._student_observers.clear()
         self._target_layers.clear()
@@ -182,26 +162,14 @@ class LayerWiseDistillationModifier(Modifier):
                 device=device_type,
             )
             module.register_module(f"{base_name}_observer", observer)
-            if base_name.endswith("input"):
-                self.register_hook(
-                    module,
-                    partial(
-                        calibrate_input_hook,
-                        base_name=base_name,
-                    ),
-                    "forward_pre",
-                )
-            elif base_name.endswith("output"):
-                self.register_hook(
-                    module,
-                    partial(
-                        calibrate_output_hook,
-                        base_name=base_name,
-                    ),
-                    "forward",
-                )
-            else:
-                raise ValueError(f"Cannot determine where to register the observer: {base_name}")
+            self.register_hook(
+                module,
+                partial(
+                    calibrate_output_hook,
+                    base_name=base_name,
+                ),
+                "forward",
+            )
             observers[name] = observer
 
     def _infer_sequential_targets(self,

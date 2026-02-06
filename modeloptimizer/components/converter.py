@@ -34,12 +34,12 @@ class ModelOptConverter(QuantizationConverter):
             for m in model:
                 modifier.pre_step(m)
 
-    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module], **kwargs):
         for modifier in self.recipe.modifiers:
             if not isinstance(model, list):
                 model = [model]
             for m in model:
-                modifier.post_step(m)
+                modifier.post_step(m, **kwargs)
 
     def post_initialization(self, model: nn.Module):
         for modifier in self.recipe.modifiers:

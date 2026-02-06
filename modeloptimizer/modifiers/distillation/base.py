@@ -5,6 +5,7 @@ import gc
 
 import torch
 from torch.nn import Module
+from torch.nn.modules.loss import _Loss as Loss
 from pydantic import Field, PrivateAttr, field_validator, model_validator
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
@@ -15,6 +16,7 @@ from modeloptimizer.modifiers.quantization.calibration import calibrate_activati
 from modeloptimizer.utils.pytorch.module import (
     get_layers,
 )
+from modeloptimizer.modifiers.distillation.utils import losses
 
 TEACHER_OBSERVER_BASE_NAME = "output"
 STUDENT_OBSERVER_BASE_NAME = "student_output"
@@ -37,6 +39,7 @@ def calibrate_output_hook(module: Module, _args: Any, output: torch.Tensor, base
 class LayerWiseDistillationModifier(Modifier):
 
     # modifier arguments
+    criterion: str | dict[str, str] = "LogitsDistillationLoss"
 
     # data pipeline arguments
     sequential_targets: str | list[str] | None = None
@@ -53,6 +56,7 @@ class LayerWiseDistillationModifier(Modifier):
                            Observer] = PrivateAttr(default_factory=dict)
     _student_observers: dict[torch.nn.Module,
                            Observer] = PrivateAttr(default_factory=dict)
+    _target_loss_fns: dict[str, Loss] = PrivateAttr(default_factory=dict)
 
     def on_initialize(self, model: Module, **kwargs) -> bool:
         if len(self.targets) == 1 and self.targets[0] == "__all__":
@@ -61,6 +65,10 @@ class LayerWiseDistillationModifier(Modifier):
             self._target_layers = get_layers(self.sequential_targets, model)
         else:
             self._target_layers = get_layers(self.targets, model)
+
+        for name in self._target_layers.keys():
+            self._target_loss_fns[name] = self._get_loss_fn(name)
+        self._target_loss_fns["output"] = self._get_loss_fn("output")
 
         self._initialize_observers(
             self._observer_name,
@@ -94,21 +102,31 @@ class LayerWiseDistillationModifier(Modifier):
             module = self._target_layers[name]
             observer.disable(clear=False)
 
-        # TODO: obtain input/output tensors from vLLM actor
         for _microbatch, input_dict in enumerate(input_iterator):
-            
-            
             for name, observer in self._student_observers.items():
                 module = self._target_layers[name]
                 observer.enable()
-                
-            new_result = forward_step(input_dict)
-            old_result = next(output_iterator)
-            
-            # TODO: calculate distillation loss
 
-            print(f"new_result: {new_result}, old_result: {old_result}")
-            
+            student_result = forward_step({
+                k: v.to(device_type) for k, v in input_dict.items()
+            })
+            teacher_result = next(output_iterator).to(device_type)
+
+            loss_values = {}
+            loss_values["output"] = self._target_loss_fns["output"](student_result, teacher_result)
+
+            for name, observer in self._student_observers.items():
+                module = self._target_layers[name]
+                student_activation = observer.activations[0].to(device_type)
+                teacher_activation = getattr(module, f"{TEACHER_OBSERVER_BASE_NAME}_observer").activations[_microbatch].to(device_type)
+                loss_values[name] = self._target_loss_fns[name](student_activation, teacher_activation)
+
+            # TODO: properly weight the losses
+            total_loss = sum(loss_values.values()) / len(loss_values)
+            print(f"total_loss: {total_loss}")
+            total_loss.backward()
+            print(model.layers['0'].feed_forward.w1.weight.grad)
+
             for name, observer in self._student_observers.items():
                 module = self._target_layers[name]
                 observer.disable(clear=True)
@@ -181,3 +199,11 @@ class LayerWiseDistillationModifier(Modifier):
                 return [self.sequential_targets]
             case _:
                 return self.sequential_targets
+
+    def _get_loss_fn(self, name: str):
+        if isinstance(self.criterion, str):
+            return getattr(losses, self.criterion)()
+        elif isinstance(self.criterion, dict):
+            return getattr(losses, self.criterion[name])()
+        else:
+            raise ValueError(f"Invalid criterion: {self.criterion}")

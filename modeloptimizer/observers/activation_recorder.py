@@ -15,7 +15,7 @@ class ActivationRecorder(Observer):
         self.activations = []
         self.register_buffer(
             "num_samples",
-            torch.zeros([1], dtype=torch.int32, device=self.device),
+            torch.zeros([1], dtype=torch.int32, device="cpu"),
         )
 
     def get_current_min_max(self, observed: torch.Tensor):
@@ -28,9 +28,8 @@ class ActivationRecorder(Observer):
         if x_orig.numel() == 0:
             return x_orig
 
-        with torch.no_grad():
-            self.num_samples += 1
-            self.activations.append(x_orig.detach())
+        self.num_samples += 1
+        self.activations.append(x_orig.cpu())
         return x_orig
 
     def clear_stats(self):

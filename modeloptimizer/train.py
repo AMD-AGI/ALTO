@@ -83,7 +83,7 @@ def log_stage2_optimization(
     logger.info(
         f"{color.red}stage2 optimization step: {micro_step:2}  "
         f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-        f"({device_mem_stats.max_reserved_pct:.2f}%)  ")
+        f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
 
     metrics_processor.ntokens_since_last_log = 0
     metrics_processor.time_last_log = time.perf_counter()
@@ -128,7 +128,6 @@ class Trainer(TorchTitanTrainer):
         pp_schedule._loss_fn = loss_fn
         pp_schedule._has_backward = has_backward
 
-    @torch.no_grad()
     def forward_step(self, input_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -198,24 +197,25 @@ class Trainer(TorchTitanTrainer):
 
         # If data runs out during gradient accumulation, that
         # entire step will not be executed.
-        for _microbatch in range(self.gradient_accumulation_steps):
-            input_dict, labels = next(data_iterator)
-            self.cache_input({k: v.detach() for k, v in input_dict.items()})
-            result = self.forward_step(input_dict)
-            self.cache_output(result.detach())
+        with torch.no_grad():
+            for _microbatch in range(self.gradient_accumulation_steps):
+                input_dict, labels = next(data_iterator)
+                self.cache_input({k: v.detach().cpu() for k, v in input_dict.items()})
+                result = self.forward_step(input_dict)
+                self.cache_output(result.detach().cpu())
 
-            # log metrics
-            if not self.metrics_processor.should_log(_microbatch):
-                continue
+                # log metrics
+                if not self.metrics_processor.should_log(_microbatch):
+                    continue
 
-            assert not parallel_dims.dp_cp_enabled, "DP CP is not supported in post-training"
+                assert not parallel_dims.dp_cp_enabled, "DP CP is not supported in post-training"
 
-            global_ntokens_seen = self.ntokens_seen
+                global_ntokens_seen = self.ntokens_seen
 
-            extra_metrics = {
-                "n_tokens_seen": global_ntokens_seen,
-            }
-            log_calibration(self.metrics_processor, _microbatch, extra_metrics=extra_metrics)
+                extra_metrics = {
+                    "n_tokens_seen": global_ntokens_seen,
+                }
+                log_calibration(self.metrics_processor, _microbatch, extra_metrics=extra_metrics)
 
         post_step_kwargs = {
             "forward_step": self.forward_step,

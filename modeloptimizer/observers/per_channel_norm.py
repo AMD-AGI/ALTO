@@ -5,7 +5,7 @@ import torch
 from modeloptimizer.utils.pytorch.module import TransformerConv1D
 from .base import Observer, register_observer
 
-WANDA_PRECISION = torch.float32
+PRECISION = torch.float32
 
 
 @register_observer("per_channel_norm")
@@ -66,7 +66,7 @@ class PerChannelNormObserver(Observer):
             self.stats *= self.num_samples / (self.num_samples + num_added)
             self.num_samples += num_added
 
-            inp = inp.type(WANDA_PRECISION)
+            inp = inp.type(PRECISION)
             self.stats += torch.norm(inp, p=2, dim=1) ** 2 / self.num_samples
 
         return x_orig

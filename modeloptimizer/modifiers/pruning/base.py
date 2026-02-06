@@ -1,9 +1,9 @@
-# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/pruning/sparsegpt/sgpt_base.py
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/sparsification/sparsegpt/sgpt_base.py
 # licensed under the Apache License 2.0
 
 from abc import abstractmethod
 from functools import partial
-from typing import Any, Optional, Generator
+from typing import Any, Optional, Generator, Literal
 import gc
 import re
 
@@ -23,7 +23,9 @@ from modeloptimizer.utils.pytorch.module import (
     match_targets,
 )
 
-LAYER_OBSERVER_BASE_NAME = "sparsity"
+LAYER_OBSERVER_BASE_NAME = "pruning"
+PruningDim = Literal["attn", "mlp", "attn+mlp", "mlp+attn", "layer", "sublayer", "hidden_dim"]
+
 
 def calibrate_input_hook(module: Module, args: Any, base_name: str):
     """
@@ -34,15 +36,16 @@ def calibrate_input_hook(module: Module, args: Any, base_name: str):
     args = args[0] if isinstance(args, tuple) else args
     return calibrate_activations(module, value=args, base_name=base_name)
 
-class SparsityModifierBase(Modifier):
+
+class PruningModifierBase(Modifier):
     """
-    Abstract base class which implements functionality related to oneshot sparsity.
+    Abstract base class which implements functionality related to oneshot pruning.
     Inheriters must implement `calibrate_module` and `compress_modules`
     """
 
     # modifier arguments
     sparsity: float | list[float] | dict[str, float] | None
-    mask_structure: str = "0:0"
+    pruning_dimension: PruningDim = "mlp"
 
     # data pipeline arguments
     sequential_targets: str | list[str] | None = None
@@ -50,8 +53,7 @@ class SparsityModifierBase(Modifier):
     ignore: list[str] = Field(default_factory=list)
 
     # private variables
-    _prune_n: int | None = PrivateAttr(default=None)
-    _prune_m: int | None = PrivateAttr(default=None)
+    _model_args: None = PrivateAttr(default=None)
     _module_names: dict[torch.nn.Module,
                         str] = PrivateAttr(default_factory=dict)
     _target_layers: dict[str,
@@ -61,14 +63,6 @@ class SparsityModifierBase(Modifier):
     _layer_observers: dict[torch.nn.Module,
                       Observer] = PrivateAttr(default_factory=dict)
     _observer_name: str | None = PrivateAttr(default=None)
-
-    @model_validator(mode="after")
-    def validate_model_after(
-            model: "SparsityModifierBase") -> "SparsityModifierBase":
-        mask_structure = model.mask_structure
-        model._prune_n, model._prune_m = model._split_mask_structure(
-            mask_structure)
-        return model
 
     @abstractmethod
     def compress_modules(self):
@@ -106,7 +100,7 @@ class SparsityModifierBase(Modifier):
         Initialize and run the SparseGPT algorithm on the current state
         """
         # infer module and sequential targets
-        self.model_args = model.model_args
+        self._model_args = model.model_args
         self.sequential_targets = self._infer_sequential_targets(model)
         self._target_layers = get_layers(self.targets,
                                          model)  # layers containing targets
@@ -219,6 +213,7 @@ class SparsityModifierBase(Modifier):
             )
             observer_attr_name = f"{base_name}_observer"
             object.__setattr__(module, observer_attr_name, observer)
+            
             self.register_hook(
                 module,
                 partial(
@@ -238,7 +233,3 @@ class SparsityModifierBase(Modifier):
                 return [self.sequential_targets]
             case _:
                 return self.sequential_targets
-
-    def _split_mask_structure(self, mask_structure: str) -> tuple[int, int]:
-        n, m = mask_structure.split(":")
-        return int(n), int(m)

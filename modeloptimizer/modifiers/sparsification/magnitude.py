@@ -6,67 +6,54 @@ from torch.nn import Module
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers.sparsification.base import SparsityModifierBase
-from modeloptimizer.observers.per_channel_norm import PRECISION, PerChannelNormObserver
 from modeloptimizer.utils.pytorch.module import TransformerConv1D
 
-__all__ = ["WandaModifier"]
+__all__ = ["MagnitudeModifier"]
 
 
-class WandaModifier(SparsityModifierBase):
+class MagnitudeModifier(SparsityModifierBase):
     """
-    Modifier for applying the one-shot WANDA algorithm to a model
-    from the paper: https://arxiv.org/abs/2306.11695
 
     Sample yaml:
 
     ```yaml
     sparsity_modifiers:
-        WandaModifier:
+        MagnitudeModifier:
             sparsity: 0.5
             mask_structure: "2:4"
+            targets: ['Linear']
+            ignore: ['re:.*lm_head']
     ```
 
     Lifecycle:
 
     - on_initialize
-        - register_hook(module, calibrate_module, "forward")
-        - run_sequential / run_basic
-            - make_empty_row_scalars
-            - accumulate_row_scalars
+        - data-free
     - on_sequential_batch_end
         - sparsify_weight
     - on_finalize
-        - remove_hooks()
+        - None
 
     :param sparsity: Sparsity to compress model to
     :param mask_structure: String to define the structure of the mask to apply.
         Must be of the form N:M where N, M are integers that define a custom block
         shape. Defaults to 0:0 which represents an unstructured mask.
-    :param targets: list of layer names to compress during Wanda, or '__ALL__'
-        to compress every layer in the model. 
+    :param targets: list of layer names to compress during Magnitude, or '__ALL__'
+        to compress every layer in the model.
     :param ignore: optional list of module class names or submodule names to not
         sparsify even if they match a target. Defaults to empty list.
     """
 
     def on_initialize(self, model: Module, **kwargs) -> bool:
-        self._observer_name = "per_channel_norm"
+        self._observer_name = None
         return super().on_initialize(model, **kwargs)
 
     def compress_modules(self):
-        """
-        Sparsify modules which have been calibrated
-        """
-        for module, observer in self._layer_observers.items():
-            name = self._module_names[module]
+        for module, name in self._module_names.items():
             sparsity = self._module_sparsities[module]
-            num_samples = observer.num_samples
-
-            logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
-            assert isinstance(observer, PerChannelNormObserver), \
-                "WandaModifier requires per_channel_norm observer"
-            sparsified_weight = self._sparsify_weight(
+            logger.info(f"Sparsifying {name} to {sparsity}")
+            sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
-                row_scalar=observer.stats,
                 sparsity=sparsity,
                 prune_n=self._prune_n,
                 prune_m=self._prune_m,
@@ -76,7 +63,6 @@ class WandaModifier(SparsityModifierBase):
     def _sparsify_weight(
         self,
         module: Module,
-        row_scalar: torch.Tensor,
         sparsity: float,
         prune_n: int,
         prune_m: int,
@@ -85,11 +71,9 @@ class WandaModifier(SparsityModifierBase):
         Run pruning on the layer up to the target sparsity value.
 
         :param module: module to sparsify
-        :param row_scalar: row scalar to use for sparsification
         :param sparsity: target sparsity to reach for layer
-        :param prune_n: N for N:M pruning
-        :param prune_m: M for N:M pruning
-        :return: sparsified weight
+        :param prunen: N for N:M pruning
+        :param prunem: M for N:M pruning
         """
 
         final_shape = module.weight.shape
@@ -101,10 +85,7 @@ class WandaModifier(SparsityModifierBase):
         if TransformerConv1D and isinstance(module, TransformerConv1D):
             W = W.t()
 
-        W = W.to(dtype=PRECISION)
-        S = row_scalar
-
-        W_metric = torch.abs(W) * torch.sqrt(S.reshape((1, -1)))
+        W_metric = torch.abs(W)
 
         # initialize a mask to be all False
         W_mask = torch.zeros_like(W_metric) == 1

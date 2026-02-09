@@ -24,11 +24,11 @@ converters = ["modeloptimizer"]
 recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
 
 [training]
-dtype = "bfloat16"
+dtype = "float32"
 local_batch_size = 1
 global_batch_size = 10
 seq_len = 8192
-steps = 1
+steps = 2
 dataset = "c4_test"
 
 [debug]
@@ -60,7 +60,7 @@ mode = "none"
 [validation]
 enable = true
 dataset = "wikitext_test"
-freq = 10
+freq = 1
 local_batch_size = 1
 seq_len = 8192
 steps = 10

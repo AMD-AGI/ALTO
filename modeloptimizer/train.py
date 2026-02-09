@@ -40,7 +40,7 @@ def log_calibration(
 
     color = metrics_processor.color
     logger.info(
-        f"{color.orange}calibration step: {micro_step:2}  "
+        f"{color.orange}calibration micro_step: {micro_step:2}  "
         f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
         f"({device_mem_stats.max_reserved_pct:.2f}%)  "
         f"{color.blue}tps: {round(tps):,}{color.reset}")
@@ -90,7 +90,7 @@ def log_stage2_optimization(
 
     color = metrics_processor.color
     logger.info(
-        f"{color.red}stage2 optimization step: {micro_step:2}  "
+        f"{color.red}stage2 optimization micro_step: {micro_step:2}  "
         f"{color.green}student_loss: {student_loss:7.4f}  "
         f"{color.green}aggregate_loss: {aggregate_loss:7.4f}  "
         f"{color.blue}lr: {lr:7.4f}  "
@@ -235,6 +235,7 @@ class Trainer(TorchTitanTrainer):
             "output_iterator": self.get_cached_output(),
             "metrics_processor": self.metrics_processor,
             "log_function": log_stage2_optimization,
+            "is_last_step": self.step >= self.job_config.training.steps,
         }
         self.model_converters.post_optimizer_hook(
             self.model_parts,

@@ -46,7 +46,7 @@ class SelfDistillationModifier(Modifier):
     loss_weights: dict[str, float] | None = None
     # optimizer arguments
     optimizer: str = "Adam"
-    lr: float = 8e-4
+    lr: float = 1e-5
     beta1: float = 0.9
     beta2: float = 0.95
     eps: float = 1e-8
@@ -127,6 +127,10 @@ class SelfDistillationModifier(Modifier):
             observer.disable()
 
     def post_step(self, model_parts: list[Module], **kwargs):
+        is_last_step = kwargs.get("is_last_step")
+        if is_last_step:
+            return
+
         input_iterator = kwargs.get("input_iterator")
         output_iterator = kwargs.get("output_iterator")
         metrics_processor = kwargs.get("metrics_processor")
@@ -169,7 +173,6 @@ class SelfDistillationModifier(Modifier):
             else:
                 aggregate_loss = sum(loss_values.values()) / len(loss_values)
 
-            # TODO: optimizer
             aggregate_loss.backward()
             self._optimizers.step()
             self._lr_schedulers.step()

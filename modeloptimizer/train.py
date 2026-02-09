@@ -53,6 +53,7 @@ def log_calibration(
 def log_stage2_optimization(
     metrics_processor: MetricsProcessor,
     micro_step: int,
+    lr: float,
     student_loss: float,
     aggregate_loss: float,
     extra_metrics: dict[str, Any] | None = None,
@@ -70,6 +71,8 @@ def log_stage2_optimization(
             student_loss,
         "stage2_optimization_metrics/aggregate_loss":
             aggregate_loss,
+        "stage2_optimization_metrics/lr":
+            lr,
         "stage2_optimization_metrics/throughput(tps)":
             tps,
         "stage2_optimization_metrics/memory/max_active(GiB)":
@@ -90,6 +93,7 @@ def log_stage2_optimization(
         f"{color.red}stage2 optimization step: {micro_step:2}  "
         f"{color.green}student_loss: {student_loss:7.4f}  "
         f"{color.green}aggregate_loss: {aggregate_loss:7.4f}  "
+        f"{color.blue}lr: {lr:7.4f}  "
         f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
         f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
 

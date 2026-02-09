@@ -60,9 +60,9 @@ class WandaPruningModifier(SparsityModifierBase):
         quantize even if they match a target. Defaults to empty list.
     """
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         self._observer_name = "per_channel_norm"
-        return super().on_initialize(model, **kwargs)
+        return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         """

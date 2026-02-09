@@ -67,6 +67,7 @@ class SparsityModifierBase(Modifier):
     _observer_name: str | None = PrivateAttr(default=None)
     _owl_observer_name: str | None = PrivateAttr(default=None)
     _owl_layer_observers: dict[torch.nn.Module, Observer] = PrivateAttr(default_factory=dict)
+    _owl_target_sparsity: float | None = PrivateAttr(default=None)
 
     @field_validator("sparsity_profile", mode="before")
     def validate_sparsity_profile(cls, value: str | None) -> bool:
@@ -112,43 +113,48 @@ class SparsityModifierBase(Modifier):
             return False
         return all(isinstance(k, int) for k in sparsity.keys())
 
-    def validate_sparsity(self, model: Module):
+    def validate_sparsity(self, model_parts: list[Module]):
         """
         Validate that the sparsity is properly configured
         """
-        if isinstance(self.sparsity, (list, dict)):
-            # matches the length of target layers
-            if len(self._target_layers) == len(self.sparsity):
-                return
-            # matches the total number of layers in model definition
-            if len(self.sparsity) == model.n_layers:
-                return
-            # matches the number of blocks in current model part
-            if self._is_dict_with_digit_keys(self.sparsity) and len(
-                    self.sparsity) == len(
-                        get_layers(self.sequential_targets, model)):
-                return
+        for m in model_parts:
+            if isinstance(self.sparsity, (list, dict)):
+                # matches the length of target layers
+                if len(self._target_layers) == len(self.sparsity):
+                    continue
+                # matches the total number of layers in model definition
+                if len(self.sparsity) == m.n_layers:
+                    continue
+                # matches the number of blocks in current model part
+                if self._is_dict_with_digit_keys(self.sparsity) and len(
+                        self.sparsity) == len(
+                            get_layers(self.sequential_targets, m)):
+                    continue
 
-            raise ValueError(
-                f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
-                f"sparsities values, but model has {len(self._target_layers)} target layers"
-            )
+                raise ValueError(
+                    f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
+                    f"sparsities values, but model has {len(self._target_layers)} target layers"
+                )
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         """
         Initialize and run the SparseGPT algorithm on the current state
         """
 
         # infer module and sequential targets
-        self.sequential_targets = self._infer_sequential_targets(model)
-        self._target_layers = get_layers(self.targets,
-                                         model)  # layers containing targets
+        for m in model_parts:
+            self.sequential_targets = self._infer_sequential_targets(m)
+            self._target_layers.update(get_layers(
+                self.targets, m))  # layers containing targets
 
         self._initialize_module_name_mappings()
 
         # infer layer sparsities
         if self.sparsity_profile == "owl":
             logger.info("Using OWL to infer target layer-wise sparsities")
+            assert isinstance(self.sparsity, float), "OWL requires a single sparsity value"
+            self._owl_target_sparsity = self.sparsity
+            self.sparsity = {}
             if self._observer_name != "per_channel_norm":
                 self._owl_observer_name = "per_channel_norm"
                 # initialize observers for OWL
@@ -160,7 +166,7 @@ class SparsityModifierBase(Modifier):
             else:
                 self._owl_layer_observers = self._layer_observers
         else:
-            self._initialize_module_sparsities(model)
+            self._initialize_module_sparsities(model_parts)
 
         self._initialize_observers(
             self._observer_name,
@@ -169,18 +175,19 @@ class SparsityModifierBase(Modifier):
         )
         return True
 
-    def pre_step(self, model: Module, **kwargs):
+    def pre_step(self, model_parts: list[Module], **kwargs):
         self.started_ = True
         for module, observer in self._layer_observers.items():
             observer.enable()
         for module, observer in self._owl_layer_observers.items():
             observer.enable()
 
-    def post_step(self, model: Module, **kwargs):
+    def post_step(self, model_parts: list[Module], **kwargs):
         if self.sparsity_profile == "owl":
-            blocks = get_layers(self.sequential_targets, model)
-            self.sparsity = self._infer_owl_layer_sparsity(model, blocks)
-            self._initialize_module_sparsities(model)
+            for m in model_parts:
+                blocks = get_layers(self.sequential_targets, m)
+                self.sparsity.update(self._infer_owl_layer_sparsity(blocks))
+            self._initialize_module_sparsities(model_parts)
         with torch.no_grad():
             self.compress_modules()
         for module, observer in self._layer_observers.items():
@@ -188,7 +195,7 @@ class SparsityModifierBase(Modifier):
         for module, observer in self._owl_layer_observers.items():
             observer.disable()
 
-    def on_finalize(self, model: Module, **kwargs):
+    def on_finalize(self, model_parts: list[Module], **kwargs):
         self.ended_ = True
         self.remove_hooks()
         for module, observer in self._layer_observers.items():
@@ -237,8 +244,8 @@ class SparsityModifierBase(Modifier):
             self._module_names[module] = name
 
     @torch.no_grad()
-    def _initialize_module_sparsities(self, model: Module):
-        self.validate_sparsity(model)
+    def _initialize_module_sparsities(self, model_parts: list[Module]):
+        self.validate_sparsity(model_parts)
         self._module_sparsities.clear()
         for index, name, module in self._target_layer_iterator():
             match self.sparsity:
@@ -300,7 +307,6 @@ class SparsityModifierBase(Modifier):
     @torch.no_grad()
     def _infer_owl_layer_sparsity(
         self,
-        model: torch.nn.Module,
         layers: dict[str, torch.nn.Module],
     ) -> dict[str, float]:
         groups = {}
@@ -330,9 +336,9 @@ class SparsityModifierBase(Modifier):
         sparsities = {
             int(k.split(".")[-1]):
                 1 - (outlier_ratios[k] - numpy.mean(outlier_ratios_arr) +
-                     (1 - float(self.sparsity))) for k in outlier_ratios
+                     (1 - float(self._owl_target_sparsity))) for k in outlier_ratios
         }
-        logger.info(f"OWL sparsities for sp={self.sparsity} are:")
+        logger.info(f"OWL sparsities for sp={self._owl_target_sparsity} are:")
         for k in sparsities:
             logger.info(f"Sparsity for layer #{k}: {sparsities[k]}")
         return sparsities

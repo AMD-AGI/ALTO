@@ -24,7 +24,7 @@ __all__ = ["QuantizationModifier"]
 
 class QuantizationModifier(Modifier, QuantizationMixin):
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         """
         Prepare to calibrate activations and weights
 
@@ -39,31 +39,35 @@ class QuantizationModifier(Modifier, QuantizationMixin):
             raise ValueError(
                 "QuantizationModifier requires that quantization fields be specified"
             )
-        QuantizationMixin.initialize_quantization(self, model)
+        for m in model_parts:
+            QuantizationMixin.initialize_quantization(self, m)
 
         return True
 
-    def pre_step(self, model: Module, **kwargs):
+    def pre_step(self, model_parts: list[Module], **kwargs):
         """
         Begin calibrating activations and weights. Calibrate weights only once on start
         """
         self.started_ = True
-        QuantizationMixin.start_calibration(self, model)
+        for m in model_parts:
+            QuantizationMixin.start_calibration(self, m)
 
-    def post_step(self, model: Module, **kwargs):
-        QuantizationMixin.end_calibration(
-            self, model)  # keep quantization enabled
+    def post_step(self, model_parts: list[Module], **kwargs):
+        for m in model_parts:
+            QuantizationMixin.end_calibration(
+                self, m)  # keep quantization enabled
 
-        # update weight scales and zero points
-        # apply qdq to weights
-        named_modules = list(
-            match_named_modules(model, self.resolved_targets, self.ignore))
-        for _, module in tqdm.tqdm(named_modules, desc="Calibrating weights"):
-            update_weight_zp_scale(module)
+            # update weight scales and zero points
+            # apply qdq to weights
+            named_modules = list(
+                match_named_modules(m, self.resolved_targets, self.ignore))
+            for _, module in tqdm.tqdm(named_modules, desc="Calibrating weights"):
+                update_weight_zp_scale(module)
 
-    def on_finalize(self, model: Module, **kwargs) -> bool:
+    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
         self.ended_ = True
-        QuantizationMixin.clear_calibration(self, model)
+        for m in model_parts:
+            QuantizationMixin.clear_calibration(self, m)
 
         gc.collect()
         torch.cuda.empty_cache()

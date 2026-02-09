@@ -71,9 +71,9 @@ class SparseGPTModifier(SparsityModifierBase):
     preserve_sparsity_mask: bool = False
     offload_hessians: bool = False
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         self._observer_name = "hessian"
-        return super().on_initialize(model, **kwargs)
+        return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         """

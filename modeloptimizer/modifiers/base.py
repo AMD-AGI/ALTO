@@ -33,40 +33,40 @@ class Modifier(HooksMixin):
     def finalized(self) -> bool:
         return self.finalized_
 
-    def initialize(self, model: Module, **kwargs):
+    def initialize(self, model_parts: list[Module], **kwargs):
         if self.initialized_:
             raise RuntimeError(
                 "Cannot initialize a modifier that has already been initialized"
             )
-
         if self.finalized_:
             raise RuntimeError(
                 "Cannot initialize a modifier that has already been finalized")
+        assert isinstance(model_parts, list), "model_parts must be a list of nn.Module"
 
-        self.initialized_ = self.on_initialize(model, **kwargs)
+        self.initialized_ = self.on_initialize(model_parts, **kwargs)
 
-    def finalize(self, model: Module, **kwargs):
+    def finalize(self, model_parts: list[Module], **kwargs):
         if self.finalized_:
             raise RuntimeError("cannot finalize a modifier twice")
-
         if not self.initialized_:
             raise RuntimeError("cannot finalize an uninitialized modifier")
+        assert isinstance(model_parts, list), "model_parts must be a list of nn.Module"
 
         # TODO: all finalization should succeed
-        self.finalized_ = self.on_finalize(model, **kwargs)
+        self.finalized_ = self.on_finalize(model_parts, **kwargs)
 
     @abstractmethod
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def on_finalize(self, model: Module, **kwargs) -> bool:
+    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def pre_step(self, model: Module, **kwargs):
+    def pre_step(self, model_parts: list[Module], **kwargs):
         raise NotImplementedError
 
     @abstractmethod
-    def post_step(self, model: Module, **kwargs):
+    def post_step(self, model_parts: list[Module], **kwargs):
         raise NotImplementedError

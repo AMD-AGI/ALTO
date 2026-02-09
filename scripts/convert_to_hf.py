@@ -161,9 +161,9 @@ def convert_to_hf(
     with torch.device("cpu"):
         model = train_spec.model_cls(model_args)
         model_converters.convert(model)
-    model_converters.post_initialization(model)
-    model_converters.pre_step(model)
-    model_converters.finalize(model)
+    model_converters.post_initialization([model])
+    model_converters.pre_step([model])
+    model_converters.finalize([model])
     wrapped_model = ModelWrapper(model)
 
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)

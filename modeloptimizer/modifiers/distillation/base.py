@@ -40,6 +40,7 @@ class LayerWiseDistillationModifier(Modifier):
 
     # modifier arguments
     criterion: str | dict[str, str] = "LogitsDistillationLoss"
+    loss_weights: dict[str, float] | None = None
 
     # data pipeline arguments
     sequential_targets: str | list[str] | None = None
@@ -121,11 +122,18 @@ class LayerWiseDistillationModifier(Modifier):
                 teacher_activation = getattr(module, f"{TEACHER_OBSERVER_BASE_NAME}_observer").activations[_microbatch].to(device_type)
                 loss_values[name] = self._target_loss_fns[name](student_activation, teacher_activation)
 
-            # TODO: properly weight the losses
-            total_loss = sum(loss_values.values()) / len(loss_values)
-            print(f"total_loss: {total_loss}")
-            total_loss.backward()
-            print(model.layers['0'].feed_forward.w1.weight.grad)
+            # balance the losses
+            if self.loss_weights is not None:
+                assert len(self.loss_weights) == len(loss_values), "Number of loss weights does not correspond to number of loss values"
+                assert sum(self.loss_weights.values()) == 1.0, "Loss weights do not sum to 1.0"
+                loss_values = {k: v * self.loss_weights[k] for k, v in loss_values.items()}
+                aggregate_loss = sum(loss_values.values())
+            else:
+                aggregate_loss = sum(loss_values.values()) / len(loss_values)
+
+            # TODO: optimizer
+            aggregate_loss.backward()
+
 
             for name, observer in self._student_observers.items():
                 module = self._target_layers[name]
@@ -135,7 +143,12 @@ class LayerWiseDistillationModifier(Modifier):
             if not metrics_processor.should_log(_microbatch):
                 continue
 
-            log_function(metrics_processor, _microbatch)
+            log_function(
+                metrics_processor,
+                _microbatch,
+                student_loss=loss_values["output"],
+                aggregate_loss=aggregate_loss,
+            )
 
         for name, observer in self._teacher_observers.items():
             module = self._target_layers[name]

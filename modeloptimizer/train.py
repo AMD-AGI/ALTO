@@ -53,6 +53,8 @@ def log_calibration(
 def log_stage2_optimization(
     metrics_processor: MetricsProcessor,
     micro_step: int,
+    student_loss: float,
+    aggregate_loss: float,
     extra_metrics: dict[str, Any] | None = None,
 ):
     time_delta = time.perf_counter() - metrics_processor.time_last_log
@@ -64,6 +66,10 @@ def log_stage2_optimization(
         time_delta * metrics_processor.parallel_dims.non_data_parallel_size)
 
     metrics = {
+        "stage2_optimization_metrics/student_loss":
+            student_loss,
+        "stage2_optimization_metrics/aggregate_loss":
+            aggregate_loss,
         "stage2_optimization_metrics/throughput(tps)":
             tps,
         "stage2_optimization_metrics/memory/max_active(GiB)":
@@ -82,6 +88,8 @@ def log_stage2_optimization(
     color = metrics_processor.color
     logger.info(
         f"{color.red}stage2 optimization step: {micro_step:2}  "
+        f"{color.green}student_loss: {student_loss:7.4f}  "
+        f"{color.green}aggregate_loss: {aggregate_loss:7.4f}  "
         f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
         f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
 

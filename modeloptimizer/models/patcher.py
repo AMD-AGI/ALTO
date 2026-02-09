@@ -1,6 +1,8 @@
 import importlib
 from unittest.mock import patch
 
+import torch
+
 SUPPORTED_MODELS = ["llama3"]
 PATCH_MODULES = ["model", "state_dict_adapter"]
 
@@ -13,6 +15,9 @@ class ModelPatcher:
         if cls._patched:
             return
         cls._patched = True
+
+        cls.patch_fake_quantize()
+
         for model_name in SUPPORTED_MODELS:
             model_module = importlib.import_module(
                 f"torchtitan.models.{model_name}")
@@ -36,3 +41,32 @@ class ModelPatcher:
                     ).__enter__()
                     if hasattr(model_module, attr_name):
                         setattr(model_module, attr_name, patched_attr)
+
+    @classmethod
+    def patch_fake_quantize(cls):
+        from compressed_tensors.quantization.lifecycle import forward as forward_module
+
+        original_fake_quantize = forward_module.fake_quantize
+
+        class FakeQuantizeFunction(torch.autograd.Function):
+
+            @staticmethod
+            def forward(ctx, x, scale, zero_point, args, g_idx, global_scale):
+                return original_fake_quantize(x, scale, zero_point, args, g_idx,
+                                              global_scale)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                return grad_output, None, None, None, None, None
+
+        def fake_quantize(x, scale, zero_point, args, g_idx, global_scale):
+            return FakeQuantizeFunction.apply(
+                x,
+                scale,
+                zero_point,
+                args,
+                g_idx,
+                global_scale,
+            )
+
+        forward_module.fake_quantize = fake_quantize

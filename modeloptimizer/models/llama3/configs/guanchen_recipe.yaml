@@ -32,8 +32,8 @@
 
 pruning_stage:
   pruning_modifiers:
-    AdmmStructuredModifier:
-      sparsity: 0.5
-      pruning_dimension: "mlp+attn"
-      targets: ["Linear"]
-      ignore: ["output"]
+    CosineSimilarityModifier:
+      sparsity: 0.25
+      pruning_dimension: "layer"
+      targets: ["re:.*\\.wq$"]
+      ignore: ['re:.*lm_head']

@@ -52,11 +52,11 @@ class ObsModifier(PruningModifierBase):
     attention_pruning_granularity: int = 1
     dampening_frac: float | None = 0.01
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         self._observer_name = "hessian"
         assert self.pruning_dimension in ["mlp", "attn+mlp", "mlp+attn", "attn"], \
             "ObsModifier only supports mlp and/or mlp pruning."
-        return super().on_initialize(model, **kwargs)
+        return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         """

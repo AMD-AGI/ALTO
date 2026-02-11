@@ -1,240 +1,273 @@
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/sparsification/sparsegpt/base.py
 # licensed under the Apache License 2.0
 
+import re
+
 import torch
 from torch.nn import Module
+import torch.nn.functional as F
+from pydantic import PrivateAttr
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers.pruning.base import PruningModifierBase
-from modeloptimizer.observers.hessian import PRECISION, HessianObsObserver
-from modeloptimizer.utils.pytorch.module import TransformerConv1D
+from modeloptimizer.observers.input_only import InputOnlyObserver
 
 __all__ = ["CosineSimilarityModifier"]
 
 
 class CosineSimilarityModifier(PruningModifierBase):
     """
-    Modifier for applying the one-shot SparseGPT algorithm to a model
-    from the paper: https://arxiv.org/abs/2301.00774
+    Modifier for layer pruning using cosine similarity (Block Influence metric).
+    Paper: https://arxiv.org/abs/2301.00774
+
+    Uses cosine distance between hidden states at layer boundaries to measure
+    each layer's importance. Layers (or consecutive blocks) with the smallest
+    cosine distance (i.e. least influence on representations) are pruned.
 
     Sample yaml:
 
     ```yaml
-    sparsity_modifiers:
-        SparseGPTModifier:
-            sparsity: 0.5
-            mask_structure: "2:4"
-            dampening_frac: 0.01
-            block_size: 128
-            targets: ['Linear']
-            ignore: ['re:.*lm_head']
+    pruning_modifiers:
+        CosineSimilarityModifier:
+            sparsity: 0.25
+            pruning_dimension: "layer"
+            targets: ["re:.*\\.wq$"]
+            ignore: []
     ```
 
     Lifecycle:
 
     - on_initialize
-        - register_hook(module, calibrate_module, "forward")
-    - on_sequential_batch_end
-        - sparsify_weight
+        - register InputOnlyObserver hooks on target layers (e.g. wq per block)
+    - pre_step / forward / post_step
+        - observers collect input activations
+        - compress_modules computes BI matrix and removes layers
     - on_finalize
-        - remove_hooks()
+        - cleanup hooks and observers
 
-    :param sparsity: Sparsity to compress model to
-    :param mask_structure: String to define the structure of the mask to apply.
-        Must be of the form N:M where N, M are integers that define a custom block
-        shape. Defaults to 0:0 which represents an unstructured mask.
-    :param block_size: Used to determine number of columns to compress in one pass
-    :param dampening_frac: Amount of dampening to apply to H, as a fraction of the
-        diagonal norm
-    :param preserve_sparsity_mask: Whether or not to preserve the sparsity mask
-        during when applying sparsegpt, this becomes useful when starting from a
-        previously pruned model, defaults to False.
-    :param targets: list of layer names to compress during SparseGPT, or '__ALL__'
-        to compress every layer in the model. 
-    :param ignore: optional list of module class names or submodule names to not
-        quantize even if they match a target. Defaults to empty list.
+    :param sparsity: Fraction of layers to prune (e.g. 0.25 = remove 25% of layers)
+    :param pruning_dimension: Must be "layer" (sublayer not yet supported)
+    :param targets: layer name patterns for observer placement. Use "re:.*\\.wq$"
+        to capture the input hidden state at each TransformerBlock boundary.
+    :param ignore: patterns to exclude
     """
 
-    # modifier arguments
-    block_size: int = 128
-    dampening_frac: float | None = 0.01
-    preserve_sparsity_mask: bool = False
+    # private variables
+    _model_parts: list | None = PrivateAttr(default=None)
+    _layers_to_prune: list = PrivateAttr(default_factory=list)
+    _pruning_complete: bool = PrivateAttr(default=False)
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
-        self._observer_name = "hessian_obs"
+        self._observer_name = "input_only"
+        self._model_parts = model_parts
+        assert self.pruning_dimension in ["layer"], \
+            "CosineSimilarityModifier currently only supports 'layer' pruning."
         return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         """
-        Sparsify modules which have been calibrated
+        Compute Block Influence (BI) matrix from collected activations,
+        find optimal layers to prune, and remove them from the model.
+
+        This is called from post_step after each calibration forward pass.
+        Pruning is performed only once; subsequent calls are no-ops.
         """
+        if self._pruning_complete:
+            return
+
+        # Organize observers by layer index
+        layer_activations = {}
         for module, observer in self._layer_observers.items():
             name = self._module_names[module]
-            sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
+            logger.info(f"Collected {num_samples.item()} samples for {name}")
+            assert isinstance(observer, InputOnlyObserver), \
+                "CosineSimilarityModifier requires input_only observer"
 
-            logger.info(
-                f"Sparsifying {name} using {num_samples.item()} samples")
-            assert isinstance(
-                observer, HessianObsObserver
-            ), "SparseGPTModifier requires hessian_obs observer"
-            loss, sparsified_weight = self._sparsify_weight(
-                module=module,
-                hessian=observer.stats,
-                sparsity=sparsity,
-                prune_n=self._prune_n,
-                prune_m=self._prune_m,
-            )
-            module.weight.data.copy_(sparsified_weight)
+            # Extract layer index from name like "layers.0.attention.wq"
+            idx_match = re.search(r'\.(\d+)\.', name)
+            if idx_match:
+                layer_idx = int(idx_match.group(1))
+                layer_activations[layer_idx] = observer.stats
 
-    def _sparsify_weight(
+        if not layer_activations:
+            logger.warning("No layer activations collected, skipping pruning.")
+            return
+
+        total_layers = self._model_args.n_layers
+        num_layers_to_prune = int(self.sparsity * total_layers)
+        if num_layers_to_prune <= 0:
+            logger.info("No layers to prune (sparsity too low).")
+            self._pruning_complete = True
+            return
+
+        # Compute BI matrix
+        bi_matrix = self._compute_bi_matrix(layer_activations, total_layers)
+
+        # Find layers to prune using greedy search
+        self._layers_to_prune = self._find_toprune_layers(
+            bi_matrix, total_layers, num_layers_to_prune
+        )
+        logger.info(f"Layers to prune (indices): {self._layers_to_prune}")
+
+        # Remove layers from each model part
+        for model in self._model_parts:
+            self._remove_layers(model, self._layers_to_prune)
+
+        self._pruning_complete = True
+
+    @torch.no_grad()
+    def _compute_bi(self, feature1: torch.Tensor, feature2: torch.Tensor) -> float:
+        """
+        Compute Block Influence (BI) between two hidden state tensors.
+        BI = 1 - mean(cosine_similarity(feature1, feature2))
+
+        :param feature1: hidden states [N, seq_len, hidden_dim]
+        :param feature2: hidden states [N, seq_len, hidden_dim]
+        :return: scalar BI value (0 = identical, higher = more different)
+        """
+        cosine_sim = F.cosine_similarity(feature1, feature2, dim=-1).cpu()
+        return 1 - torch.mean(cosine_sim).item()
+
+    @torch.no_grad()
+    def _compute_bi_matrix(
         self,
-        module: Module,
-        hessian: torch.Tensor,
-        sparsity: float,
-        prune_n: int,
-        prune_m: int,
-    ) -> tuple[float, torch.Tensor]:
+        layer_activations: dict[int, torch.Tensor],
+        total_layers: int,
+    ) -> list[list[float]]:
         """
-        Run pruning on the layer up to the target sparsity value.
+        Compute the Block Influence matrix.
 
-        :param module: module with weight being sparsified
-        :param hessian: Hessian matrix of the activations
-        :param sparsity: target sparsity to reach for layer
-        :param prune_n: N for N:M pruning
-        :param prune_m: M for N:M pruning
+        bi_matrix[i][j] measures the influence of removing layers i through j-1,
+        computed as cosine distance between hidden states at positions i and j.
+
+        :param layer_activations: dict mapping layer_idx -> activation tensor
+        :param total_layers: total number of layers in the model
+        :return: (total_layers+1) x (total_layers+1) BI matrix
         """
-        final_shape = module.weight.shape
-        final_dtype = module.weight.dtype
-        W = module.weight.clone()
-        H = hessian
-        block_size = self.block_size
-        dampening_frac = self.dampening_frac
-        preserve_sparsity_mask = self.preserve_sparsity_mask
+        bi_matrix = [[0.0] * (total_layers + 1) for _ in range(total_layers + 1)]
+        sorted_indices = sorted(layer_activations.keys())
 
-        # standardize shape and dtype
-        if isinstance(module, torch.nn.Conv2d):
-            W = W.flatten(1)
-        elif TransformerConv1D and isinstance(module, TransformerConv1D):
-            W.transpose_(0, 1)
-        W = W.to(dtype=PRECISION)
-        num_rows = W.shape[0]
-        num_columns = W.shape[1]
-
-        # mask dead hessian values
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
-        W[:, dead] = 0
-
-        # compute inverse hessian in place to save memory
-        try:
-            damp = dampening_frac * torch.mean(torch.diag(H))
-            diag = torch.arange(H.shape[0], device=H.device)
-            H[diag, diag] += damp
-            H = torch.linalg.cholesky(H)
-            H = torch.cholesky_inverse(H)
-            H = torch.linalg.cholesky(H, upper=True)
-            Hinv = H
-        except torch._C._LinAlgError:
-            logger.warning(
-                "Failed to invert hessian due to numerical instability. Consider "
-                "increasing SparseGPTModifier.dampening_frac, increasing the number "
-                "of calibration samples, or shuffling the calibration dataset"
-            )
-            Hinv = H = torch.eye(num_columns, dtype=H.dtype, device=H.device)
-
-        # sparsity mask
-        # TODO: consider computing sparsity mask in the same way and place as gptq
-        mask = None
-        if preserve_sparsity_mask:
-            # compute existing sparsity mask
-            mask = torch.where(
-                W == 0,
-                torch.tensor(1, dtype=torch.bool),
-                torch.tensor(0, dtype=torch.bool),
-            )
-            current_sparsity = mask.sum() / W.numel()
-            if current_sparsity > sparsity:
-                raise ValueError(
-                    "The target sparsity is lower than the sparsity "
-                    "of the base model. Please retry "
-                    "after turning preserve_sparsity_mask=False"
+        for i_pos, i in enumerate(sorted_indices):
+            for j_pos in range(i_pos + 1, len(sorted_indices)):
+                j = sorted_indices[j_pos]
+                bi_matrix[i][j] = self._compute_bi(
+                    layer_activations[i], layer_activations[j]
                 )
+                logger.info(f"BI[{i}][{j}] = {bi_matrix[i][j]:.6f}")
 
-        losses = torch.zeros(num_rows, device=module.weight.device)
+        return bi_matrix
 
-        # See section 3.4 of https://arxiv.org/abs/2203.07259
-        for i1 in range(0, num_columns, block_size):
-            i2 = min(i1 + block_size, num_columns)
-            count = i2 - i1
+    @torch.no_grad()
+    def _find_toprune_layers(
+        self,
+        bi_matrix: list[list[float]],
+        total_layers: int,
+        num_layers_to_prune: int,
+    ) -> list[int]:
+        """
+        Greedily find layers to prune by selecting consecutive blocks with
+        minimum Block Influence.
 
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+        At each iteration, searches for the consecutive block of unpruned
+        layers whose removal has the least impact on representations (smallest
+        BI value), and marks them for pruning.
 
-            if prune_n == 0:
-                if mask is not None:
-                    mask1 = mask[:, i1:i2]
-                    if int(W1.numel() * sparsity) > mask1.sum():
-                        # target sparsity is higher than base sparsity, extend mask1
-                        tmp = (
-                            (~mask[:, i1:i2])
-                            * W1**2
-                            / (torch.diag(Hinv1).reshape((1, -1))) ** 2
-                        )
-                        thresh = torch.sort(tmp.flatten())[0][int(tmp.numel() * sparsity)]
-                        mask1 = tmp <= thresh
-                else:
-                    tmp = W1**2 / (torch.diag(Hinv1).reshape((1, -1))) ** 2
-                    thresh = torch.sort(tmp.flatten())[0][int(tmp.numel() * sparsity)]
-                    mask1 = tmp <= thresh
+        Layer 0 (first) and layer N-1 (last) are never pruned:
+        - Layer 0: critical for initial representation
+        - Layer N-1: bi_matrix[N-1][N] is undefined (no observation beyond
+          the last layer), and the final layer is typically important for
+          output quality
+
+        For BI[i][i+k], the layers being evaluated for removal are i..i+k-1.
+        E.g. BI[30][31] small means layer 30's input ≈ layer 31's input,
+        so layer 30 is the one to prune.
+
+        :param bi_matrix: Block Influence matrix
+        :param total_layers: total number of layers
+        :param num_layers_to_prune: number of layers to remove
+        :return: sorted list of layer indices to prune
+        """
+        pruned_indices = set()
+        result = []
+
+        while len(result) < num_layers_to_prune:
+            min_value = float('inf')
+            best_prune = []
+
+            for block_size in range(1, num_layers_to_prune - len(result) + 1):
+                # i starts from 1 (protect layer 0)
+                # i + block_size < total_layers (protect last layer, and
+                # ensure bi_matrix[i][i+block_size] was actually computed)
+                for i in range(1, total_layers - block_size):
+                    candidate = list(range(i, i + block_size))
+                    if all(idx not in pruned_indices for idx in candidate):
+                        importance_value = bi_matrix[i][i + block_size]
+                        if importance_value < min_value:
+                            min_value = importance_value
+                            best_prune = candidate
+
+            if not best_prune:
+                logger.warning(
+                    f"Could not find more layers to prune, "
+                    f"stopping at {len(result)} of {num_layers_to_prune}"
+                )
+                break
+
+            result.extend(best_prune)
+            pruned_indices.update(best_prune)
+
+        return sorted(result)
+
+    def _remove_layers(self, model: Module, layers_to_prune: list[int]):
+        """
+        Remove specified layers from a torchtitan Transformer model.
+
+        Deletes the target TransformerBlocks from model.layers (ModuleDict),
+        then re-indexes remaining layers to maintain contiguous string keys
+        ("0", "1", ...) and updates model.n_layers / model.model_args.n_layers.
+
+        :param model: Transformer model with model.layers (ModuleDict)
+        :param layers_to_prune: list of layer indices to remove
+        """
+        if not hasattr(model, 'layers'):
+            logger.warning(
+                f"Model {type(model).__name__} has no 'layers' attribute, "
+                f"skipping removal."
+            )
+            return
+
+        last_layer_idx = max(int(k) for k in model.layers.keys())
+
+        # Remove layers in reverse order to avoid index shifting issues
+        for idx in sorted(layers_to_prune, reverse=True):
+            key = str(idx)
+            if idx == 0:
+                logger.warning("Layer 0 is the first layer and cannot be pruned, skipping.")
+                continue
+            if idx == last_layer_idx:
+                logger.warning(f"Layer {idx} is the last layer and cannot be pruned, skipping.")
+                continue
+            if key in model.layers:
+                del model.layers[key]
+                logger.info(f"Removed layer {key}")
             else:
-                if mask is not None:
-                    mask1 = mask[:, i1:i2]
-                else:
-                    mask1 = torch.zeros_like(W1) == 1
+                logger.warning(f"Layer {key} not found in model, skipping.")
 
-            for i in range(count):
-                w = W1[:, i]
-                d = Hinv1[i, i]
+        # Re-index remaining layers to maintain contiguous string keys
+        remaining_keys = sorted(model.layers.keys(), key=int)
+        new_layers = torch.nn.ModuleDict()
+        for new_idx, old_key in enumerate(remaining_keys):
+            new_layers[str(new_idx)] = model.layers[old_key]
+        model.layers = new_layers
 
-                if prune_n != 0 and i % prune_m == 0:
-                    tmp = (
-                        W1[:, i : (i + prune_m)] ** 2
-                        / (torch.diag(Hinv1)[i : (i + prune_m)].reshape((1, -1))) ** 2
-                    )
-                    if mask is not None:
-                        tmp = tmp * (~mask[:, i : (i + prune_m)])
+        # Update model config
+        new_n_layers = len(new_layers)
+        model.n_layers = new_n_layers
+        model.model_args.n_layers = new_n_layers
+        logger.info(
+            f"Model now has {new_n_layers} layers "
+            f"(pruned {len(layers_to_prune)} layers)"
+        )
 
-                    mask1.scatter_(
-                        1, i + torch.topk(tmp, prune_n, dim=1, largest=False)[1], True
-                    )
-
-                q = w.clone()
-                q[mask1[:, i]] = 0
-
-                Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
-
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
-
-            W[:, i1:i2] = Q1
-            losses += torch.sum(Losses1, 1) / 2
-
-            if preserve_sparsity_mask:
-                # respect the sparsity of other groups
-                # really not needed, but kept for explicitness
-                W[:, i2:] -= (~mask[:, i2:]) * Err1.matmul(Hinv[i1:i2, i2:])
-            else:
-                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
-
-        if TransformerConv1D and isinstance(module, TransformerConv1D):
-            W.transpose_(0, 1)
-        W = W.reshape(final_shape).to(final_dtype)
-
-        loss = torch.sum(losses).item()
-        return loss, W
+        torch.cuda.empty_cache()

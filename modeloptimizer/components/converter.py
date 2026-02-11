@@ -27,30 +27,21 @@ class ModelOptConverter(QuantizationConverter):
         from torchtitan.components.checkpoint import CheckpointManager
         CheckpointManager.allow_partial_load = True
 
-    def pre_step(self, model: nn.Module | list[nn.Module]):
+    def pre_step(self, model_parts: list[nn.Module]):
         for modifier in self.recipe.modifiers:
-            if not isinstance(model, list):
-                model = [model]
-            for m in model:
-                modifier.pre_step(m)
+            modifier.pre_step(model_parts)
 
-    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+    def post_optimizer_hook(self, model_parts: list[nn.Module], **kwargs):
         for modifier in self.recipe.modifiers:
-            if not isinstance(model, list):
-                model = [model]
-            for m in model:
-                modifier.post_step(m)
+            modifier.post_step(model_parts, **kwargs)
 
-    def post_initialization(self, model: nn.Module):
+    def post_initialization(self, model_parts: list[nn.Module]):
         for modifier in self.recipe.modifiers:
-            modifier.initialize(model)
+            modifier.initialize(model_parts)
 
-    def finalize(self, model: nn.Module | list[nn.Module]):
-        if not isinstance(model, list):
-            model = [model]
-        for m in model:
-            for modifier in self.recipe.modifiers:
-                modifier.finalize(m)
+    def finalize(self, model_parts: list[nn.Module]):
+        for modifier in self.recipe.modifiers:
+            modifier.finalize(model_parts)
 
 
 register_model_converter(ModelOptConverter, "modeloptimizer")

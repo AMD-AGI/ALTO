@@ -83,9 +83,10 @@ class Observer(ABC, nn.Module):
     def enable(self):
         self._enabled = True
 
-    def disable(self):
+    def disable(self, clear: bool = True):
         self._enabled = False
-        self.clear_stats()
+        if clear:
+            self.clear_stats()
 
     def __repr__(self):
         return f"{self.__class__.__name__}(enabled={self._enabled})"
@@ -182,14 +183,13 @@ class Observer(ABC, nn.Module):
 
         return getattr(module, f"{self.base_name}_{name}", None)
 
-    def forward(self, observed: torch.Tensor) -> torch.Tensor:
-        if not self._enabled:
-            return observed
-
+    def forward_inner(self, observed: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             if self.should_calculate_gparam:
-                observed_detached = observed.detach().reshape((1, 1, -1))  # per tensor reshape
-                global_min_vals, global_max_vals = self.get_global_min_max(observed_detached)
+                observed_detached = observed.detach().reshape(
+                    (1, 1, -1))  # per tensor reshape
+                global_min_vals, global_max_vals = self.get_global_min_max(
+                    observed_detached)
 
             if self.should_calculate_qparams:
                 g_idx = self._get_module_param("g_idx")
@@ -202,6 +202,12 @@ class Observer(ABC, nn.Module):
                 min_vals, max_vals = self.get_min_max(observed_detached)
 
         return observed
+
+    def forward(self, observed: torch.Tensor) -> torch.Tensor:
+        if not self._enabled:
+            return observed
+
+        return self.forward_inner(observed)
 
     def calculate_params(self):
         if self.should_calculate_gparam:

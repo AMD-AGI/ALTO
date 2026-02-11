@@ -38,7 +38,7 @@ class HessianObserver(Observer):
         module = self.module()
         if inp.dim() == 2:
             inp = inp.unsqueeze(0)
-        num_added = inp.shape[0] 
+        num_added = inp.shape[0]
         if isinstance(module, torch.nn.Linear) or (TransformerConv1D and isinstance(module, TransformerConv1D)):
             if inp.dim() == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
@@ -54,8 +54,8 @@ class HessianObserver(Observer):
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
         return inp, num_added
-    
-    def forward(self, x_orig):
+
+    def forward_inner(self, x_orig):
         if x_orig.numel() == 0:
             return x_orig
 
@@ -90,7 +90,7 @@ class HessianObsObserver(HessianObserver):
         super().__init__(*args, **kwargs)
 
 
-    def forward(self, x_orig):
+    def forward_inner(self, x_orig):
         if x_orig.numel() == 0:
             return x_orig
 
@@ -103,4 +103,3 @@ class HessianObsObserver(HessianObserver):
             self.stats += inp.matmul(inp.t())
 
         return x_orig
-

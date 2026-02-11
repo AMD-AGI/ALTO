@@ -60,9 +60,9 @@ class SparseGPTModifier(SparsityModifierBase):
     dampening_frac: float | None = 0.01
     preserve_sparsity_mask: bool = False
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         self._observer_name = "hessian_obs"
-        return super().on_initialize(model, **kwargs)
+        return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         """

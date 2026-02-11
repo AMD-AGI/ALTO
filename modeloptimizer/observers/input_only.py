@@ -29,8 +29,8 @@ class InputOnlyObserver(Observer):
 
     def get_current_global_min_max(self, observed: torch.Tensor):
         pass
-    
-    def forward(self, x_orig):
+
+    def forward_inner(self, x_orig):
         if x_orig.numel() == 0:
             return x_orig
         inp = x_orig.detach().to(PRECISION)
@@ -52,4 +52,3 @@ class InputOnlyObserver(Observer):
 
     def calculate_params(self):
         pass
-

@@ -72,10 +72,10 @@ class AlpsModifier(SparsityModifierBase):
     alps_update_iter: int = 16
     alps_switch_iter: int = 16
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         # ALPS uses Hessian of activations; must use HessianObserver for calibration
         self._observer_name = "hessian"
-        return super().on_initialize(model, **kwargs)
+        return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         """

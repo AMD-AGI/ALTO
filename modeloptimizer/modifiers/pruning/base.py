@@ -73,40 +73,42 @@ class PruningModifierBase(Modifier):
             return False
         return all(isinstance(k, int) for k in sparsity.keys())
 
-    def validate_sparsity(self, model: Module):
+    def validate_sparsity(self, model_parts: list[Module]):
         """
         Validate that the sparsity is properly configured
         """
-        if isinstance(self.sparsity, (list, dict)):
-            # matches the length of target layers
-            if len(self._target_layers) == len(self.sparsity):
-                return
-            # matches the total number of layers in model definition
-            if len(self.sparsity) == model.n_layers:
-                return
-            # matches the number of blocks in current model part
-            if self._is_dict_with_digit_keys(self.sparsity) and len(
-                    self.sparsity) == len(
-                        get_layers(self.sequential_targets, model)):
-                return
+        for m in model_parts:
+            if isinstance(self.sparsity, (list, dict)):
+                # matches the length of target layers
+                if len(self._target_layers) == len(self.sparsity):
+                    continue
+                # matches the total number of layers in model definition
+                if len(self.sparsity) == m.n_layers:
+                    continue
+                # matches the number of blocks in current model part
+                if self._is_dict_with_digit_keys(self.sparsity) and len(
+                        self.sparsity) == len(
+                            get_layers(self.sequential_targets, m)):
+                    continue
 
-            raise ValueError(
-                f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
-                f"sparsities values, but model has {len(self._target_layers)} target layers"
-            )
+                raise ValueError(
+                    f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
+                    f"sparsities values, but model has {len(self._target_layers)} target layers"
+                )
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         """
         Initialize and run the SparseGPT algorithm on the current state
         """
         # infer module and sequential targets
-        self._model_args = model.model_args
-        self.sequential_targets = self._infer_sequential_targets(model)
-        self._target_layers = get_layers(self.targets,
-                                         model)  # layers containing targets
+        self._model_args = model_parts[0].model_args
+        for m in model_parts:
+            self.sequential_targets = self._infer_sequential_targets(m)
+            self._target_layers.update(get_layers(
+                self.targets, m))  # layers containing targets
 
         self._initialize_module_name_mappings()
-        self._initialize_module_sparsities(model)
+        self._initialize_module_sparsities(model_parts)
 
         self._initialize_observers(
             self._observer_name,
@@ -115,18 +117,18 @@ class PruningModifierBase(Modifier):
         )
         return True
 
-    def pre_step(self, model: Module, **kwargs):
+    def pre_step(self, model_parts: list[Module], **kwargs):
         self.started_ = True
         for module, observer in self._layer_observers.items():
             observer.enable()
 
-    def post_step(self, model: Module, **kwargs):
+    def post_step(self, model_parts: list[Module], **kwargs):
         with torch.no_grad():
             self.compress_modules()
         for module, observer in self._layer_observers.items():
             observer.disable()
 
-    def on_finalize(self, model: Module, **kwargs):
+    def on_finalize(self, model_parts: list[Module], **kwargs):
         self.ended_ = True
         self.remove_hooks()
         for module, observer in self._layer_observers.items():
@@ -172,8 +174,8 @@ class PruningModifierBase(Modifier):
             self._module_names[module] = name
 
     @torch.no_grad()
-    def _initialize_module_sparsities(self, model: Module):
-        self.validate_sparsity(model)
+    def _initialize_module_sparsities(self, model_parts: list[Module]):
+        self.validate_sparsity(model_parts)
         self._module_sparsities.clear()
         for index, name, module in self._target_layer_iterator():
             match self.sparsity:

@@ -44,9 +44,9 @@ class MagnitudeModifier(SparsityModifierBase):
         sparsify even if they match a target. Defaults to empty list.
     """
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         self._observer_name = None
-        return super().on_initialize(model, **kwargs)
+        return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         for module, name in self._module_names.items():

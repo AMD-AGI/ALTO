@@ -64,10 +64,10 @@ class AdmmModifier(SparsityModifierBase):
     admm_pruning_granularity: int = 32
     admm_iterations: int = 32
 
-    def on_initialize(self, model: Module, **kwargs) -> bool:
+    def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         # ADMM uses Hessian of activations; requires HessianObserver for calibration
         self._observer_name = "hessian"
-        return super().on_initialize(model, **kwargs)
+        return super().on_initialize(model_parts, **kwargs)
 
     def compress_modules(self):
         """

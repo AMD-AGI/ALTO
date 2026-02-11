@@ -32,8 +32,8 @@ class InputOutputObserver(Observer):
 
     def get_current_global_min_max(self, observed: torch.Tensor):
         pass
-    
-    def forward(self, x_orig):
+
+    def forward_inner(self, x_orig):
         if x_orig.numel() == 0:
             return x_orig
         inp = x_orig.detach().to(PRECISION)
@@ -45,7 +45,7 @@ class InputOutputObserver(Observer):
             self.input_stats = inp
         else:
             self.input_stats = torch.cat([self.input_stats, inp], dim=0)
-        
+
         out = self.module()(inp)
         if out.dim() == 2:
             out = out.unsqueeze(0)  # [B, C] -> [1, B, C] so batch is always dim=0
@@ -63,4 +63,3 @@ class InputOutputObserver(Observer):
 
     def calculate_params(self):
         pass
-

@@ -41,6 +41,7 @@ class SparsityModifierBase(Modifier):
     """
 
     # modifier arguments
+    _model_args: None = PrivateAttr(default=None)
     sparsity: float | list[float] | dict[str, float] | None
     mask_structure: str = "0:0"
 
@@ -107,7 +108,7 @@ class SparsityModifierBase(Modifier):
         Initialize and run the SparseGPT algorithm on the current state
         """
         # infer module and sequential targets
-        self.model_args = model_parts[0].model_args
+        self._model_args = model_parts[0].model_args
         for m in model_parts:
             self.sequential_targets = self._infer_sequential_targets(m)
             self._target_layers.update(get_layers(

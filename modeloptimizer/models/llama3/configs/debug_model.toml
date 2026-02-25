@@ -25,7 +25,7 @@ flavor = "debugmodel"
 hf_assets_path = "./tests/assets/tokenizer"
 converters = ["modeloptimizer"]
 
-[model_optimizer]
+[modeloptimizer]
 recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
 
 [optimizer]

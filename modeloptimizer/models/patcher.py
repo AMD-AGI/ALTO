@@ -4,7 +4,7 @@ from unittest.mock import patch
 import torch
 
 SUPPORTED_MODELS = ["llama3"]
-PATCH_MODULES = ["model", "state_dict_adapter"]
+PATCH_MODULES = ["config_registry", "model", "state_dict_adapter"]
 
 
 class ModelPatcher:
@@ -25,18 +25,18 @@ class ModelPatcher:
                 source_module = importlib.import_module(
                     f"modeloptimizer.models.{model_name}.{patch_module}")
                 target_module = importlib.import_module(
-                    f"torchtitan.models.{model_name}.model.{patch_module}")
+                    f"torchtitan.models.{model_name}.{patch_module}")
                 for attr_name in source_module.__all__:
                     patched_attr = getattr(source_module, attr_name)
                     # print(
                     #     f"Patching {attr_name} of {model_name}: {patched_attr}")
-                    original_attr = getattr(target_module, attr_name)
+                    original_attr = getattr(target_module, attr_name, None)
                     # print(
                     #     f"Original {attr_name} of {model_name}: {original_attr}"
                     # )
                     setattr(target_module, attr_name, patched_attr)
                     patch(
-                        f"torchtitan.models.{model_name}.model.{patch_module}.{attr_name}",
+                        f"torchtitan.models.{model_name}.{patch_module}.{attr_name}",
                         patched_attr,
                     ).__enter__()
                     if hasattr(model_module, attr_name):

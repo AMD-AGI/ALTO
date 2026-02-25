@@ -9,6 +9,10 @@ __all__ = ["llama3_debugmodel", "llama3_debugmodel_opt"]
 
 def llama3_debugmodel() -> Trainer.Config:
     config = llama3_debugmodel_orig()
+    config.training.steps = 1
+    config.training.local_batch_size = 4
+    config.training.global_batch_size = 16
+    config.training.seq_len = 2048
     config.activation_checkpoint.mode = "none"
     return config
 

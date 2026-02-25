@@ -19,13 +19,7 @@ def log_calibration(
 
     device_mem_stats = metrics_processor.device_memory_monitor.get_peak_stats()
 
-    # tokens per second per device, abbreviated as tps
-    tps = metrics_processor.ntokens_since_last_log / (
-        time_delta * metrics_processor.parallel_dims.non_data_parallel_size)
-
     metrics = {
-        "calibration_metrics/throughput(tps)":
-            tps,
         "calibration_metrics/memory/max_active(GiB)":
             device_mem_stats.max_active_gib,
         "calibration_metrics/memory/max_active(%)":
@@ -43,10 +37,7 @@ def log_calibration(
     logger.info(
         f"{color.orange}calibration micro_step: {micro_step:2}  "
         f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-        f"({device_mem_stats.max_reserved_pct:.2f}%)  "
-        f"{color.blue}tps: {round(tps):,}{color.reset}")
-
-    metrics_processor.ntokens_since_last_log = 0
+        f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
     metrics_processor.time_last_log = time.perf_counter()
     metrics_processor.device_memory_monitor.reset_peak_stats()
 
@@ -63,10 +54,6 @@ def log_stage2_optimization(
 
     device_mem_stats = metrics_processor.device_memory_monitor.get_peak_stats()
 
-    # tokens per second per device, abbreviated as tps
-    tps = metrics_processor.ntokens_since_last_log / (
-        time_delta * metrics_processor.parallel_dims.non_data_parallel_size)
-
     metrics = {
         "stage2_optimization_metrics/student_loss":
             student_loss,
@@ -74,8 +61,6 @@ def log_stage2_optimization(
             aggregate_loss,
         "stage2_optimization_metrics/lr":
             lr,
-        "stage2_optimization_metrics/throughput(tps)":
-            tps,
         "stage2_optimization_metrics/memory/max_active(GiB)":
             device_mem_stats.max_active_gib,
         "stage2_optimization_metrics/memory/max_active(%)":
@@ -98,7 +83,6 @@ def log_stage2_optimization(
         f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
         f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
 
-    metrics_processor.ntokens_since_last_log = 0
     metrics_processor.time_last_log = time.perf_counter()
     metrics_processor.device_memory_monitor.reset_peak_stats()
 
@@ -264,21 +248,6 @@ class Trainer(ForgeTrainer):
         )
         self.clear_cached_input()
         self.clear_cached_output()
-
-    def post_training_tasks(self):
-        last_step = not self.should_continue_training()
-        if last_step:
-            self.model_converters.finalize(self.model_parts)
-
-        self.checkpointer.save(
-            self.step,
-            last_step=last_step,
-        )
-        # run validation
-        if (self.config.validator.enable and
-                self.validator.should_validate(self.step)):
-            with self.loss_fn.no_rescale():
-                self.validator.validate(self.model_parts, self.step)
 
 
 if __name__ == "__main__":

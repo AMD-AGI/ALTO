@@ -12,10 +12,10 @@ import argparse
 from pathlib import Path
 import shutil
 from contextlib import contextmanager
+import importlib
 
 import torch
 import torch.distributed.checkpoint as dcp
-import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 
 from compressed_tensors import (
@@ -25,13 +25,10 @@ from compressed_tensors import (
 )
 
 from torchtitan.config.manager import ConfigManager
-from torchtitan.config.job_config import JobConfig
+from torchtitan.trainer import Trainer
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.protocols.model_converter import (
-    build_model_converters,
-    ModelConvertersContainer,
-)
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from modeloptimizer.components.converter import ModelOptConverter
 from modeloptimizer.utils.compression.sparsity_metadata_config import SparsityConfigMetadata
@@ -64,7 +61,7 @@ def patch_finfo():
 
 def hot_fix_for_tied_word_embeddings(model: torch.nn.Module,
                                      compressor: ModelCompressor):
-    if not getattr(model, "tie_word_embeddings", False):
+    if not getattr(model.config, "enable_weight_tying", False):
         return
     # in the current impl, lm_head is not a linear layer,
     # so we need to add it to the ignore list manually
@@ -142,7 +139,7 @@ def get_model_compressor(
 
 @torch.inference_mode()
 def convert_to_hf(
-    job_config: JobConfig,
+    config: Trainer.Config,
     input_dir: str,
     output_dir: str,
     model_name: str,
@@ -153,20 +150,27 @@ def convert_to_hf(
     disable_sparse_compression: bool = False,
 ):
     # load model and model args so that we can get the state dict shape
-    train_spec = train_spec_module.get_train_spec(model_name)
-    model_args = train_spec.model_args[model_flavor]
+    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
+    model_spec = model_module.model_registry(model_flavor)
+    model_config = model_spec.model
 
-    model_converters = build_model_converters(job_config, None)
+    model_converters = config.model_converters.build(
+        parallel_dims=None,
+        model_compile_enabled=False,
+    )
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        model = model_config.build()
         model_converters.convert(model)
+
     model_converters.post_initialization([model])
     model_converters.pre_step([model])
     model_converters.finalize([model])
     wrapped_model = ModelWrapper(model)
 
-    sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
+
+    # pyrefly: ignore[bad-instantiation, not-callable]
+    sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
@@ -241,9 +245,8 @@ def eval_tasks(model_dir: str, tasks: list[str]):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Convert DCP weights to HF format.")
-    parser.add_argument("config_file",
-                        type=Path,
-                        help="Path to job config file.")
+    parser.add_argument("module", type=str, default="llama3")
+    parser.add_argument("config", type=str, default="llama3_8b")
     parser.add_argument(
         "--export_dtype",
         type=str,
@@ -277,16 +280,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config_manager = ConfigManager()
-    job_config: JobConfig = config_manager.parse_args(
-        ["--job.config_file", args.config_file.as_posix()])
+    config = config_manager.parse_args(["--module", args.module, "--config", args.config])
 
-    dump_folder = Path(job_config.job.dump_folder)
-    hf_assets_path = Path(job_config.model.hf_assets_path)
-    input_dir = dump_folder / "checkpoint" / f"step-{job_config.training.steps}"
+    dump_folder = Path(config.dump_folder)
+    hf_assets_path = Path(config.hf_assets_path)
+    input_dir = dump_folder / "checkpoint" / f"step-{config.training.steps}"
     output_dir = dump_folder / "hf"
 
-    model_name = job_config.model.name
-    model_flavor = job_config.model.flavor
+    model_name = config.model_spec.name
+    model_flavor = config.model_spec.flavor
 
     if not args.skip_export:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -295,7 +297,7 @@ if __name__ == "__main__":
                 shutil.copy(extra_file, output_dir)
 
         convert_to_hf(
-            job_config,
+            config,
             input_dir.as_posix(),
             output_dir.as_posix(),
             model_name,

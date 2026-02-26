@@ -55,6 +55,20 @@ class Modifier(HooksMixin):
         # TODO: all finalization should succeed
         self.finalized_ = self.on_finalize(model_parts, **kwargs)
 
+    def pre_step(self, model_parts: list[Module], **kwargs):
+        if not self.initialized_ or self.finalized_:
+            raise RuntimeError(
+                "cannot call pre-step method on an uninitialized or finalized modifier"
+            )
+        self.started_ = self.on_pre_step(model_parts, **kwargs)
+
+    def post_step(self, model_parts: list[Module], **kwargs):
+        if not self.initialized_ or self.finalized_:
+            raise RuntimeError(
+                "cannot call post-step method on an uninitialized or finalized modifier"
+            )
+        self.ended_ = self.on_post_step(model_parts, **kwargs)
+
     @abstractmethod
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
@@ -64,9 +78,9 @@ class Modifier(HooksMixin):
         raise NotImplementedError
 
     @abstractmethod
-    def pre_step(self, model_parts: list[Module], **kwargs):
+    def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def post_step(self, model_parts: list[Module], **kwargs):
+    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError

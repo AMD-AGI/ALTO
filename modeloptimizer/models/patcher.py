@@ -4,7 +4,7 @@ from unittest.mock import patch
 import torch
 
 SUPPORTED_MODELS = ["llama3"]
-PATCH_MODULES = ["config_registry", "model", "state_dict_adapter"]
+PATCH_MODULES = ["config_registry", "state_dict_adapter"]
 
 
 class ModelPatcher:
@@ -17,6 +17,7 @@ class ModelPatcher:
         cls._patched = True
 
         cls.patch_fake_quantize()
+        cls.patch_apply_rotary_emb_complex()
 
         for model_name in SUPPORTED_MODELS:
             model_module = importlib.import_module(
@@ -70,3 +71,37 @@ class ModelPatcher:
             )
 
         forward_module.fake_quantize = fake_quantize
+
+    @classmethod
+    def patch_apply_rotary_emb_complex(cls):
+        from torchtitan.models.common import rope, attention
+        original_apply_rotary_emb_complex = rope.apply_rotary_emb_complex
+
+        def apply_rotary_emb_complex(
+            xq: torch.Tensor,
+            xk: torch.Tensor,
+            freqs_cis: torch.Tensor,
+            positions: torch.Tensor | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            head_dim = xq.shape[-1]
+            xq = xq.reshape(
+                *xq.shape[:-1],
+                2,
+                head_dim // 2,
+            ).transpose(-1, -2).reshape(
+                *xq.shape[:-1],
+                head_dim,
+            ).contiguous()
+            xk = xk.reshape(
+                *xk.shape[:-1],
+                2,
+                head_dim // 2,
+            ).transpose(-1, -2).reshape(
+                *xk.shape[:-1],
+                head_dim,
+            ).contiguous()
+            return original_apply_rotary_emb_complex(xq, xk, freqs_cis, positions)
+
+        rope.apply_rotary_emb_complex = apply_rotary_emb_complex
+        attention.apply_rotary_emb_complex = apply_rotary_emb_complex
+        patch("torchtitan.models.common.rope.apply_rotary_emb_complex", apply_rotary_emb_complex).__enter__()

@@ -92,15 +92,6 @@ class Trainer(ForgeTrainer):
     def __init__(self, config: TitanTrainer.Config):
         super().__init__(config)
 
-        # Build the collection of model converters. No-op if converters empty
-        model_compile_enabled = (config.compile.enable and
-                                 "model" in config.compile.components)
-        self.model_converters = config.model_converters.build(
-            parallel_dims=self.parallel_dims,
-            model_compile_enabled=model_compile_enabled,
-        )
-
-        self.post_training = True
         self.enable_data_cache = True
         self._input_cache = []
         self._output_cache = []
@@ -188,7 +179,7 @@ class Trainer(ForgeTrainer):
         self,
         data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
     ):
-        if not self.post_training:
+        if self.model_converters.is_empty():
             return super().train_step(data_iterator)
 
         # Keep these variables local to shorten the code as these are

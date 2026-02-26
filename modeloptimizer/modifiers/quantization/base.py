@@ -44,15 +44,16 @@ class QuantizationModifier(Modifier, QuantizationMixin):
 
         return True
 
-    def pre_step(self, model_parts: list[Module], **kwargs):
+    def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         """
         Begin calibrating activations and weights. Calibrate weights only once on start
         """
-        self.started_ = True
         for m in model_parts:
             QuantizationMixin.start_calibration(self, m)
+            
+        return True
 
-    def post_step(self, model_parts: list[Module], **kwargs):
+    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         for m in model_parts:
             QuantizationMixin.end_calibration(
                 self, m)  # keep quantization enabled
@@ -64,10 +65,13 @@ class QuantizationModifier(Modifier, QuantizationMixin):
             for _, module in tqdm.tqdm(named_modules, desc="Calibrating weights"):
                 update_weight_zp_scale(module)
 
+        return True
+
     def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
-        self.ended_ = True
         for m in model_parts:
             QuantizationMixin.clear_calibration(self, m)
 
         gc.collect()
         torch.cuda.empty_cache()
+
+        return True

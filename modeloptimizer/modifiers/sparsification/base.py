@@ -175,14 +175,15 @@ class SparsityModifierBase(Modifier):
         )
         return True
 
-    def pre_step(self, model_parts: list[Module], **kwargs):
-        self.started_ = True
+    def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         for module, observer in self._layer_observers.items():
             observer.enable()
         for module, observer in self._owl_layer_observers.items():
             observer.enable()
+            
+        return True
 
-    def post_step(self, model_parts: list[Module], **kwargs):
+    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         if self.sparsity_profile == "owl":
             for m in model_parts:
                 blocks = get_layers(self.sequential_targets, m)
@@ -195,7 +196,9 @@ class SparsityModifierBase(Modifier):
         for module, observer in self._owl_layer_observers.items():
             observer.disable()
 
-    def on_finalize(self, model_parts: list[Module], **kwargs):
+        return True
+
+    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
         self.ended_ = True
         self.remove_hooks()
         for module, observer in self._layer_observers.items():
@@ -209,6 +212,8 @@ class SparsityModifierBase(Modifier):
         self._module_sparsities.clear()
         gc.collect()
         torch.cuda.empty_cache()
+
+        return True
 
     def _target_layer_iterator(self) -> Generator[int | None, str, Module]:
         for layer_name, layer in self._target_layers.items():

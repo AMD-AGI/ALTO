@@ -13,7 +13,7 @@ set -ex
 # DRY_RUN=1 ./run_train.sh  # for config validation without GPU
 NGPU=${NGPU:-"1"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./modeloptimizer/models/llama3/configs/guanchen_l3_8b.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./modeloptimizer/models/llama3/configs/llama3_8b.toml"}
 TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
 DRY_RUN=${DRY_RUN:-0}
 

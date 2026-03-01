@@ -17,7 +17,7 @@ save_tb_folder = "tb"
 [model]
 name = "llama3"
 flavor = "8B"
-hf_assets_path = "/group/ossmodelzoo/hanwang2/meta-llama3/Meta-Llama-3-8B-hf"
+hf_assets_path = "/wekafs/guanchen/modelzoo/meta-llama/Llama-3.1-8B"
 converters = ["modeloptimizer"]
 
 [modeloptimizer]
@@ -26,7 +26,7 @@ recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
 [training]
 dtype = "bfloat16"
 local_batch_size = 1
-global_batch_size = 10
+global_batch_size = 64
 seq_len = 8192
 steps = 1
 dataset = "wikitext_test"
@@ -47,8 +47,8 @@ folder = "checkpoint"
 interval = 10
 last_save_model_only = true
 export_dtype = "float32"
-async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
-initial_load_path = "/group/ossmodelzoo/hanwang2/meta-llama3/Meta-Llama-3-8B-hf"
+async_mode = "disabled"
+initial_load_path = "/wekafs/guanchen/modelzoo/meta-llama/Llama-3.1-8B"
 initial_load_in_hf = true
 
 [compile]

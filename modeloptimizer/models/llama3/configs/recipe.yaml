@@ -1,13 +1,10 @@
-sparsity_stage:
-  sparsity_modifiers:
-    WandaPruningModifier:
-      sparsity: 0.5
-      mask_structure: "2:4"
-      # sparsity_profile: "owl"
-      # owl_m: 5
-      # owl_lmbda: 0.05
-      targets: ["Linear"]
-      ignore: ["output"]
+# sparsity_stage:
+#   sparsity_modifiers:
+#     SparseGPTModifier:
+#       sparsity: 0.5
+#       mask_structure: "2:4"
+#       targets: ["Linear"]
+#       ignore: ["output"]
 quantization_stage:
   quantization_modifiers:
     QuantizationModifier:

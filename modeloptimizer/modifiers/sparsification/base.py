@@ -10,6 +10,7 @@ import re
 import torch
 from torch.nn import Module
 from pydantic import Field, PrivateAttr, model_validator
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
@@ -61,6 +62,8 @@ class SparsityModifierBase(Modifier):
                       Observer] = PrivateAttr(default_factory=dict)
     _observer_name: str | None = PrivateAttr(default=None)
 
+    _model_args: Decoder.Config | None = PrivateAttr(default=None)
+
     @model_validator(mode="after")
     def validate_model_after(
             model: "SparsityModifierBase") -> "SparsityModifierBase":
@@ -105,6 +108,7 @@ class SparsityModifierBase(Modifier):
         """
         Initialize and run the SparseGPT algorithm on the current state
         """
+        self._model_args = model_parts[0].config
         # infer module and sequential targets
         for m in model_parts:
             self.sequential_targets = self._infer_sequential_targets(m)
@@ -233,18 +237,6 @@ class SparsityModifierBase(Modifier):
                 "forward_pre",
             )
             observers[module] = observer
-
-    def _infer_sequential_targets(self,
-                                  model: torch.nn.Module) -> str | list[str]:
-        match self.sequential_targets:
-            case None:
-                block_class_name = next(iter(model.layers.values())).__class__.__name__
-                logger.info(f"Inferred sequential targets: {block_class_name}")
-                return [block_class_name]
-            case str():
-                return [self.sequential_targets]
-            case _:
-                return self.sequential_targets
 
     def _split_mask_structure(self, mask_structure: str) -> tuple[int, int]:
         n, m = mask_structure.split(":")

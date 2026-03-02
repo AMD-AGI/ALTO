@@ -3,8 +3,9 @@
 
 from abc import abstractmethod
 from pydantic import ConfigDict
+import torch
 from torch.nn import Module
-
+from torchtitan.tools.logging import logger
 from modeloptimizer.modifiers.utils import HooksMixin
 
 __all__ = ["Modifier"]
@@ -84,3 +85,15 @@ class Modifier(HooksMixin):
     @abstractmethod
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
+
+    def _infer_sequential_targets(self,
+                                  model: torch.nn.Module) -> str | list[str]:
+        match self.sequential_targets:
+            case None:
+                block_class_name = next(iter(model.layers.values())).__class__.__name__
+                logger.info(f"Inferred sequential targets: {block_class_name}")
+                return [block_class_name]
+            case str():
+                return [self.sequential_targets]
+            case _:
+                return self.sequential_targets

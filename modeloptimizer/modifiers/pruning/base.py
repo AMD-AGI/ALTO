@@ -3,14 +3,14 @@
 
 from abc import abstractmethod
 from functools import partial
-from typing import Any, Optional, Generator, Literal
+from typing import Any, Generator, Literal
 import gc
 import re
 
-import numpy
 import torch
 from torch.nn import Module
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
@@ -53,16 +53,13 @@ class PruningModifierBase(Modifier):
     ignore: list[str] = Field(default_factory=list)
 
     # private variables
-    _model_args: None = PrivateAttr(default=None)
-    _module_names: dict[torch.nn.Module,
-                        str] = PrivateAttr(default_factory=dict)
-    _target_layers: dict[str,
-                         torch.nn.Module] = PrivateAttr(default_factory=dict)
-    _module_sparsities: dict[torch.nn.Module,
-                             str] = PrivateAttr(default_factory=dict)
-    _layer_observers: dict[torch.nn.Module,
-                      Observer] = PrivateAttr(default_factory=dict)
+    _module_names: dict[torch.nn.Module, str] = PrivateAttr(default_factory=dict)
+    _target_layers: dict[str, torch.nn.Module] = PrivateAttr(default_factory=dict)
+    _module_sparsities: dict[torch.nn.Module, str] = PrivateAttr(default_factory=dict)
+    _layer_observers: dict[torch.nn.Module, Observer] = PrivateAttr(default_factory=dict)
     _observer_name: str | None = PrivateAttr(default=None)
+
+    _model_args: Decoder.Config | None = PrivateAttr(default=None)
 
     @abstractmethod
     def compress_modules(self):
@@ -86,26 +83,22 @@ class PruningModifierBase(Modifier):
                 if len(self.sparsity) == m.n_layers:
                     continue
                 # matches the number of blocks in current model part
-                if self._is_dict_with_digit_keys(self.sparsity) and len(
-                        self.sparsity) == len(
-                            get_layers(self.sequential_targets, m)):
+                if self._is_dict_with_digit_keys(self.sparsity) and len(self.sparsity) == len(
+                        get_layers(self.sequential_targets, m)):
                     continue
 
-                raise ValueError(
-                    f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
-                    f"sparsities values, but model has {len(self._target_layers)} target layers"
-                )
+                raise ValueError(f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
+                                 f"sparsities values, but model has {len(self._target_layers)} target layers")
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         """
         Initialize and run the SparseGPT algorithm on the current state
         """
+        self._model_args = model_parts[0].config
         # infer module and sequential targets
-        self._model_args = model_parts[0].model_args
         for m in model_parts:
             self.sequential_targets = self._infer_sequential_targets(m)
-            self._target_layers.update(get_layers(
-                self.targets, m))  # layers containing targets
+            self._target_layers.update(get_layers(self.targets, m))  # layers containing targets
 
         self._initialize_module_name_mappings()
         self._initialize_module_sparsities(model_parts)
@@ -117,18 +110,20 @@ class PruningModifierBase(Modifier):
         )
         return True
 
-    def pre_step(self, model_parts: list[Module], **kwargs):
+    def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         self.started_ = True
         for module, observer in self._layer_observers.items():
             observer.enable()
+        return True
 
-    def post_step(self, model_parts: list[Module], **kwargs):
+    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         with torch.no_grad():
             self.compress_modules()
         for module, observer in self._layer_observers.items():
             observer.disable()
+        return True
 
-    def on_finalize(self, model_parts: list[Module], **kwargs):
+    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
         self.ended_ = True
         self.remove_hooks()
         for module, observer in self._layer_observers.items():
@@ -139,6 +134,7 @@ class PruningModifierBase(Modifier):
         self._module_sparsities.clear()
         gc.collect()
         torch.cuda.empty_cache()
+        return True
 
     def _target_layer_iterator(self) -> Generator[int | None, str, Module]:
         for layer_name, layer in self._target_layers.items():
@@ -162,10 +158,9 @@ class PruningModifierBase(Modifier):
                     continue
 
                 if name.endswith("output"):
-                    logger.warning(
-                        "`output` was previously auto-ignored by SparseGPT and Wanda "
-                        "modifiers and is not advised. Please add `re:.*output` to "
-                        "your ignore list if this was unintentional")
+                    logger.warning("`output` was previously auto-ignored by SparseGPT and Wanda "
+                                   "modifiers and is not advised. Please add `re:.*output` to "
+                                   "your ignore list if this was unintentional")
 
                 yield index, name, module
 
@@ -215,7 +210,7 @@ class PruningModifierBase(Modifier):
             )
             observer_attr_name = f"{base_name}_observer"
             object.__setattr__(module, observer_attr_name, observer)
-            
+
             self.register_hook(
                 module,
                 partial(
@@ -225,13 +220,3 @@ class PruningModifierBase(Modifier):
                 "forward_pre",
             )
             observers[module] = observer
-
-    def _infer_sequential_targets(self,
-                                  model: torch.nn.Module) -> str | list[str]:
-        match self.sequential_targets:
-            case None:
-                return ["TransformerBlock"]
-            case str():
-                return [self.sequential_targets]
-            case _:
-                return self.sequential_targets

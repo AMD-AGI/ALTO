@@ -182,12 +182,11 @@ def convert_to_hf(
     model_converters.finalize([model])
     wrapped_model = ModelWrapper(model)
 
-
     # pyrefly: ignore[bad-instantiation, not-callable]
     sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
     assert (
-        sd_adapter is not None
-    ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
+        sd_adapter
+        is not None), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
 
     state_dict = wrapped_model._get_state_dict()
     dcp.load(
@@ -205,7 +204,8 @@ def convert_to_hf(
         )
         if compressor is not None:
             if compressor.quantization_config is not None:
-                compressor.quantization_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.quantization_config.ignore)
+                compressor.quantization_config.ignore = sd_adapter.map_ignore_list_to_hf(
+                    compressor.quantization_config.ignore)
             if compressor.sparsity_config is not None:
                 compressor.sparsity_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.sparsity_config.ignore)
             hot_fix_for_tied_word_embeddings(model, compressor)
@@ -225,16 +225,16 @@ def convert_to_hf(
 
     target_dtype = TORCH_DTYPE_MAP[export_dtype]
     if target_dtype != torch.float32:
-        hf_state_dict = {
-            k: v.to(target_dtype) if v.is_floating_point() else v
-            for k, v in hf_state_dict.items()
-        }
+        hf_state_dict = {k: v.to(target_dtype) if v.is_floating_point() else v for k, v in hf_state_dict.items()}
 
     with patch_finfo():
         dcp.save(
             hf_state_dict,
             storage_writer=storage_writer,
         )
+
+    if not save_compressed:
+        _strip_quantization_config(output_dir)
 
 
 def eval_tasks(model_dir: str, tasks: list[str]):

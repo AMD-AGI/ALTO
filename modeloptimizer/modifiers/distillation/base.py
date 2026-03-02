@@ -113,7 +113,7 @@ class SelfDistillationModifier(Modifier):
         )
         return True
 
-    def on_pre_step(self, model_parts: list[Module], **kwargs):
+    def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         self.started_ = True
         for name, observer in self._teacher_observers.items():
             module = self._target_layers[name]
@@ -122,10 +122,12 @@ class SelfDistillationModifier(Modifier):
             module = self._target_layers[name]
             observer.disable()
 
-    def on_post_step(self, model_parts: list[Module], **kwargs):
+        return True
+
+    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         is_last_step = kwargs.get("is_last_step")
         # if is_last_step:
-        #     return
+        #     return True
 
         input_iterator = kwargs.get("input_iterator")
         output_iterator = kwargs.get("output_iterator")
@@ -200,7 +202,9 @@ class SelfDistillationModifier(Modifier):
             module = self._target_layers[name]
             observer.disable(clear=True)
 
-    def on_finalize(self, model_parts: list[Module], **kwargs):
+        return True
+
+    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
         self.ended_ = True
         self.remove_hooks()
         for name, observer in self._teacher_observers.items():
@@ -214,6 +218,8 @@ class SelfDistillationModifier(Modifier):
         self._target_layers.clear()
         gc.collect()
         torch.cuda.empty_cache()
+
+        return True
 
     def _initialize_observers(
         self,
@@ -247,17 +253,6 @@ class SelfDistillationModifier(Modifier):
                 "forward",
             )
             observers[name] = observer
-
-    def _infer_sequential_targets(self, model: torch.nn.Module) -> str | list[str]:
-        match self.sequential_targets:
-            case None:
-                block_class_name = next(iter(model.layers.values())).__class__.__name__
-                logger.info(f"Inferred sequential targets: {block_class_name}")
-                return [block_class_name]
-            case str():
-                return [self.sequential_targets]
-            case _:
-                return self.sequential_targets
 
     def _get_loss_fn(self, name: str):
         if isinstance(self.criterion, str):

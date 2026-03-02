@@ -303,7 +303,9 @@ class SparsityModifierBase(Modifier):
                                   model: torch.nn.Module) -> str | list[str]:
         match self.sequential_targets:
             case None:
-                return ["TransformerBlock"]
+                block_class_name = next(iter(model.layers.values())).__class__.__name__
+                logger.info(f"Inferred sequential targets: {block_class_name}")
+                return [block_class_name]
             case str():
                 return [self.sequential_targets]
             case _:

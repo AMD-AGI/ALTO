@@ -3,9 +3,6 @@
 #     WandaPruningModifier:
 #       sparsity: 0.5
 #       mask_structure: "2:4"
-#       # sparsity_profile: "owl"
-#       # owl_m: 5
-#       # owl_lmbda: 0.05
 #       targets: ["Linear"]
 #       ignore: ["output"]
 quantization_stage:
@@ -31,8 +28,8 @@ quantization_stage:
       targets: ["__all__"]
       steps: 10
       warmup_steps: 0
-      lr: 1e-5
-      min_lr_factor: 0.0
+      lr: 1e-4
+      min_lr_factor: 1.0
       decay_ratio: null
       decay_type: "linear"
       optimizer: "AdamW"

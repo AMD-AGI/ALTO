@@ -9,9 +9,9 @@ from torch.nn.modules.loss import _Loss as Loss
 from pydantic import Field, PrivateAttr, field_validator, model_validator
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.lr_scheduler import LRSchedulersContainer, build_lr_schedulers
-from torchtitan.config import LRScheduler as LRSchedulerConfig
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
 
 from modeloptimizer.observers import Observer
 from modeloptimizer.modifiers import Modifier
@@ -45,14 +45,13 @@ class SelfDistillationModifier(Modifier):
     criterion: str | dict[str, str] = "LogitsDistillationLoss"
     loss_weights: dict[str, float] | None = None
     # optimizer arguments
-    optimizer: str = "Adam"
+    optimizer: Literal["Adam", "AdamW"] = "AdamW"
     lr: float = 1e-5
     beta1: float = 0.9
     beta2: float = 0.95
     eps: float = 1e-8
     weight_decay: float = 0.1
-    fused: bool = True
-    foreach: bool = False
+    implementation: Literal["for-loop", "foreach", "fused"] = "fused"
     # lr scheduler arguments
     warmup_steps: int = 0
     decay_ratio: float | None = None
@@ -66,15 +65,11 @@ class SelfDistillationModifier(Modifier):
 
     # private variables
     _observer_name: str | None = PrivateAttr(default="activation_recorder")
-    _module_names: dict[torch.nn.Module,
-                        str] = PrivateAttr(default_factory=dict)
-    _target_layers: dict[str,
-                         torch.nn.Module] = PrivateAttr(default_factory=dict)
+    _module_names: dict[torch.nn.Module, str] = PrivateAttr(default_factory=dict)
+    _target_layers: dict[str, torch.nn.Module] = PrivateAttr(default_factory=dict)
 
-    _teacher_observers: dict[torch.nn.Module,
-                           Observer] = PrivateAttr(default_factory=dict)
-    _student_observers: dict[torch.nn.Module,
-                           Observer] = PrivateAttr(default_factory=dict)
+    _teacher_observers: dict[torch.nn.Module, Observer] = PrivateAttr(default_factory=dict)
+    _student_observers: dict[torch.nn.Module, Observer] = PrivateAttr(default_factory=dict)
     _target_loss_fns: dict[str, Loss] = PrivateAttr(default_factory=dict)
 
     _optimizers: OptimizersContainer | None = PrivateAttr(default=None)
@@ -94,15 +89,16 @@ class SelfDistillationModifier(Modifier):
         self._target_loss_fns["output"] = self._get_loss_fn("output")
 
         self._build_optimizers(model_parts)
-        self._lr_schedulers = build_lr_schedulers(
-            self._optimizers,
-            LRSchedulerConfig(
-                warmup_steps=self.warmup_steps,
-                decay_ratio=self.decay_ratio,
-                decay_type=self.decay_type,
-                min_lr_factor=self.min_lr_factor,
-            ),
-            self.steps,
+        lr_scheduler_config = LRSchedulersContainer.Config(
+            warmup_steps=self.warmup_steps,
+            total_steps=None,
+            decay_ratio=self.decay_ratio,
+            decay_type=self.decay_type,
+            min_lr_factor=self.min_lr_factor,
+        )
+        self._lr_schedulers = lr_scheduler_config.build(
+            optimizers=self._optimizers,
+            training_steps=self.steps,
         )
 
         self._initialize_observers(
@@ -117,7 +113,7 @@ class SelfDistillationModifier(Modifier):
         )
         return True
 
-    def pre_step(self, model_parts: list[Module], **kwargs):
+    def on_pre_step(self, model_parts: list[Module], **kwargs):
         self.started_ = True
         for name, observer in self._teacher_observers.items():
             module = self._target_layers[name]
@@ -126,10 +122,10 @@ class SelfDistillationModifier(Modifier):
             module = self._target_layers[name]
             observer.disable()
 
-    def post_step(self, model_parts: list[Module], **kwargs):
+    def on_post_step(self, model_parts: list[Module], **kwargs):
         is_last_step = kwargs.get("is_last_step")
-        if is_last_step:
-            return
+        # if is_last_step:
+        #     return
 
         input_iterator = kwargs.get("input_iterator")
         output_iterator = kwargs.get("output_iterator")
@@ -141,10 +137,15 @@ class SelfDistillationModifier(Modifier):
             module = self._target_layers[name]
             observer.disable(clear=False)
 
-        for _microbatch, input_dict in enumerate(input_iterator):
+        local_valid_tokens = torch.tensor(0, dtype=torch.int64)
+
+        for _microbatch, batch in enumerate(input_iterator):
+            input_dict, labels = batch
             # TODO: support gradient accumulation once we moved the high precision agent into vLLM
             self._optimizers.zero_grad()
             lr = self._lr_schedulers.schedulers[0].get_last_lr()[0]
+            # TODO: change to += if gradient accumulation is supported
+            local_valid_tokens = (labels != IGNORE_INDEX).sum().to(device_type)
 
             for name, observer in self._student_observers.items():
                 module = self._target_layers[name]
@@ -152,7 +153,7 @@ class SelfDistillationModifier(Modifier):
 
             student_result = forward_step({
                 k: v.to(device_type) for k, v in input_dict.items()
-            })
+            }, labels, local_valid_tokens)
             teacher_result = next(output_iterator).to(device_type)
 
             loss_values = {}
@@ -161,12 +162,14 @@ class SelfDistillationModifier(Modifier):
             for name, observer in self._student_observers.items():
                 module = self._target_layers[name]
                 student_activation = observer.activations[0].to(device_type)
-                teacher_activation = getattr(module, f"{TEACHER_OBSERVER_BASE_NAME}_observer").activations[_microbatch].to(device_type)
+                teacher_activation = getattr(
+                    module, f"{TEACHER_OBSERVER_BASE_NAME}_observer").activations[_microbatch].to(device_type)
                 loss_values[name] = self._target_loss_fns[name](student_activation, teacher_activation)
 
             # balance the losses
             if self.loss_weights is not None:
-                assert len(self.loss_weights) == len(loss_values), "Number of loss weights does not correspond to number of loss values"
+                assert len(self.loss_weights) == len(
+                    loss_values), "Number of loss weights does not correspond to number of loss values"
                 assert sum(self.loss_weights.values()) == 1.0, "Loss weights do not sum to 1.0"
                 loss_values = {k: v * self.loss_weights[k] for k, v in loss_values.items()}
                 aggregate_loss = sum(loss_values.values())
@@ -196,7 +199,6 @@ class SelfDistillationModifier(Modifier):
         for name, observer in self._teacher_observers.items():
             module = self._target_layers[name]
             observer.disable(clear=True)
-
 
     def on_finalize(self, model_parts: list[Module], **kwargs):
         self.ended_ = True
@@ -246,11 +248,12 @@ class SelfDistillationModifier(Modifier):
             )
             observers[name] = observer
 
-    def _infer_sequential_targets(self,
-                                  model: torch.nn.Module) -> str | list[str]:
+    def _infer_sequential_targets(self, model: torch.nn.Module) -> str | list[str]:
         match self.sequential_targets:
             case None:
-                return ["TransformerBlock"]
+                block_class_name = next(iter(model.layers.values())).__class__.__name__
+                logger.info(f"Inferred sequential targets: {block_class_name}")
+                return [block_class_name]
             case str():
                 return [self.sequential_targets]
             case _:
@@ -265,25 +268,14 @@ class SelfDistillationModifier(Modifier):
             raise ValueError(f"Invalid criterion: {self.criterion}")
 
     def _build_optimizers(self, model_parts: list[Module]):
-        optimizer_classes = {
-            "Adam": torch.optim.Adam,
-            "AdamW": torch.optim.AdamW,
-        }
-        if self.optimizer not in optimizer_classes:
-            raise NotImplementedError(f"Optimizer {self.optimizer} not added.")
-        optimizer_cls = optimizer_classes[self.optimizer]
-
-        optimizer_kwargs = {
-            "lr": self.lr,
-            "betas": (self.beta1, self.beta2),
-            "eps": self.eps,
-            "weight_decay": self.weight_decay,
-            "fused": self.fused,
-            "foreach": self.foreach,
-        }
-
-        self._optimizers = OptimizersContainer(
-            model_parts,
-            optimizer_cls,
-            optimizer_kwargs,
+        config = OptimizersContainer.Config(
+            name=self.optimizer,
+            lr=self.lr,
+            beta1=self.beta1,
+            beta2=self.beta2,
+            eps=self.eps,
+            weight_decay=self.weight_decay,
+            implementation=self.implementation,
         )
+
+        self._optimizers = config.build(model_parts=model_parts,)

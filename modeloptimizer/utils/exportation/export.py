@@ -8,11 +8,12 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Optional
-import argparse
-from pathlib import Path
-import shutil
 from contextlib import contextmanager
 import importlib
+import json
+from pathlib import Path
+import shutil
+import argparse
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -82,7 +83,6 @@ def get_model_compressor(
 ):
     # modified from https://github.com/vllm-project/llm-compressor/blob/4ce1bdfc197ccd95e2be0297bfa4a7c8d7d9a614/src/llmcompressor/transformers/compression/compressed_tensors_utils.py#L152-L242
 
-    # get the first modifier of ModelOptConverter class from model_converters
     converter = next(
         (c for c in model_converters.converters
          if isinstance(c, ModelOptConverter)),
@@ -137,6 +137,21 @@ def get_model_compressor(
     )
 
 
+def _strip_quantization_config(output_dir: str):
+    """Remove quantization_config from config.json so the exported model
+    loads as a plain HF model without triggering quantizer logic."""
+    import os
+    cfg_path = os.path.join(output_dir, "config.json")
+    if not os.path.exists(cfg_path):
+        return
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    if "quantization_config" in cfg:
+        del cfg["quantization_config"]
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f, indent=2)
+
+
 @torch.inference_mode()
 def convert_to_hf(
     config: Trainer.Config,
@@ -162,7 +177,6 @@ def convert_to_hf(
     with torch.device("cpu"):
         model = model_config.build()
         model_converters.convert(model)
-
     model_converters.post_initialization([model])
     model_converters.pre_step([model])
     model_converters.finalize([model])
@@ -175,32 +189,30 @@ def convert_to_hf(
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
 
-    # allocate state dict memory with empty weights to load checkpoint
     state_dict = wrapped_model._get_state_dict()
     dcp.load(
         state_dict,
         checkpoint_id=input_dir,
     )
 
-    compressor = get_model_compressor(
-        model,
-        state_dict,
-        model_converters,
-        save_compressed=save_compressed,
-        disable_sparse_compression=disable_sparse_compression,
-    )
-    if compressor is not None:
-        # adjust ignore list to match the hf state dict
-        if compressor.quantization_config is not None:
-            compressor.quantization_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.quantization_config.ignore)
-        if compressor.sparsity_config is not None:
-            compressor.sparsity_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.sparsity_config.ignore)
-        hot_fix_for_tied_word_embeddings(model, compressor)
+    if save_compressed:
+        compressor = get_model_compressor(
+            model,
+            state_dict,
+            model_converters,
+            save_compressed=save_compressed,
+            disable_sparse_compression=disable_sparse_compression,
+        )
+        if compressor is not None:
+            if compressor.quantization_config is not None:
+                compressor.quantization_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.quantization_config.ignore)
+            if compressor.sparsity_config is not None:
+                compressor.sparsity_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.sparsity_config.ignore)
+            hot_fix_for_tied_word_embeddings(model, compressor)
 
-        state_dict = compressor.compress(model)
-        compressor.update_config(output_dir)
+            state_dict = compressor.compress(model)
+            compressor.update_config(output_dir)
 
-    # convert state dict tt->hf
     hf_state_dict = sd_adapter.to_hf(state_dict)
     sd_adapter.update_storage_plan(hf_state_dict)
     storage_writer = HuggingFaceStorageWriter(
@@ -211,7 +223,6 @@ def convert_to_hf(
         thread_count_consolidation=5,
     )
 
-    # map and apply export dtype if needed
     target_dtype = TORCH_DTYPE_MAP[export_dtype]
     if target_dtype != torch.float32:
         hf_state_dict = {

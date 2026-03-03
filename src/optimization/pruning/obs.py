@@ -89,7 +89,10 @@ class OBS(BlockwisePruning):
             else:
                 continue
             
-            self.W_mask[global_layer_name] = pruned_mask
+            if layer_name == out_name:
+                self.W_mask.set_head_mask(block_idx, pruned_mask)
+            else:
+                self.W_mask.set_neuron_mask(block_idx, pruned_mask)
 
     @torch.no_grad()
     def local_prune_core(self, W, H, G, num_total_groups: int, num_groups_to_remain: int, update_iter: int = 32):
@@ -111,7 +114,7 @@ class OBS(BlockwisePruning):
             W = H_inv @ G
             if (num_total_groups - num_groups_to_remain - num_already_zero) <= 0:
                 W[zero_idx, :] = 0
-                return W, 0.0
+                return W, 0.0, pruned_group_mask
         remaining_to_prune = int(num_total_groups - num_groups_to_remain - int(pruned_group_mask.sum().item()))
         if remaining_to_prune <= 0:
             kept_mask = (~torch.repeat_interleave(pruned_group_mask, group_size))
@@ -123,7 +126,7 @@ class OBS(BlockwisePruning):
                 G_cpu = G[kept_mask, :].cpu()
                 W_kept[kept_mask, :] = (torch.linalg.inv(H_cpu) @ G_cpu).to(device)
             prune_loss = torch.sum(-W_kept * G + 0.5 * W_kept * (H @ W_kept)).detach().item()
-            return W_kept, prune_loss
+            return W_kept, prune_loss, pruned_group_mask
         update_rounds = max(int(min(update_iter, remaining_to_prune)), 1)
         base, extra = divmod(remaining_to_prune, update_rounds)
         groups_to_prune_each_round = torch.full((update_rounds,), base, dtype=torch.int, device=device)

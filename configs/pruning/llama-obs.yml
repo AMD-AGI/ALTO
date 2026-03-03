@@ -3,7 +3,7 @@ base:
 
 model:
   type: Llama
-  path: /wekafs/guanchen/modelzoo/meta-llama/Llama-3.2-1B
+  path: /wekafs/guanchen/modelzoo/meta-llama/Llama-3.1-8B
   torch_dtype: auto
 
 calib:
@@ -19,9 +19,9 @@ calib:
     revision: 607bd4c8450a42878aa9ddc051a65a055450ef87
     hf_context_key: text
   processing:
-    n_samples: 32
+    n_samples: 128
     bs: 1
-    seq_len: 4096
+    seq_len: 8192
     preproc: calib_truncated_long_text_random
     seed: *seed
 
@@ -38,7 +38,7 @@ eval:
           hf_context_key: text
         processing:
           bs: 1
-          seq_len: 2048
+          seq_len: 4096
           preproc: test_jointdoc
           preproc_kwargs:
             sep: '\n\n'
@@ -49,7 +49,7 @@ optimization:
   pruning:
     method: OBS
     weight:
-      sparsity: 0.25
+      sparsity: [0, 0.125, 0.125, 0.125, 0.125, 0.25, 0.25, 0.25, 0.25, 0.25, 0.375, 0.375, 0.375, 0.375, 0.375, 0.375, 0.375, 0.375, 0.375, 0.375, 0.375, 0.375, 0.25, 0.25, 0.25, 0.25, 0.25, 0.125, 0.125, 0.125, 0.125, 0]
       prune_attn: True
       prune_mlp: True
       prune_embedding: False

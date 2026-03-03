@@ -11,6 +11,7 @@ from loguru import logger
 from src.utils import module_device, to_device
  
 from ..blockwise_optimization import BlockwiseOptimizer
+from .structured_mask import ModelDims, StructuredPruningMask
  
  
 class BlockwisePruning(BlockwiseOptimizer):
@@ -25,7 +26,17 @@ class BlockwisePruning(BlockwiseOptimizer):
         if sparsity_dict_path:
             with open(sparsity_dict_path, "r", encoding="utf-8") as f:
                 self.sparsity_dict = json.load(f)
-        self.W_mask = {}
+        cfg = self.model.model.config
+        num_q_heads = int(cfg.num_attention_heads)
+        num_kv_heads = int(getattr(cfg, "num_key_value_heads", num_q_heads))
+        self.model_dims = ModelDims(
+            num_layers=len(self.blocks),
+            num_kv_heads=num_kv_heads,
+            num_q_heads=num_q_heads,
+            intermediate_size=int(cfg.intermediate_size),
+            hidden_size=int(cfg.hidden_size),
+        )
+        self.W_mask = StructuredPruningMask(self.model_dims)
         # pruning dimensions
         self.prune_attn      = self.pruning_config['weight'].get('prune_attn', False)
         self.prune_mlp       = self.pruning_config['weight'].get('prune_mlp', False)
@@ -102,11 +113,10 @@ class BlockwisePruning(BlockwiseOptimizer):
         if pruning_mask_save_dir:
             if self.optimized:
                 os.makedirs(pruning_mask_save_dir, exist_ok=False)
-                torch.save(
-                    {k: v.detach().cpu() for k, v in self.W_mask.items()},
-                    os.path.join(pruning_mask_save_dir, "pruning_mask.pt")
-                )
-                logger.info(f'Pruning mask saved to {pruning_mask_save_dir}.')
+                save_path = os.path.join(pruning_mask_save_dir, "pruning_mask.pt")
+                self.W_mask.save(save_path)
+                logger.info(f'Pruning mask saved to {save_path}.')
+                logger.info(f'Mask summary: {self.W_mask.summary()}')
             else:
                 logger.warning('Please optimize your model first.')
         else:
@@ -171,54 +181,48 @@ class BlockwisePruning(BlockwiseOptimizer):
     @torch.no_grad()
     def save_attn_mlp_pruned_model(self, optimized_model_save_dir):
         cfg = self.model.model.config
-        old_num_heads   = int(cfg.num_attention_heads)
-        old_num_kvheads = int(getattr(cfg, "num_key_value_heads", old_num_heads))
-        hidden_size     = int(cfg.hidden_size)
-        head_dim        = hidden_size // old_num_heads
-        kv_groups = old_num_heads // old_num_kvheads
+        head_dim = self.model_dims.head_dim
+        kv_groups = self.model_dims.kv_groups
         layers = self.model.blocks
- 
+
         new_num_kvheads, new_num_heads, new_inter_dimension = None, None, None
         for i, layer in enumerate(layers):
             if self.prune_attn:
-                head_key = f"layers.{i}.self_attn.o_proj"
-                head_mask = self.W_mask[head_key].detach().bool().cpu()  
-                keep_kv  = (~head_mask).nonzero(as_tuple=False).flatten().long()
-                new_num_kvheads = int(keep_kv.numel())
-                new_num_heads  = int(new_num_kvheads * kv_groups)
-                
-                keep_q = torch.cat([torch.arange(j * kv_groups, (j + 1) * kv_groups) for j in keep_kv.tolist()], dim=0).long()
-                q_idx  = self.head_idx(keep_q, head_dim)  
-                kv_idx = self.head_idx(keep_kv, head_dim)
+                keep_kv = self.W_mask.get_kept_head_indices(i)
+                if keep_kv is not None:
+                    new_num_kvheads = int(keep_kv.numel())
+                    new_num_heads = int(new_num_kvheads * kv_groups)
+                    keep_q = self.W_mask.get_kept_q_head_indices(i)
+                    q_idx = self.head_idx(keep_q, head_dim)
+                    kv_idx = self.head_idx(keep_kv, head_dim)
 
-                attn = layer.self_attn
-                attn.q_proj = self.prune_linear_out(attn.q_proj, q_idx)
-                attn.k_proj = self.prune_linear_out(attn.k_proj, kv_idx)
-                attn.v_proj = self.prune_linear_out(attn.v_proj, kv_idx)
-                attn.o_proj = self.prune_linear_in(attn.o_proj, q_idx)
-                if hasattr(attn, "num_heads"):            attn.num_heads = new_num_heads
-                if hasattr(attn, "num_key_value_heads"):  attn.num_key_value_heads = new_num_kvheads
-                if hasattr(attn, "num_key_value_groups"): attn.num_key_value_groups = new_num_heads // new_num_kvheads
-                if hasattr(attn, "head_dim"):             attn.head_dim = head_dim
-            
+                    attn = layer.self_attn
+                    attn.q_proj = self.prune_linear_out(attn.q_proj, q_idx)
+                    attn.k_proj = self.prune_linear_out(attn.k_proj, kv_idx)
+                    attn.v_proj = self.prune_linear_out(attn.v_proj, kv_idx)
+                    attn.o_proj = self.prune_linear_in(attn.o_proj, q_idx)
+                    if hasattr(attn, "num_heads"):            attn.num_heads = new_num_heads
+                    if hasattr(attn, "num_key_value_heads"):  attn.num_key_value_heads = new_num_kvheads
+                    if hasattr(attn, "num_key_value_groups"): attn.num_key_value_groups = new_num_heads // new_num_kvheads
+                    if hasattr(attn, "head_dim"):             attn.head_dim = head_dim
+
             if self.prune_mlp:
-                mlp_key  = f"layers.{i}.mlp.down_proj"
-                mlp_mask  = self.W_mask[mlp_key].detach().bool().cpu()
-                keep_mlp = (~mlp_mask ).nonzero(as_tuple=False).flatten().long()
-                new_inter_dimension = int(keep_mlp.numel())
- 
-                mlp = layer.mlp
-                if hasattr(mlp, "gate_proj"): mlp.gate_proj = self.prune_linear_out(mlp.gate_proj, keep_mlp)
-                if hasattr(mlp, "up_proj"):   mlp.up_proj   = self.prune_linear_out(mlp.up_proj, keep_mlp)
-                mlp.down_proj = self.prune_linear_in(mlp.down_proj, keep_mlp)
- 
-        if self.prune_attn:
+                keep_mlp = self.W_mask.get_kept_neuron_indices(i)
+                if keep_mlp is not None:
+                    new_inter_dimension = int(keep_mlp.numel())
+
+                    mlp = layer.mlp
+                    if hasattr(mlp, "gate_proj"): mlp.gate_proj = self.prune_linear_out(mlp.gate_proj, keep_mlp)
+                    if hasattr(mlp, "up_proj"):   mlp.up_proj   = self.prune_linear_out(mlp.up_proj, keep_mlp)
+                    mlp.down_proj = self.prune_linear_in(mlp.down_proj, keep_mlp)
+
+        if self.prune_attn and new_num_heads is not None:
             cfg.num_attention_heads = new_num_heads
             if hasattr(cfg, "num_key_value_heads"):
                 cfg.num_key_value_heads = new_num_kvheads
             setattr(cfg, "head_dim", head_dim)
-        
-        if self.prune_mlp:
+
+        if self.prune_mlp and new_inter_dimension is not None:
             cfg.intermediate_size = new_inter_dimension
 
         self.model.model.save_pretrained(optimized_model_save_dir)

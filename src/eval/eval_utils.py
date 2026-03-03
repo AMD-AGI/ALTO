@@ -1,8 +1,7 @@
 import os
 from loguru import logger
 
-from lm_eval import evaluator, utils
-from lm_eval.api.registry import ALL_TASKS
+from lm_eval import evaluator
 from lm_eval.utils import make_table
 
 from src.data.base_dataset import BaseDataset

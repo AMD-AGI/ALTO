@@ -3,8 +3,9 @@
 
 from abc import abstractmethod
 from pydantic import ConfigDict
+import torch
 from torch.nn import Module
-
+from torchtitan.tools.logging import logger
 from modeloptimizer.modifiers.utils import HooksMixin
 
 __all__ = ["Modifier"]
@@ -55,6 +56,20 @@ class Modifier(HooksMixin):
         # TODO: all finalization should succeed
         self.finalized_ = self.on_finalize(model_parts, **kwargs)
 
+    def pre_step(self, model_parts: list[Module], **kwargs):
+        if not self.initialized_ or self.finalized_:
+            raise RuntimeError(
+                "cannot call pre-step method on an uninitialized or finalized modifier"
+            )
+        self.started_ = self.on_pre_step(model_parts, **kwargs)
+
+    def post_step(self, model_parts: list[Module], **kwargs):
+        if not self.initialized_ or self.finalized_:
+            raise RuntimeError(
+                "cannot call post-step method on an uninitialized or finalized modifier"
+            )
+        self.ended_ = self.on_post_step(model_parts, **kwargs)
+
     @abstractmethod
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
@@ -64,9 +79,21 @@ class Modifier(HooksMixin):
         raise NotImplementedError
 
     @abstractmethod
-    def pre_step(self, model_parts: list[Module], **kwargs):
+    def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    def post_step(self, model_parts: list[Module], **kwargs):
+    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
+
+    def _infer_sequential_targets(self,
+                                  model: torch.nn.Module) -> str | list[str]:
+        match self.sequential_targets:
+            case None:
+                block_class_name = next(iter(model.layers.values())).__class__.__name__
+                logger.info(f"Inferred sequential targets: {block_class_name}")
+                return [block_class_name]
+            case str():
+                return [self.sequential_targets]
+            case _:
+                return self.sequential_targets

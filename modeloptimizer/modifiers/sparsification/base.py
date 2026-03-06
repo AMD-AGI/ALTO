@@ -3,14 +3,14 @@
 
 from abc import abstractmethod
 from functools import partial
-from typing import Any, Optional, Generator
+from typing import Any, Generator
 import gc
 import re
 
-import numpy
 import torch
 from torch.nn import Module
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, model_validator
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
@@ -41,7 +41,6 @@ class SparsityModifierBase(Modifier):
     """
 
     # modifier arguments
-    _model_args: None = PrivateAttr(default=None)
     sparsity: float | list[float] | dict[str, float] | None
     mask_structure: str = "0:0"
 
@@ -62,6 +61,8 @@ class SparsityModifierBase(Modifier):
     _layer_observers: dict[torch.nn.Module,
                       Observer] = PrivateAttr(default_factory=dict)
     _observer_name: str | None = PrivateAttr(default=None)
+
+    _model_args: Decoder.Config | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def validate_model_after(
@@ -107,8 +108,8 @@ class SparsityModifierBase(Modifier):
         """
         Initialize and run the SparseGPT algorithm on the current state
         """
+        self._model_args = model_parts[0].config
         # infer module and sequential targets
-        self._model_args = model_parts[0].model_args
         for m in model_parts:
             self.sequential_targets = self._infer_sequential_targets(m)
             self._target_layers.update(get_layers(
@@ -124,18 +125,21 @@ class SparsityModifierBase(Modifier):
         )
         return True
 
-    def pre_step(self, model_parts: list[Module], **kwargs):
-        self.started_ = True
+    def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         for module, observer in self._layer_observers.items():
             observer.enable()
 
-    def post_step(self, model_parts: list[Module], **kwargs):
+        return True
+
+    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         with torch.no_grad():
             self.compress_modules()
         for module, observer in self._layer_observers.items():
             observer.disable()
 
-    def on_finalize(self, model_parts: list[Module], **kwargs):
+        return True
+
+    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
         self.ended_ = True
         self.remove_hooks()
         for module, observer in self._layer_observers.items():
@@ -146,6 +150,8 @@ class SparsityModifierBase(Modifier):
         self._module_sparsities.clear()
         gc.collect()
         torch.cuda.empty_cache()
+
+        return True
 
     def _target_layer_iterator(self) -> Generator[int | None, str, Module]:
         for layer_name, layer in self._target_layers.items():
@@ -231,16 +237,6 @@ class SparsityModifierBase(Modifier):
                 "forward_pre",
             )
             observers[module] = observer
-
-    def _infer_sequential_targets(self,
-                                  model: torch.nn.Module) -> str | list[str]:
-        match self.sequential_targets:
-            case None:
-                return ["TransformerBlock"]
-            case str():
-                return [self.sequential_targets]
-            case _:
-                return self.sequential_targets
 
     def _split_mask_structure(self, mask_structure: str) -> tuple[int, int]:
         n, m = mask_structure.split(":")

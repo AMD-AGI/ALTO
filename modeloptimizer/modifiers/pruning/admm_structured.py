@@ -201,7 +201,7 @@ class AdmmStructuredModifier(PruningModifierBase):
         W, H, G, Hinv, norm, final_shape, final_dtype = self._observe_preprocess(module, hessian)
         
         # Get model dimensions for attention head pruning
-        num_attention_heads = self._model_args.n_heads
+        num_attention_heads = self._model_args.layer.attention.n_heads
         head_dim = W.shape[1] // num_attention_heads
         
         # ADMM optimization: iteratively prune attention heads with lowest importance

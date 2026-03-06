@@ -1,6 +1,6 @@
 # sparsity_stage:
 #   sparsity_modifiers:
-#     SparseGPTModifier:
+#     WandaModifier:
 #       sparsity: 0.5
 #       mask_structure: "2:4"
 #       targets: ["Linear"]
@@ -23,3 +23,13 @@ quantization_stage:
             strategy: "tensor"
             observer: "minmax"
           targets: ["Linear"]
+    SelfDistillationModifier:
+      criterion: "LogitsDistillationLoss"
+      targets: ["__all__"]
+      steps: 10
+      warmup_steps: 0
+      lr: 1e-4
+      min_lr_factor: 1.0
+      decay_ratio: null
+      decay_type: "linear"
+      optimizer: "AdamW"

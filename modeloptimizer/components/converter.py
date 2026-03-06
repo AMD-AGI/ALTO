@@ -3,25 +3,49 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
-from torchtitan.components.quantization import (
-    QuantizationConverter,)
-from torchtitan.config.job_config import JobConfig
+from torchtitan.protocols.model_converter import ModelConverter
+from torchtitan.config import Configurable
+
 from torchtitan.distributed import ParallelDims
-from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.config import Recipe
 
 
-class ModelOptConverter(QuantizationConverter):
+class ModelOptConverter(ModelConverter, Configurable):
 
-    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        super().__init__(job_config, parallel_dims)
-        self.recipe = Recipe.create_instance(job_config.modeloptimizer.recipe)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        recipe: str = ""
+        """
+        Path to the model optimizer recipe file.
+        """
+
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        parallel_dims: ParallelDims,
+        model_compile_enabled: bool,
+    ):
+        if parallel_dims is not None:
+            assert (
+                not parallel_dims.dp_enabled
+            ), "Model optimizer does not yet support data parallelism"
+            assert (
+                not parallel_dims.tp_enabled
+            ), "Model optimizer does not yet support tensor parallelism"
+            assert (
+                not parallel_dims.cp_enabled
+            ), "Model optimizer does not yet support context parallelism"
+
+        self.recipe = Recipe.create_instance(config.recipe)
 
     def convert(self, model: nn.Module):
         from torchtitan.components.checkpoint import CheckpointManager
@@ -42,6 +66,3 @@ class ModelOptConverter(QuantizationConverter):
     def finalize(self, model_parts: list[nn.Module]):
         for modifier in self.recipe.modifiers:
             modifier.finalize(model_parts)
-
-
-register_model_converter(ModelOptConverter, "modeloptimizer")

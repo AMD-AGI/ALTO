@@ -64,7 +64,7 @@ class WandaModifier(SparsityModifierBase):
             logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
             assert isinstance(observer, PerChannelNormObserver), \
                 "WandaModifier requires per_channel_norm observer"
-            sparsified_weight = self._sparsify_weight(
+            sparsified_weight, _ = self._sparsify_weight(
                 module=module,
                 row_scalar=observer.stats,
                 sparsity=sparsity,
@@ -80,7 +80,7 @@ class WandaModifier(SparsityModifierBase):
         sparsity: float,
         prune_n: int,
         prune_m: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run pruning on the layer up to the target sparsity value.
 

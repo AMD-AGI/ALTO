@@ -9,11 +9,14 @@
 
 from typing import Optional
 from contextlib import contextmanager
+import importlib
 import json
+from pathlib import Path
+import shutil
+import argparse
 
 import torch
 import torch.distributed.checkpoint as dcp
-import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 
 from compressed_tensors import (
@@ -22,13 +25,11 @@ from compressed_tensors import (
     ModelCompressor,
 )
 
-from torchtitan.config.job_config import JobConfig
+from torchtitan.config.manager import ConfigManager
+from torchtitan.trainer import Trainer
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.protocols.model_converter import (
-    build_model_converters,
-    ModelConvertersContainer,
-)
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from modeloptimizer.components.converter import ModelOptConverter
 from modeloptimizer.utils.compression.sparsity_metadata_config import SparsityConfigMetadata
@@ -61,7 +62,7 @@ def patch_finfo():
 
 def hot_fix_for_tied_word_embeddings(model: torch.nn.Module,
                                      compressor: ModelCompressor):
-    if not getattr(model, "tie_word_embeddings", False):
+    if not getattr(model.config, "enable_weight_tying", False):
         return
     # in the current impl, lm_head is not a linear layer,
     # so we need to add it to the ignore list manually
@@ -153,7 +154,7 @@ def _strip_quantization_config(output_dir: str):
 
 @torch.inference_mode()
 def convert_to_hf(
-    job_config: JobConfig,
+    config: Trainer.Config,
     input_dir: str,
     output_dir: str,
     model_name: str,
@@ -163,23 +164,29 @@ def convert_to_hf(
     save_compressed: bool = True,
     disable_sparse_compression: bool = False,
 ):
-    train_spec = train_spec_module.get_train_spec(model_name)
-    model_args = train_spec.model_args[model_flavor]
+    # load model and model args so that we can get the state dict shape
+    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
+    model_spec = model_module.model_registry(model_flavor)
+    model_config = model_spec.model
 
-    model_converters = build_model_converters(job_config, None)
+    model_converters = config.model_converters.build(
+        parallel_dims=None,
+        model_compile_enabled=False,
+    )
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        model = model_config.build()
         model_converters.convert(model)
     model_converters.post_initialization([model])
     model_converters.pre_step([model])
     model_converters.finalize([model])
     wrapped_model = ModelWrapper(model)
 
-    sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
+    # pyrefly: ignore[bad-instantiation, not-callable]
+    sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
     assert (
-        sd_adapter is not None
-    ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
+        sd_adapter
+        is not None), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
 
     state_dict = wrapped_model._get_state_dict()
     dcp.load(
@@ -197,7 +204,8 @@ def convert_to_hf(
         )
         if compressor is not None:
             if compressor.quantization_config is not None:
-                compressor.quantization_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.quantization_config.ignore)
+                compressor.quantization_config.ignore = sd_adapter.map_ignore_list_to_hf(
+                    compressor.quantization_config.ignore)
             if compressor.sparsity_config is not None:
                 compressor.sparsity_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.sparsity_config.ignore)
             hot_fix_for_tied_word_embeddings(model, compressor)
@@ -217,10 +225,7 @@ def convert_to_hf(
 
     target_dtype = TORCH_DTYPE_MAP[export_dtype]
     if target_dtype != torch.float32:
-        hf_state_dict = {
-            k: v.to(target_dtype) if v.is_floating_point() else v
-            for k, v in hf_state_dict.items()
-        }
+        hf_state_dict = {k: v.to(target_dtype) if v.is_floating_point() else v for k, v in hf_state_dict.items()}
 
     with patch_finfo():
         dcp.save(
@@ -230,3 +235,91 @@ def convert_to_hf(
 
     if not save_compressed:
         _strip_quantization_config(output_dir)
+
+
+def eval_tasks(model_dir: str, tasks: list[str]):
+    from lm_eval import simple_evaluate
+
+    results = simple_evaluate(
+        model="hf",
+        model_args={
+            "pretrained": model_dir,
+        },
+        tasks=tasks,
+        device="cuda:0",
+        batch_size=1,
+        log_samples=False,
+    )
+    print(results["results"])
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Convert DCP weights to HF format.")
+    parser.add_argument("module", type=str, default="llama3")
+    parser.add_argument("config", type=str, default="llama3_8b")
+    parser.add_argument(
+        "--export_dtype",
+        type=str,
+        nargs="?",
+        choices=["float16", "bfloat16", "float32"],
+        default="float32",
+        help="Export dtype for HF checkpoint (default: float32)",
+    )
+    parser.add_argument(
+        "--disable_sparse_compression",
+        action="store_true",
+        help="Disable sparse compression (default: False)",
+    )
+    parser.add_argument(
+        "--save_uncompressed",
+        action="store_true",
+        help="Save uncompressed checkpoint (default: False)",
+    )
+    parser.add_argument(
+        "--skip_export",
+        action="store_true",
+        help="Skip checkpoint export (default: False)",
+    )
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        nargs="+",
+        help="Tasks to evaluate (default: [])",
+        default=[],
+    )
+    args = parser.parse_args()
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args(["--module", args.module, "--config", args.config])
+
+    dump_folder = Path(config.dump_folder)
+    hf_assets_path = Path(config.hf_assets_path)
+    input_dir = dump_folder / "checkpoint" / f"step-{config.training.steps}"
+    output_dir = dump_folder / "hf"
+
+    model_name = config.model_spec.name
+    model_flavor = config.model_spec.flavor
+
+    if not args.skip_export:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for pattern in ["*.json", "*.py"]:
+            for extra_file in hf_assets_path.glob(pattern):
+                shutil.copy(extra_file, output_dir)
+
+        convert_to_hf(
+            config,
+            input_dir.as_posix(),
+            output_dir.as_posix(),
+            model_name,
+            model_flavor,
+            hf_assets_path.as_posix(),
+            args.export_dtype,
+            save_compressed=not args.save_uncompressed,
+            disable_sparse_compression=args.disable_sparse_compression,
+        )
+        sharded_output_dir = output_dir / "sharded"
+        shutil.rmtree(sharded_output_dir, ignore_errors=True)
+
+    if args.tasks:
+        eval_tasks(output_dir.as_posix(), args.tasks)

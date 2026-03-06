@@ -171,8 +171,8 @@ class ObsModifier(PruningModifierBase):
         W, H, G, final_shape, final_dtype = self._observe_preprocess(module, hessian)
         
         # Get model dimensions for grouped attention head pruning
-        num_attention_heads = self._model_args.n_heads
-        num_key_value_heads = self._model_args.n_kv_heads
+        num_attention_heads = self._model_args.layer.attention.n_heads
+        num_key_value_heads = getattr(self._model_args.layer.attention, "n_kv_heads", num_attention_heads)
         num_total_groups = num_key_value_heads if num_key_value_heads is not None else num_attention_heads
         num_groups_to_remain = int(num_total_groups * (1 - sparsity))
         

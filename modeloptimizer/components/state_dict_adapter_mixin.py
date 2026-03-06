@@ -15,6 +15,16 @@ class StateDictAdapterMixin:
             if k.endswith(".weight")
         }
 
+        self.sequential_layers = {}
+        for k, v in self.candidate_layers.items():
+            if "{}" in k:
+                hf_name = k[:k.index("{}")+2]
+                if hf_name not in self.sequential_layers:
+                    layer_name = v[:v.index("{}") + 2]
+                    self.sequential_layers[hf_name] = layer_name
+
+        self.candidate_layers.update(self.sequential_layers)
+
         # construct extra mappings for model optimizer states
         bitmask_params = ["compressed", "bitmask", "shape"]
         self.extra_map = {}
@@ -23,7 +33,7 @@ class StateDictAdapterMixin:
                 self.extra_map[
                     f"{layer_name}.{bitmask_param}"] = f"{target_name}.{bitmask_param}"
             base_names = [
-                "weight", "input", "output", "sparsity", "sparsity_owl"
+                "weight", "input", "output", "sparsity", "student_output"
             ]
             if "q_proj" in layer_name:
                 base_names.append("q")
@@ -36,16 +46,14 @@ class StateDictAdapterMixin:
                     f"{layer_name}.{base_name}_scale"] = f"{target_name}.{base_name}_scale"
                 self.extra_map[
                     f"{layer_name}.{base_name}_zero_point"] = f"{target_name}.{base_name}_zero_point"
-                if base_name.startswith("sparsity"):
-                    self.extra_map[
-                        f"{layer_name}.{base_name}_observer.stats"] = f"{target_name}.{base_name}_observer.stats"
-                    self.extra_map[
-                        f"{layer_name}.{base_name}_observer.num_samples"] = f"{target_name}.{base_name}_observer.num_samples"
-                else:
-                    self.extra_map[
-                        f"{layer_name}.{base_name}_observer.quant_min"] = f"{target_name}.{base_name}_observer.quant_min"
-                    self.extra_map[
-                        f"{layer_name}.{base_name}_observer.quant_max"] = f"{target_name}.{base_name}_observer.quant_max"
+                self.extra_map[
+                    f"{layer_name}.{base_name}_observer.quant_min"] = f"{target_name}.{base_name}_observer.quant_min"
+                self.extra_map[
+                    f"{layer_name}.{base_name}_observer.quant_max"] = f"{target_name}.{base_name}_observer.quant_max"
+                self.extra_map[
+                    f"{layer_name}.{base_name}_observer.stats"] = f"{target_name}.{base_name}_observer.stats"
+                self.extra_map[
+                    f"{layer_name}.{base_name}_observer.num_samples"] = f"{target_name}.{base_name}_observer.num_samples"
         self.from_hf_map.update(self.extra_map)
 
     def update_storage_plan(self, state_dict: dict[str, Tensor]):

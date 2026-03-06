@@ -66,7 +66,7 @@ class MagnitudeModifier(SparsityModifierBase):
         sparsity: float,
         prune_n: int,
         prune_m: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run pruning on the layer up to the target sparsity value.
 

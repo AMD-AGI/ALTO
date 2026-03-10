@@ -14,7 +14,7 @@ from torch.library import triton_op, wrap_triton
 import triton
 import triton.language as tl
 
-from torchtitan.experiments.kernels.blockwise_fp8.grouped_gemm.autotune import (
+from modeloptimizer.kernels.blockwise_fp8.grouped_gemm.autotune import (
     STANDARD_CONFIGS,
     ALIGN_SIZE_M,
 )

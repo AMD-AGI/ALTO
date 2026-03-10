@@ -33,10 +33,10 @@ class ModelOptConverter(ModelConverter, Configurable):
         parallel_dims: ParallelDims,
         model_compile_enabled: bool,
     ):
-        if parallel_dims is not None:
-            assert (not parallel_dims.dp_enabled), "Model optimizer does not yet support data parallelism"
-            assert (not parallel_dims.tp_enabled), "Model optimizer does not yet support tensor parallelism"
-            assert (not parallel_dims.cp_enabled), "Model optimizer does not yet support context parallelism"
+        # if parallel_dims is not None:
+        #     assert (not parallel_dims.dp_enabled), "Model optimizer does not yet support data parallelism"
+        #     assert (not parallel_dims.tp_enabled), "Model optimizer does not yet support tensor parallelism"
+        #     assert (not parallel_dims.cp_enabled), "Model optimizer does not yet support context parallelism"
 
         self.recipe = Recipe.create_instance(config.recipe)
 

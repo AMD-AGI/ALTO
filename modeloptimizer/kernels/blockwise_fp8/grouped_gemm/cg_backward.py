@@ -17,13 +17,13 @@ import triton.language as tl
 
 # Import configs and utilities from cg_forward
 
-from torchtitan.experiments.kernels.blockwise_fp8.grouped_gemm.cg_forward import cg_grouped_gemm_forward
-from torchtitan.experiments.kernels.blockwise_fp8.grouped_gemm.autotune import (
+from modeloptimizer.kernels.blockwise_fp8.grouped_gemm.cg_forward import cg_grouped_gemm_forward
+from modeloptimizer.kernels.blockwise_fp8.grouped_gemm.autotune import (
     STANDARD_CONFIGS,
     ALIGN_SIZE_M,
     STANDARD_DW_CONFIGS,
 )
-from torchtitan.experiments.kernels.blockwise_fp8.blockwise_quantization import (
+from modeloptimizer.kernels.blockwise_fp8.blockwise_quantization import (
     fp8_blockwise_act_quant,
     fp8_blockwise_weight_quant,
     fp8_blockwise_act_dequant,

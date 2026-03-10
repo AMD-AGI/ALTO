@@ -20,9 +20,9 @@ from torch.distributed.tensor.placement_types import (
 import triton
 import triton.language as tl
 
-from torchtitan.experiments.kernels.hadamard_transform import (
+from modeloptimizer.kernels.hadamard_transform import (
     HadamardTransform, HadamardFactory)
-from torchtitan.experiments.kernels.dge import dge_bwd
+from modeloptimizer.kernels.dge import dge_bwd
 from .mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,

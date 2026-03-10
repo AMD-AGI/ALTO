@@ -8,7 +8,7 @@
 import pytest
 import torch
 
-from torchtitan.experiments.kernels.blockwise_fp8.triton_flash_attention_fp8_block import (
+from modeloptimizer.kernels.blockwise_fp8.triton_flash_attention_fp8_block import (
     F8_FWD_MAX,
     get_f8_fwd_dtype,
     block_scaling_node,

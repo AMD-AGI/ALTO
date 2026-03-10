@@ -17,7 +17,7 @@ from torch.distributed.tensor.placement_types import (
     Shard,
 )
 
-from torchtitan.experiments.kernels.blockwise_fp8.blockwise_quantization import (
+from modeloptimizer.kernels.blockwise_fp8.blockwise_quantization import (
     blockwise_fp8_gemm,
     blockwise_fp8_gemm_backward_act,
     blockwise_fp8_gemm_backward_weight,

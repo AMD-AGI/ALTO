@@ -18,22 +18,22 @@ from torch.library import triton_op, wrap_triton
 import triton.language as tl
 
 # Import configs and utilities from cg_forward
-from torchtitan.experiments.kernels.blockwise_fp8.grouped_gemm.cg_forward import cg_grouped_gemm_forward
-from torchtitan.experiments.kernels.blockwise_fp8.grouped_gemm.cg_backward import (
+from modeloptimizer.kernels.blockwise_fp8.grouped_gemm.cg_forward import cg_grouped_gemm_forward
+from modeloptimizer.kernels.blockwise_fp8.grouped_gemm.cg_backward import (
     cg_grouped_gemm_backward_inputs,
     cg_grouped_gemm_backward_weights,
 )
-from torchtitan.experiments.kernels.mxfp4.mxfp_grouped_gemm.cg_forward import mxfp4_grouped_gemm_forward
-from torchtitan.experiments.kernels.mxfp4.mxfp_grouped_gemm.autotune import (
+from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.cg_forward import mxfp4_grouped_gemm_forward
+from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.autotune import (
     STANDARD_CONFIGS,
     ALIGN_SIZE_M,
 )
-from torchtitan.experiments.kernels.mxfp4.mxfp_quantization import (
+from modeloptimizer.kernels.mxfp4.mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
 )
-from torchtitan.experiments.kernels.dge import dge_bwd
-from torchtitan.experiments.kernels.hadamard_transform.transform import (
+from modeloptimizer.kernels.dge import dge_bwd
+from modeloptimizer.kernels.hadamard_transform.transform import (
     HadamardFactory, HadamardTransform)
 
 # ============ Triton kernel for contiguous grouped GEMM backward inputs ============

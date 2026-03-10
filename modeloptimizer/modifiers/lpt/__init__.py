@@ -1,3 +1,3 @@
-from .base import LowPrecisionTraining
+from .base import LowPrecisionTrainingModifier
 
-__all__ = ["LowPrecisionTraining"]
+__all__ = ["LowPrecisionTrainingModifier"]

@@ -8,15 +8,15 @@
 import pytest
 from tabulate import tabulate
 import torch
-from torchtitan.experiments.kernels.mxfp4.mxfp_quantization import (
+from modeloptimizer.kernels.mxfp4.mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
 )
-from torchtitan.experiments.kernels.mxfp4.mxfp_grouped_gemm import (
+from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm import (
     ALIGN_SIZE_M,
     mxfp4_grouped_gemm,
 )
-from torchtitan.experiments.kernels.hadamard_transform import HadamardFactory
+from modeloptimizer.kernels.hadamard_transform import HadamardFactory
 from .utils import prepare_data, calc_cossim, calc_snr
 
 

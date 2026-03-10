@@ -46,10 +46,7 @@ class ModifierFactory:
 
         # exclude deprecated packages from registry so
         # their new location is used instead
-        deprecated_packages = [
-            "llmcompressor.modifiers.obcq",
-            "llmcompressor.modifiers.obcq.sgpt_base",
-        ]
+        deprecated_packages = []
         for _importer, modname, _is_pkg in pkgutil.walk_packages(
                 main_package.__path__, package_path + "."):
             if modname in deprecated_packages:

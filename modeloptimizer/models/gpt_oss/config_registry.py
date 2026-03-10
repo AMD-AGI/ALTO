@@ -6,10 +6,14 @@ from torchtitan.models.gpt_oss.config_registry import (
     gpt_oss_20b as gpt_oss_20b_orig,
 )
 
+from modeloptimizer.components.converter import ModelOptConverter
+
 
 __all__ = [
     "gpt_oss_debugmodel",
+    "gpt_oss_debugmodel_lpt",
     "gpt_oss_20b",
+    "gpt_oss_20b_lpt",
 ]
 
 
@@ -24,6 +28,13 @@ def gpt_oss_debugmodel() -> Trainer.Config:
     config.debug.seed = 1234
     return config
 
+def gpt_oss_debugmodel_lpt() -> Trainer.Config:
+    config = gpt_oss_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
 
 def gpt_oss_20b() -> Trainer.Config:
     config = gpt_oss_20b_orig()
@@ -44,4 +55,12 @@ def gpt_oss_20b() -> Trainer.Config:
     config.activation_checkpoint.mode = "selective"
     config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
+    return config
+
+def gpt_oss_20b_lpt() -> Trainer.Config:
+    config = gpt_oss_20b()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
     return config

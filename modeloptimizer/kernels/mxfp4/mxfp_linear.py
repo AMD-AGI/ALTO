@@ -558,7 +558,9 @@ class MXFP4Linear(nn.Linear):
         self.use_hadamard = use_hadamard
         if use_hadamard:
             assert not use_2dblock_x, "Hadamard transform can only be applied if 2D block is not used for activations."
-        assert not self.bias, "Bias is not supported in MXFP4Linear"
+
+    def __repr__(self) -> str:
+        return f"MXFP4Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, use_2dblock_x={self.use_2dblock_x}, use_2dblock_w={self.use_2dblock_w}, use_sr_grad={self.use_sr_grad}, use_dge={self.use_dge}, use_hadamard={self.use_hadamard})"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -617,6 +619,9 @@ class MXFP4Linear(nn.Linear):
             y = DTensor.from_local(y,
                                    device_mesh=device_mesh,
                                    placements=(output_placement, ))
+
+        if self.bias is not None:
+            y = y + self.bias.to(y.device)
 
         return y
 

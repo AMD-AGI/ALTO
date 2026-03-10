@@ -3,4 +3,4 @@ training_stage:
     LowPrecisionTrainingModifier:
       precision: "mxfp4_1d2d"
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["output", "re:.*\\.router\\.gate"]

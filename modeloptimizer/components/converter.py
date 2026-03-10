@@ -26,7 +26,6 @@ class ModelOptConverter(ModelConverter, Configurable):
         Path to the model optimizer recipe file.
         """
 
-
     def __init__(
         self,
         config: Config,
@@ -35,15 +34,9 @@ class ModelOptConverter(ModelConverter, Configurable):
         model_compile_enabled: bool,
     ):
         if parallel_dims is not None:
-            assert (
-                not parallel_dims.dp_enabled
-            ), "Model optimizer does not yet support data parallelism"
-            assert (
-                not parallel_dims.tp_enabled
-            ), "Model optimizer does not yet support tensor parallelism"
-            assert (
-                not parallel_dims.cp_enabled
-            ), "Model optimizer does not yet support context parallelism"
+            assert (not parallel_dims.dp_enabled), "Model optimizer does not yet support data parallelism"
+            assert (not parallel_dims.tp_enabled), "Model optimizer does not yet support tensor parallelism"
+            assert (not parallel_dims.cp_enabled), "Model optimizer does not yet support context parallelism"
 
         self.recipe = Recipe.create_instance(config.recipe)
 
@@ -66,3 +59,11 @@ class ModelOptConverter(ModelConverter, Configurable):
     def finalize(self, model_parts: list[nn.Module]):
         for modifier in self.recipe.modifiers:
             modifier.finalize(model_parts)
+
+    @property
+    def requires_replay_buffer(self) -> bool:
+        return any(modifier.requires_replay_buffer for modifier in self.recipe.modifiers)
+
+    @property
+    def requires_training_mode(self) -> bool:
+        return any(modifier.requires_training_mode for modifier in self.recipe.modifiers)

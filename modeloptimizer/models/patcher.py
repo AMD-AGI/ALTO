@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import torch
 
-SUPPORTED_MODELS = ["llama3"]
+SUPPORTED_MODELS = ["llama3", "gpt_oss"]
 PATCH_MODULES = ["config_registry", "state_dict_adapter"]
 
 

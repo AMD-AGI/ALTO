@@ -7,6 +7,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.trainer import Trainer as TitanTrainer
 from torchtitan.experiments.forge.example_train import Trainer as ForgeTrainer, main as forge_main
 from torchtitan.components.metrics import MetricsProcessor
+from modeloptimizer.components.converter import ModelOptConverter
 from torchtitan.tools.logging import logger
 
 
@@ -92,12 +93,32 @@ class Trainer(ForgeTrainer):
     def __init__(self, config: TitanTrainer.Config):
         super().__init__(config)
 
-        self.enable_data_cache = True
+        self.training_mode = True
+        self.enable_data_cache = False
+
         self._input_cache = []
         self._output_cache = []
 
-    def cache_input(self, microbatches: list[tuple[dict[str, torch.Tensor],
-                                                   torch.Tensor]]):
+        if not self.model_converters.is_empty() and any(
+                isinstance(converter, ModelOptConverter) for converter in self.model_converters.converters):
+            converter = next(
+                converter for converter in self.model_converters.converters if isinstance(converter, ModelOptConverter))
+
+            if converter.requires_training_mode:
+                logger.info("training mode enabled")
+                self.training_mode = True
+            else:
+                logger.info("training mode disabled")
+                self.training_mode = False
+
+            if converter.requires_replay_buffer:
+                logger.info("data replay buffer enabled")
+                self.enable_data_cache = True
+            else:
+                logger.info("data replay buffer disabled")
+                self.enable_data_cache = False
+
+    def cache_input(self, microbatches: list[tuple[dict[str, torch.Tensor], torch.Tensor]]):
         if self.enable_data_cache:
             self._input_cache = microbatches
 
@@ -136,8 +157,7 @@ class Trainer(ForgeTrainer):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, _, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels)
+        inputs, _, extra_inputs, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
         if parallel_dims.pp_enabled:
             targets, losses = None, None
@@ -170,8 +190,7 @@ class Trainer(ForgeTrainer):
             with self.train_context():
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    result = model_parts[0](inputs, **extra_inputs,
-                                            **extra_kwargs)
+                    result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
         return result
 
@@ -179,7 +198,7 @@ class Trainer(ForgeTrainer):
         self,
         data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
     ):
-        if self.model_converters.is_empty():
+        if self.training_mode:
             return super().train_step(data_iterator)
 
         # Keep these variables local to shorten the code as these are
@@ -202,8 +221,7 @@ class Trainer(ForgeTrainer):
         local_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens,
-                                                      batch_mesh)
+            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
         else:
             global_valid_tokens = local_valid_tokens.float()
 
@@ -215,8 +233,7 @@ class Trainer(ForgeTrainer):
                         input_dict[k] = v.to(self.device)
                 labels = labels.to(self.device)
 
-                result = self.forward_step(input_dict, labels,
-                                           global_valid_tokens)
+                result = self.forward_step(input_dict, labels, global_valid_tokens)
                 self.cache_output(result.detach().cpu())
 
                 # log metrics

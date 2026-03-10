@@ -75,6 +75,10 @@ class SelfDistillationModifier(Modifier):
     _optimizers: OptimizersContainer | None = PrivateAttr(default=None)
     _lr_schedulers: LRSchedulersContainer | None = PrivateAttr(default=None)
 
+    @property
+    def requires_replay_buffer(self) -> bool:
+        return True
+
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         for m in model_parts:
             if len(self.targets) == 1 and self.targets[0] == "__all__":

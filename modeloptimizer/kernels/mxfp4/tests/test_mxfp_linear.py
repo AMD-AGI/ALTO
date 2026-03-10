@@ -23,7 +23,7 @@ from modeloptimizer.kernels.hadamard_transform import HadamardFactory
 from .utils import prepare_data, calc_cossim, calc_snr
 
 
-@pytest.mark.parametrize("shape", [(256, 384, 128), (512, 1024, 256)])
+@pytest.mark.parametrize("shape", [(32, 32, 32), (256, 384, 128), (512, 1024, 256)])
 @pytest.mark.parametrize("use_2dblock_a", [False, True])
 @pytest.mark.parametrize("use_2dblock_b", [False, True])
 @pytest.mark.parametrize("trans_a", [False, True])
@@ -106,7 +106,7 @@ def test_mxfp4_linear_kernel(shape, use_2dblock_a, use_2dblock_b, trans_a, trans
     assert torch.allclose(c_ref, c)
 
 
-@pytest.mark.parametrize("shape", [(1, 512, 384, 128), (4, 1024, 1024, 2048)])
+@pytest.mark.parametrize("shape", [(1, 32, 32, 32), (1, 512, 384, 128), (4, 1024, 1024, 2048)])
 @pytest.mark.parametrize("use_2dblock_w", [False, True])
 @pytest.mark.parametrize("use_2dblock_x", [False, True])
 @pytest.mark.parametrize("use_grad_sr", [False, True])

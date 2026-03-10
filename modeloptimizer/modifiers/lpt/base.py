@@ -4,9 +4,11 @@ import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
 from pydantic import PrivateAttr
+from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers import Modifier
+from modeloptimizer.kernels.mxfp4.mxfp_quantization import BLOCK_SIZE_DEFAULT
 from modeloptimizer.kernels.mxfp4.mxfp_linear import MXFP4Linear
 
 __all__ = ["LowPrecisionTrainingModifier"]
@@ -18,12 +20,17 @@ class LowPrecisionTrainingModifier(Modifier):
     targets: list[str] = ["Linear"]
     ignore: list[str] = ["output"]
 
+    use_hadamard: bool = False
+    use_sr_grad: bool = False
+    use_dge: bool = False
+
     _extra_kwargs: PrivateAttr = PrivateAttr(default_factory=dict)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
         assert self.precision.startswith("mxfp4_"), "Only MXFP4 precision is supported for now."
+        set_token_group_alignment_size_m(BLOCK_SIZE_DEFAULT)
 
         if self.precision.endswith("_1d1d"):
             self._extra_kwargs = {
@@ -42,6 +49,10 @@ class LowPrecisionTrainingModifier(Modifier):
             }
         else:
             raise ValueError(f"Unknown MXFP4 recipe: {self.precision}")
+
+        self._extra_kwargs["use_hadamard"] = self.use_hadamard
+        self._extra_kwargs["use_sr_grad"] = self.use_sr_grad
+        self._extra_kwargs["use_dge"] = self.use_dge
 
     @property
     def requires_training_mode(self) -> bool:

@@ -393,8 +393,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         original_shape = grad_output.shape
-        grad_output = grad_output.reshape(
-            -1, original_shape[-1])  # Ensure grad_output is 2D
+        grad_output = grad_output.reshape(-1, original_shape[-1])  # Ensure grad_output is 2D
         original_dtype = grad_output.dtype
 
         if is_cdna4():
@@ -494,8 +493,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                     (weight_mxfp4.shape[0] * 2) // BLOCK_SIZE_DEFAULT,
                     weight_mxfp4.shape[1],
                 ]
-            scale_ones = weight_mxfp4.new_ones(scale_shape,
-                                               dtype=torch.uint8) * 127
+            scale_ones = weight_mxfp4.new_ones(scale_shape, dtype=torch.uint8) * 127
             w_fp4_values = torch.ops.torchtitan.convert_from_mxfp4(
                 weight_mxfp4,
                 scale_ones,
@@ -505,8 +503,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
-        return grad_inputs.view(*original_shape[:-1],
-                                -1), grad_weights, None, None, None, None, None
+        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None
 
 
 single_mesh_dim_strategies = []

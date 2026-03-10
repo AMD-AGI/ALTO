@@ -44,6 +44,9 @@ class ModelOptConverter(ModelConverter, Configurable):
         from torchtitan.components.checkpoint import CheckpointManager
         CheckpointManager.allow_partial_load = True
 
+        for modifier in self.recipe.modifiers:
+            modifier.convert(model)
+
     def pre_step(self, model_parts: list[nn.Module]):
         for modifier in self.recipe.modifiers:
             modifier.pre_step(model_parts)

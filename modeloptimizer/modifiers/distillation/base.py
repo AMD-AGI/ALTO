@@ -278,3 +278,6 @@ class SelfDistillationModifier(Modifier):
         )
 
         self._optimizers = config.build(model_parts=model_parts,)
+
+    def on_convert(self, model: Module, **kwargs) -> bool:
+        return True

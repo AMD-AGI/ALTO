@@ -42,6 +42,9 @@ class Modifier(HooksMixin):
     def requires_training_mode(self) -> bool:
         return False
 
+    def convert(self, model: Module, **kwargs) -> bool:
+        return self.on_convert(model, **kwargs)
+
     def initialize(self, model_parts: list[Module], **kwargs):
         if self.initialized_:
             raise RuntimeError("Cannot initialize a modifier that has already been initialized")
@@ -85,6 +88,10 @@ class Modifier(HooksMixin):
 
     @abstractmethod
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def on_convert(self, model: Module, **kwargs) -> bool:
         raise NotImplementedError
 
     def _infer_sequential_targets(self, model: torch.nn.Module) -> str | list[str]:

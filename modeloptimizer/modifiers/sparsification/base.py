@@ -34,6 +34,7 @@ def calibrate_input_hook(module: Module, args: Any, base_name: str):
     args = args[0] if isinstance(args, tuple) else args
     return calibrate_activations(module, value=args, base_name=base_name)
 
+
 class SparsityModifierBase(Modifier):
     """
     Abstract base class which implements functionality related to oneshot sparsity.
@@ -52,24 +53,18 @@ class SparsityModifierBase(Modifier):
     # private variables
     _prune_n: int | None = PrivateAttr(default=None)
     _prune_m: int | None = PrivateAttr(default=None)
-    _module_names: dict[torch.nn.Module,
-                        str] = PrivateAttr(default_factory=dict)
-    _target_layers: dict[str,
-                         torch.nn.Module] = PrivateAttr(default_factory=dict)
-    _module_sparsities: dict[torch.nn.Module,
-                             str] = PrivateAttr(default_factory=dict)
-    _layer_observers: dict[torch.nn.Module,
-                      Observer] = PrivateAttr(default_factory=dict)
+    _module_names: dict[torch.nn.Module, str] = PrivateAttr(default_factory=dict)
+    _target_layers: dict[str, torch.nn.Module] = PrivateAttr(default_factory=dict)
+    _module_sparsities: dict[torch.nn.Module, str] = PrivateAttr(default_factory=dict)
+    _layer_observers: dict[torch.nn.Module, Observer] = PrivateAttr(default_factory=dict)
     _observer_name: str | None = PrivateAttr(default=None)
 
     _model_args: Decoder.Config | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
-    def validate_model_after(
-            model: "SparsityModifierBase") -> "SparsityModifierBase":
+    def validate_model_after(model: "SparsityModifierBase") -> "SparsityModifierBase":
         mask_structure = model.mask_structure
-        model._prune_n, model._prune_m = model._split_mask_structure(
-            mask_structure)
+        model._prune_n, model._prune_m = model._split_mask_structure(mask_structure)
         return model
 
     @abstractmethod
@@ -94,15 +89,12 @@ class SparsityModifierBase(Modifier):
                 if len(self.sparsity) == m.n_layers:
                     continue
                 # matches the number of blocks in current model part
-                if self._is_dict_with_digit_keys(self.sparsity) and len(
-                        self.sparsity) == len(
-                            get_layers(self.sequential_targets, m)):
+                if self._is_dict_with_digit_keys(self.sparsity) and len(self.sparsity) == len(
+                        get_layers(self.sequential_targets, m)):
                     continue
 
-                raise ValueError(
-                    f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
-                    f"sparsities values, but model has {len(self._target_layers)} target layers"
-                )
+                raise ValueError(f"{self.__repr_name__} was initialized with {len(self.sparsity)} "
+                                 f"sparsities values, but model has {len(self._target_layers)} target layers")
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         """
@@ -112,8 +104,7 @@ class SparsityModifierBase(Modifier):
         # infer module and sequential targets
         for m in model_parts:
             self.sequential_targets = self._infer_sequential_targets(m)
-            self._target_layers.update(get_layers(
-                self.targets, m))  # layers containing targets
+            self._target_layers.update(get_layers(self.targets, m))  # layers containing targets
 
         self._initialize_module_name_mappings()
         self._initialize_module_sparsities(model_parts)
@@ -175,10 +166,9 @@ class SparsityModifierBase(Modifier):
                     continue
 
                 if name.endswith("output"):
-                    logger.warning(
-                        "`output` was previously auto-ignored by SparseGPT and Wanda "
-                        "modifiers and is not advised. Please add `re:.*output` to "
-                        "your ignore list if this was unintentional")
+                    logger.warning("`output` was previously auto-ignored by SparseGPT and Wanda "
+                                   "modifiers and is not advised. Please add `re:.*output` to "
+                                   "your ignore list if this was unintentional")
 
                 yield index, name, module
 
@@ -241,3 +231,6 @@ class SparsityModifierBase(Modifier):
     def _split_mask_structure(self, mask_structure: str) -> tuple[int, int]:
         n, m = mask_structure.split(":")
         return int(n), int(m)
+
+    def on_convert(self, model: Module, **kwargs) -> bool:
+        return True

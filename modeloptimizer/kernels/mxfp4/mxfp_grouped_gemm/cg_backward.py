@@ -7,7 +7,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 from typing import Optional
 import torch
 import torch.nn as nn
@@ -33,10 +32,10 @@ from modeloptimizer.kernels.mxfp4.mxfp_quantization import (
     is_cdna4,
 )
 from modeloptimizer.kernels.dge import dge_bwd
-from modeloptimizer.kernels.hadamard_transform.transform import (
-    HadamardFactory, HadamardTransform)
+from modeloptimizer.kernels.hadamard_transform.transform import (HadamardFactory, HadamardTransform)
 
 # ============ Triton kernel for contiguous grouped GEMM backward inputs ============
+
 
 @triton.autotune(
     configs=STANDARD_CONFIGS,
@@ -166,37 +165,28 @@ def _kernel_mxfp4_grouped_gemm_backward_dx(
             mask_go = mask_m[:, None] & mask_n_pack[None, :]
 
             # Load grad_output with bounds checking
-            go_ptrs = (grad_output_ptr + offs_m[:, None] * stride_gom +
-                       offs_n_pack[None, :] * stride_gon)
+            go_ptrs = (grad_output_ptr + offs_m[:, None] * stride_gom + offs_n_pack[None, :] * stride_gon)
             go = tl.load(go_ptrs, mask=mask_go, other=0)
 
             # Load expert weights for the expert assigned to this block
             # For backward pass, we need W, not W^T, so dimensions are [N, K]
             # N is the actual reduction dim, so K_PACK_B means packed along N dim
             if K_PACK_B:
-                w_ptrs = (b_ptr + expert_idx * stride_be +
-                          offs_n_pack[:, None] * stride_bn +
+                w_ptrs = (b_ptr + expert_idx * stride_be + offs_n_pack[:, None] * stride_bn +
                           offs_k[None, :] * stride_bk)
                 mask_w = mask_n_pack[:, None] & mask_k[None, :]
             else:
-                w_ptrs = (b_ptr + expert_idx * stride_be +
-                          offs_n[:, None] * stride_bn +
+                w_ptrs = (b_ptr + expert_idx * stride_be + offs_n[:, None] * stride_bn +
                           offs_k_pack[None, :] * stride_bk)
                 mask_w = mask_n[:, None] & mask_k_pack[None, :]
             w = tl.load(w_ptrs, mask=mask_w, other=0)
 
-            go_s_ptrs = (go_s_ptr + offs_m_scale[:, None] * stride_gosm +
-                         offs_n_scale[None, :] * stride_gosn)
+            go_s_ptrs = (go_s_ptr + offs_m_scale[:, None] * stride_gosm + offs_n_scale[None, :] * stride_gosn)
             # B scales are K x N even though B operand is N x K.
-            b_s_ptrs = (b_s_ptr + expert_idx * stride_bse +
-                        offs_k_scale[:, None] * stride_bsk +
+            b_s_ptrs = (b_s_ptr + expert_idx * stride_bse + offs_k_scale[:, None] * stride_bsk +
                         offs_n_scale[None, :] * stride_bsn)
-            go_s = tl.load(go_s_ptrs,
-                           mask=mask_m[:, None] & mask_n_scale[None, :],
-                           other=1)
-            b_s = tl.load(b_s_ptrs,
-                          mask=mask_k[:, None] & mask_n_scale[None, :],
-                          other=1)
+            go_s = tl.load(go_s_ptrs, mask=mask_m[:, None] & mask_n_scale[None, :], other=1)
+            b_s = tl.load(b_s_ptrs, mask=mask_k[:, None] & mask_n_scale[None, :], other=1)
             grad_input += tl.dot_scaled(go,
                                         go_s,
                                         "e2m1",
@@ -208,8 +198,7 @@ def _kernel_mxfp4_grouped_gemm_backward_dx(
                                         out_dtype=tl.float32)
 
         # Store results with bounds checking
-        grad_input_ptrs = (grad_input_ptr + offs_m[:, None] * stride_gim +
-                           offs_k[None, :] * stride_gik)
+        grad_input_ptrs = (grad_input_ptr + offs_m[:, None] * stride_gim + offs_k[None, :] * stride_gik)
         mask_gi = mask_m[:, None] & mask_k[None, :]
         tl.store(grad_input_ptrs, grad_input, mask=mask_gi)
 
@@ -355,55 +344,37 @@ def _kernel_mxfp4_grouped_gemm_backward_dw(
 
                         # Create mask for M dimension
                         mask_m = offs_m < tl.minimum(group_length, M_TOTAL)
-                        mask_m_pack = offs_m_pack < tl.minimum(
-                            group_length // 2, PACKED_M)
+                        mask_m_pack = offs_m_pack < tl.minimum(group_length // 2, PACKED_M)
 
-                        offs_m_scale = m_start // QUANT_BLOCK_SIZE + tl.arange(
-                            0, n_rep_m)
-                        mask_m_scale = offs_m_scale < tl.minimum(
-                            group_length // QUANT_BLOCK_SIZE, Ms)
+                        offs_m_scale = m_start // QUANT_BLOCK_SIZE + tl.arange(0, n_rep_m)
+                        mask_m_scale = offs_m_scale < tl.minimum(group_length // QUANT_BLOCK_SIZE, Ms)
 
                         # Load grad_output [M, N].T
                         if K_PACK_GO:
-                            go_ptrs = (grad_output_ptr +
-                                       offs_m_pack[None, :] * stride_gom +
+                            go_ptrs = (grad_output_ptr + offs_m_pack[None, :] * stride_gom +
                                        offs_n[:, None] * stride_gon)
                             mask_go = mask_m_pack[None, :] & mask_n[:, None]
                         else:
-                            go_ptrs = (grad_output_ptr +
-                                       offs_m[None, :] * stride_gom +
+                            go_ptrs = (grad_output_ptr + offs_m[None, :] * stride_gom +
                                        offs_n_pack[:, None] * stride_gon)
                             mask_go = mask_m[None, :] & mask_n_pack[:, None]
                         go = tl.load(go_ptrs, mask=mask_go, other=0)
 
                         # Load inputs [M, K]
                         if K_PACK_A:
-                            in_ptrs = (inputs_ptr +
-                                       offs_m_pack[:, None] * stride_am +
-                                       offs_k[None, :] * stride_ak)
+                            in_ptrs = (inputs_ptr + offs_m_pack[:, None] * stride_am + offs_k[None, :] * stride_ak)
                             mask_in = mask_m_pack[:, None] & mask_k[None, :]
                         else:
-                            in_ptrs = (inputs_ptr +
-                                       offs_m[:, None] * stride_am +
-                                       offs_k_pack[None, :] * stride_ak)
+                            in_ptrs = (inputs_ptr + offs_m[:, None] * stride_am + offs_k_pack[None, :] * stride_ak)
                             mask_in = mask_m[:, None] & mask_k_pack[None, :]
                         inp = tl.load(in_ptrs, mask=mask_in, other=0)
 
-
-                        go_s_ptrs = go_s_ptr + offs_n_scale[:, None] * stride_gosn + offs_m_scale[
-                            None, :] * stride_gosm
+                        go_s_ptrs = go_s_ptr + offs_n_scale[:, None] * stride_gosn + offs_m_scale[None, :] * stride_gosm
                         # input scales are K x M even though the input operand is M x K.
-                        inp_s_ptrs = a_s_ptr + offs_k_scale[:, None] * stride_ask + offs_m_scale[
-                            None, :] * stride_asm
+                        inp_s_ptrs = a_s_ptr + offs_k_scale[:, None] * stride_ask + offs_m_scale[None, :] * stride_asm
 
-                        go_s = tl.load(go_s_ptrs,
-                                       mask=mask_n[:, None]
-                                       & mask_m_scale[None, :],
-                                       other=1)
-                        inp_s = tl.load(inp_s_ptrs,
-                                        mask=mask_k[:, None]
-                                        & mask_m_scale[None, :],
-                                        other=1)
+                        go_s = tl.load(go_s_ptrs, mask=mask_n[:, None] & mask_m_scale[None, :], other=1)
+                        inp_s = tl.load(inp_s_ptrs, mask=mask_k[:, None] & mask_m_scale[None, :], other=1)
 
                         grad_weights += tl.dot_scaled(go,
                                                       go_s,
@@ -416,8 +387,7 @@ def _kernel_mxfp4_grouped_gemm_backward_dw(
                                                       out_dtype=tl.float32)
 
             # Store results to the appropriate part of the expert's weight gradients
-            grad_w_ptrs = (grad_weights_ptr + expert_id * stride_gbe +
-                           offs_n[:, None] * stride_gbn +
+            grad_w_ptrs = (grad_weights_ptr + expert_id * stride_gbe + offs_n[:, None] * stride_gbn +
                            offs_k[None, :] * stride_gbk)
             mask_gw = mask_n[:, None] & mask_k[None, :]
             tl.store(grad_w_ptrs, grad_weights, mask=mask_gw)
@@ -470,9 +440,7 @@ def mxfp4_grouped_gemm_backward_weights(
     torch._check(M_total % ALIGN_SIZE_M == 0)
 
     # Check if dimensions match
-    assert (
-        M_total % ALIGN_SIZE_M == 0
-    ), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
+    assert (M_total % ALIGN_SIZE_M == 0), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
 
     # Ensure expert_indices has the right dtype
     if expert_indices.dtype != torch.int32:
@@ -480,27 +448,19 @@ def mxfp4_grouped_gemm_backward_weights(
 
     # Create output tensor for gradients
     if trans_weights:
-        grad_weights = torch.zeros((num_experts, N, K),
-                                   device=grad_output.device,
-                                   dtype=output_dtype)
+        grad_weights = torch.zeros((num_experts, N, K), device=grad_output.device, dtype=output_dtype)
         stride_gbe, stride_gbn, stride_gbk = grad_weights.stride()
     else:
-        grad_weights = torch.zeros((num_experts, K, N),
-                                   device=grad_output.device,
-                                   dtype=output_dtype)
+        grad_weights = torch.zeros((num_experts, K, N), device=grad_output.device, dtype=output_dtype)
         stride_gbe, stride_gbk, stride_gbn = grad_weights.stride()
     stride_gom, stride_gon = grad_output.stride()
     stride_gosm, stride_gosn = go_scales.stride()
     stride_am, stride_ak = inputs.stride()
     stride_asm, stride_ask = input_scales.stride()
 
-
     # Calculate grid size for the kernel
     # Each thread block handles one expert's N-K tile
-    grid = lambda meta: (
-            num_experts * triton.cdiv(N, meta["BLOCK_SIZE_N"]) * triton.cdiv(
-                K, meta["BLOCK_SIZE_K"]),
-    )
+    grid = lambda meta: (num_experts * triton.cdiv(N, meta["BLOCK_SIZE_N"]) * triton.cdiv(K, meta["BLOCK_SIZE_K"]),)
     # Launch kernel
     wrap_triton(_kernel_mxfp4_grouped_gemm_backward_dw)[grid](
         grad_output,
@@ -538,8 +498,7 @@ def mxfp4_grouped_gemm_backward_weights(
 @triton_op("torchtitan::mxfp4_grouped_gemm_backward_inputs", mutates_args={})
 def mxfp4_grouped_gemm_backward_inputs(
     grad_output: torch.Tensor,  # [M_bufferlen, N]
-    expert_weights: torch.
-    Tensor,  # [num_experts, N, K] if trans_weights else [num_experts, K, N]
+    expert_weights: torch.Tensor,  # [num_experts, N, K] if trans_weights else [num_experts, K, N]
     expert_indices: torch.Tensor,  # [M_total]
     go_scales: torch.Tensor,
     expert_weight_scales: torch.Tensor,
@@ -588,23 +547,16 @@ def mxfp4_grouped_gemm_backward_inputs(
     torch._check(M_total % ALIGN_SIZE_M == 0)
 
     # Check if dimensions match
-    assert (
-        M_total % ALIGN_SIZE_M == 0
-    ), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
+    assert (M_total % ALIGN_SIZE_M == 0), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
 
     # Create output tensor for gradients
-    grad_inputs = torch.zeros((M_bufferlen, K),
-                              device=grad_output.device,
-                              dtype=output_dtype)
+    grad_inputs = torch.zeros((M_bufferlen, K), device=grad_output.device, dtype=output_dtype)
     stride_gom, stride_gon = grad_output.stride()
     stride_gosm, stride_gosn = go_scales.stride()
     stride_gim, stride_gik = grad_inputs.stride()
 
     # Calculate grid size for the kernel
-    grid = lambda meta: (
-        triton.cdiv(M_total, meta["BLOCK_SIZE_M"])
-        * triton.cdiv(K, meta["BLOCK_SIZE_K"]),
-    )
+    grid = lambda meta: (triton.cdiv(M_total, meta["BLOCK_SIZE_M"]) * triton.cdiv(K, meta["BLOCK_SIZE_K"]),)
 
     # Launch kernel
     wrap_triton(_kernel_mxfp4_grouped_gemm_backward_dx)[grid](
@@ -695,7 +647,6 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 output_dtype=original_dtype,
             )
         else:
-            assert trans_weights
             x_dq = torch.ops.torchtitan.convert_from_mxfp4(
                 inputs_mxfp4,
                 input_scales,
@@ -709,7 +660,10 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 original_dtype,
                 axis=quant_axis_w,
                 is_2d_block=use_2dblock_w,
-            ).contiguous()
+            )
+            if not trans_weights:
+                w_dq = w_dq.transpose(-2, -1)
+            w_dq = w_dq.contiguous()
             res = cg_grouped_gemm_forward(x_dq, w_dq, expert_indices)
 
         if not use_2dblock_w:
@@ -725,7 +679,10 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                     original_dtype,
                     axis=requant_axis_w,
                     is_2d_block=False,
-                ).contiguous()
+                )
+                if not trans_weights:
+                    w_dq = w_dq.transpose(-2, -1)
+                w_dq = w_dq.contiguous()
         if not use_2dblock_x:
             if hadamard_transform is not None:
                 inputs = hadamard_transform(inputs, left_mul=True)
@@ -745,8 +702,8 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
 
         # Save for backward
         if is_cdna4():
-            ctx.save_for_backward(inputs_mxfp4, input_scales, expert_weights_mxfp4,
-                                expert_weight_scales, expert_indices)
+            ctx.save_for_backward(inputs_mxfp4, input_scales, expert_weights_mxfp4, expert_weight_scales,
+                                  expert_indices)
         else:
             ctx.save_for_backward(x_dq, w_dq, expert_indices, expert_weights_mxfp4)
         ctx.use_2dblock_x = use_2dblock_x
@@ -764,10 +721,17 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
         """Backward pass for contiguous grouped GEMM."""
         if is_cdna4():
             inputs, input_scales, expert_weights, expert_weight_scales, expert_indices = ctx.saved_tensors
+            expert_weights_mxfp4 = expert_weights
         else:
             x_dq, expert_weights, expert_indices, expert_weights_mxfp4 = ctx.saved_tensors
         # Get number of experts
         num_experts = expert_weights.shape[0]
+        if ctx.trans_weights:
+            quant_axis_w = -1
+            requant_axis_w = -2
+        else:
+            quant_axis_w = -2
+            requant_axis_w = -1
 
         if ctx.use_2dblock_x:
             grad_output_mxfp4, grad_output_scales = torch.ops.torchtitan.convert_to_mxfp4(
@@ -861,27 +825,24 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 expert_indices=expert_indices,
                 num_experts=num_experts,
             )
+            if not ctx.trans_weights:
+                grad_weights = grad_weights.transpose(-2, -1)
 
         if ctx.use_dge:
-            assert ctx.trans_weights
+            scale_shape = list(expert_weights_mxfp4.shape)
             if ctx.use_2dblock_w:
-                scale_shape = [
-                    expert_weights_mxfp4.shape[0],
-                    expert_weights_mxfp4.shape[1] // BLOCK_SIZE_DEFAULT,
-                    (expert_weights_mxfp4.shape[2] * 2) // BLOCK_SIZE_DEFAULT,
-                ]
+                scale_shape[quant_axis_w] //= BLOCK_SIZE_DEFAULT // 2
+                scale_shape[requant_axis_w] //= BLOCK_SIZE_DEFAULT
             else:
-                scale_shape = [
-                    expert_weights_mxfp4.shape[0],
-                    (expert_weights_mxfp4.shape[1] * 2) // BLOCK_SIZE_DEFAULT,
-                    expert_weights_mxfp4.shape[2],
-                ]
+                scale_shape[requant_axis_w] //= BLOCK_SIZE_DEFAULT // 2
+
+            # unpack fp4 weights
             scale_ones = expert_weights_mxfp4.new_ones(scale_shape, dtype=torch.uint8) * 127
             w_fp4_values = torch.ops.torchtitan.convert_from_mxfp4(
                 expert_weights_mxfp4,
                 scale_ones,
                 ctx.original_dtype,
-                axis=-2 if not ctx.use_2dblock_w else -1,
+                axis=quant_axis_w if ctx.use_2dblock_w else requant_axis_w,
                 is_2d_block=ctx.use_2dblock_w,
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
@@ -893,6 +854,7 @@ def mxfp4_grouped_gemm(
     inputs: torch.Tensor,
     expert_weights: torch.Tensor,
     expert_indices: torch.Tensor,
+    *,
     trans_weights: bool = True,
     use_2dblock_x: bool = False,
     use_2dblock_w: bool = True,
@@ -924,9 +886,7 @@ def mxfp4_grouped_gemm(
 
     if use_hadamard:
         with torch.no_grad():
-            hadamard_transform = HadamardFactory.create_transform(
-                device=expert_weights.device
-            )
+            hadamard_transform = HadamardFactory.create_transform(device=expert_weights.device)
     else:
         hadamard_transform = None
 
@@ -971,22 +931,13 @@ def benchmark_mxfp4_grouped_gemm_backward(
     # Create test tensors
     torch.manual_seed(0)
     dtype = torch.bfloat16
-    inputs = torch.randn((M_total, K),
-                         device=device,
-                         dtype=dtype,
-                         requires_grad=True)
-    expert_weights = torch.randn((num_experts, N, K),
-                                 dtype=dtype,
-                                 device=device,
-                                 requires_grad=True)
+    inputs = torch.randn((M_total, K), device=device, dtype=dtype, requires_grad=True)
+    expert_weights = torch.randn((num_experts, N, K), dtype=dtype, device=device, requires_grad=True)
 
     # Create expert indices - each token in a group has the same expert
     expert_indices = torch.zeros(M_total, dtype=torch.int32, device=device)
     for g in range(num_groups):
-        expert_idx = torch.randint(0,
-                                   num_experts, (1, ),
-                                   device=device,
-                                   dtype=torch.int32).item()
+        expert_idx = torch.randint(0, num_experts, (1,), device=device, dtype=torch.int32).item()
         start_idx = g * ALIGN_SIZE_M
         end_idx = (g + 1) * ALIGN_SIZE_M
         expert_indices[start_idx:end_idx] = expert_idx
@@ -1004,8 +955,7 @@ def benchmark_mxfp4_grouped_gemm_backward(
             expert_idx = expert_indices[group_start].item()
 
             # Compute output for this group
-            outputs_ref[group_start:group_end] = (
-                inputs[group_start:group_end] @ expert_weights[expert_idx].t())
+            outputs_ref[group_start:group_end] = (inputs[group_start:group_end] @ expert_weights[expert_idx].t())
 
         # Perform backward pass
         outputs_ref.backward(grad_output)

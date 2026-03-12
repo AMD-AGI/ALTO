@@ -20,8 +20,7 @@ from torch.distributed.tensor.placement_types import (
 import triton
 import triton.language as tl
 
-from modeloptimizer.kernels.hadamard_transform import (
-    HadamardTransform, HadamardFactory)
+from modeloptimizer.kernels.hadamard_transform import (HadamardTransform, HadamardFactory)
 from modeloptimizer.kernels.dge import dge_bwd
 from .mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
@@ -81,13 +80,11 @@ def blockwise_mxfp4_gemm_kernel(
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     mask_m = offs_m < M
-    offs_m_pack = pid_m * PACKED_BLOCK_SIZE_M + tl.arange(
-        0, PACKED_BLOCK_SIZE_M)
+    offs_m_pack = pid_m * PACKED_BLOCK_SIZE_M + tl.arange(0, PACKED_BLOCK_SIZE_M)
     mask_m_pack = offs_m_pack < PACKED_M
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     mask_n = offs_n < N
-    offs_n_pack = pid_n * PACKED_BLOCK_SIZE_N + tl.arange(
-        0, PACKED_BLOCK_SIZE_N)
+    offs_n_pack = pid_n * PACKED_BLOCK_SIZE_N + tl.arange(0, PACKED_BLOCK_SIZE_N)
     mask_n_pack = offs_n_pack < PACKED_N
 
     if USE_2DBLOCK_A:
@@ -103,41 +100,30 @@ def blockwise_mxfp4_gemm_kernel(
     for i in range(num_blocks_k):
         offs_k = i * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
         mask_k = offs_k < K
-        offs_k_pack = i * PACKED_BLOCK_SIZE_K + tl.arange(
-            0, PACKED_BLOCK_SIZE_K)
+        offs_k_pack = i * PACKED_BLOCK_SIZE_K + tl.arange(0, PACKED_BLOCK_SIZE_K)
         mask_k_pack = offs_k_pack < PACKED_K
         if K_PACK_A:
-            a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k_pack[
-                None, :] * stride_ak
+            a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k_pack[None, :] * stride_ak
             mask_a = mask_m[:, None] & mask_k_pack[None, :]
         else:
-            a_ptrs = a_ptr + offs_m_pack[:, None] * stride_am + offs_k[
-                None, :] * stride_ak
+            a_ptrs = a_ptr + offs_m_pack[:, None] * stride_am + offs_k[None, :] * stride_ak
             mask_a = mask_m_pack[:, None] & mask_k[None, :]
         if K_PACK_B:
-            b_ptrs = b_ptr + offs_k_pack[:, None] * stride_bk + offs_n[
-                None, :] * stride_bn
+            b_ptrs = b_ptr + offs_k_pack[:, None] * stride_bk + offs_n[None, :] * stride_bn
             mask_b = mask_k_pack[:, None] & mask_n[None, :]
         else:
-            b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n_pack[
-                None, :] * stride_bn
+            b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n_pack[None, :] * stride_bn
             mask_b = mask_k[:, None] & mask_n_pack[None, :]
         offs_k_scale = i * n_rep_k + tl.arange(0, n_rep_k)
         mask_k_scale = offs_k_scale < Ks
-        a_s_ptrs = a_s_ptr + offs_m_scale[:, None] * stride_asm + offs_k_scale[
-            None, :] * stride_ask
+        a_s_ptrs = a_s_ptr + offs_m_scale[:, None] * stride_asm + offs_k_scale[None, :] * stride_ask
         # B scales are N x K even though B operand is K x N.
-        b_s_ptrs = b_s_ptr + offs_n_scale[:, None] * stride_bsn + offs_k_scale[
-            None, :] * stride_bsk
+        b_s_ptrs = b_s_ptr + offs_n_scale[:, None] * stride_bsn + offs_k_scale[None, :] * stride_bsk
 
         a = tl.load(a_ptrs, mask=mask_a, other=0)
         b = tl.load(b_ptrs, mask=mask_b, other=0)
-        a_s = tl.load(a_s_ptrs,
-                      mask=mask_m[:, None] & mask_k_scale[None, :],
-                      other=1)
-        b_s = tl.load(b_s_ptrs,
-                      mask=mask_n[:, None] & mask_k_scale[None, :],
-                      other=1)
+        a_s = tl.load(a_s_ptrs, mask=mask_m[:, None] & mask_k_scale[None, :], other=1)
+        b_s = tl.load(b_s_ptrs, mask=mask_n[:, None] & mask_k_scale[None, :], other=1)
         accumulator += tl.dot_scaled(a,
                                      a_s,
                                      "e2m1",
@@ -178,12 +164,11 @@ def blockwise_mxfp4_gemm(
             M *= 2
         if use_2dblock_a:
             assert a_s.shape == torch.Size(
-                (K // block_size, M // block_size)
-            ), f"A scale has shape {a_s.shape}, but {(K // block_size, M // block_size)} is expected."
+                (K // block_size, M //
+                 block_size)), f"A scale has shape {a_s.shape}, but {(K // block_size, M // block_size)} is expected."
         else:
             assert a_s.shape == torch.Size(
-                (K // block_size, M)
-            ), f"A scale has shape {a_s.shape}, but {(K // block_size, M)} is expected."
+                (K // block_size, M)), f"A scale has shape {a_s.shape}, but {(K // block_size, M)} is expected."
         stride_ask, stride_asm = a_s.stride()
         stride_ak, stride_am = a.stride()
     else:
@@ -194,12 +179,11 @@ def blockwise_mxfp4_gemm(
             M *= 2
         if use_2dblock_a:
             assert a_s.shape == torch.Size(
-                (M // block_size, K // block_size)
-            ), f"A scale has shape {a_s.shape}, but {(M // block_size, K // block_size)} is expected."
+                (M // block_size, K //
+                 block_size)), f"A scale has shape {a_s.shape}, but {(M // block_size, K // block_size)} is expected."
         else:
             assert a_s.shape == torch.Size(
-                (M, K // block_size)
-            ), f"A scale has shape {a_s.shape}, but {(M, K // block_size)} is expected."
+                (M, K // block_size)), f"A scale has shape {a_s.shape}, but {(M, K // block_size)} is expected."
         stride_asm, stride_ask = a_s.stride()
         stride_am, stride_ak = a.stride()
 
@@ -506,159 +490,27 @@ class MXFP4LinearFunction(torch.autograd.Function):
         return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None
 
 
-single_mesh_dim_strategies = []
-colwise: PlacementList = [
-    Shard(-1),
-    Replicate(),  # x
-    Shard(0),  # w
-]
-rowwise: PlacementList = [
-    Partial(),
-    Shard(-1),  # x
-    Shard(1),  # w
-]
-single_mesh_dim_strategies.extend([colwise, rowwise])
-
-
-class MXFP4Linear(nn.Linear):
-    """
-    Custom linear layer with support for quantized weights.
-
-    Args:
-        in_features (int): Number of input features.
-        out_features (int): Number of output features.
-        bias (bool): Whether to include a bias term. Defaults to False.
-        block_size (int): Block size for quantization. Defaults to 128.
-    """
-
-    def __init__(self,
-                 in_features: int,
-                 out_features: int,
-                 bias: bool = False,
-                 use_2dblock_x: bool = False,
-                 use_2dblock_w: bool = True,
-                 use_sr_grad: bool = False,
-                 use_dge: bool = False,
-                 use_hadamard: bool = False,
-                 device: Optional[torch.device] = None,
-                 dtype: Optional[torch.dtype] = None):
-        super().__init__(in_features,
-                         out_features,
-                         bias=bias,
-                         device=device,
-                         dtype=dtype)
-
-        self.use_2dblock_x = use_2dblock_x
-        self.use_2dblock_w = use_2dblock_w
-        self.use_sr_grad = use_sr_grad
-        self.use_dge = use_dge
-        self.use_hadamard = use_hadamard
-        if use_hadamard:
-            assert not use_2dblock_x, "Hadamard transform can only be applied if 2D block is not used for activations."
-
-    def __repr__(self) -> str:
-        return f"MXFP4Linear(in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, use_2dblock_x={self.use_2dblock_x}, use_2dblock_w={self.use_2dblock_w}, use_sr_grad={self.use_sr_grad}, use_dge={self.use_dge}, use_hadamard={self.use_hadamard})"
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass for the custom linear layer.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Transformed tensor after linear computation.
-        """
-
-        device_mesh = None
-        if isinstance(x, DTensor):
-            device_mesh = x.device_mesh
-            output_placement = None
-
-            rowwise_abs: PlacementList = [
-                Partial(),
-                Shard(x.dim() - 1),  # x
-                Shard(1),  # w
-            ]
-            for acceptable_placement in single_mesh_dim_strategies + [
-                    rowwise_abs
-            ]:
-                if acceptable_placement[1:] == [
-                        x.placements[-1], self.weight.placements[-1]
-                ]:
-                    output_placement = acceptable_placement[0]
-                    break
-            assert output_placement is not None, \
-                f"Unsupported placement strategy for MXFP4Linear: {x.placements} and {self.weight.placements}"
-            x = x.to_local()
-            w = self.weight.to_local()
-        else:
-            w = self.weight
-
-        if self.use_hadamard:
-            with torch.no_grad():
-                hadamard_transform = HadamardFactory.create_transform(
-                    device=self.weight.device
-                )
-        else:
-            hadamard_transform = None
-        y = MXFP4LinearFunction.apply(
-            x,
-            w,
-            self.use_2dblock_x,
-            self.use_2dblock_w,
-            self.use_sr_grad,
-            self.use_dge,
-            hadamard_transform,
-        )
-
-        if device_mesh is not None:
-            y = DTensor.from_local(y,
-                                   device_mesh=device_mesh,
-                                   placements=(output_placement, ))
-
-        if self.bias is not None:
-            y = y + self.bias
-
-        return y
-
-    @classmethod
-    def from_float(
-        cls,
-        layer: nn.Linear,
-        use_hadamard: bool = False,
-        use_2dblock_x: bool = False,
-        use_2dblock_w: bool = True,
-        use_sr_grad: bool = False,
-        use_dge: bool = False,
-    ):
-        """
-        Create a MXFP4Linear layer from a standard nn.Linear layer.
-
-        Args:
-            layer (nn.Linear): The linear layer to convert.
-            use_hadamard (bool): Whether to use Hadamard transform. Defaults to False.
-            use_2dblock_x (bool): Whether to use 2D block for activations. Defaults to False.
-            use_2dblock_w (bool): Whether to use 2D block for weights. Defaults to True.
-            use_sr_grad (bool): Whether to use stochastic rounding in gradients. Defaults to False.
-            use_dge (bool): Whether to use DGE. Defaults to False.
-
-        Returns:
-            MXFP4Linear: The converted quantized linear layer.
-        """
-        new_layer = cls(
-            layer.in_features,
-            layer.out_features,
-            layer.bias is not None,
-            use_2dblock_x=use_2dblock_x,
-            use_2dblock_w=use_2dblock_w,
-            use_sr_grad=use_sr_grad,
-            use_dge=use_dge,
-            use_hadamard=use_hadamard,
-            device=layer.weight.device,
-            dtype=layer.weight.dtype,
-        )
-        new_layer.weight.data.copy_(layer.weight.data)
-        if layer.bias is not None:
-            new_layer.bias.data.copy_(layer.bias.data)
-        return new_layer
+def _to_mxfp4_then_scaled_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    use_2dblock_x: bool,
+    use_2dblock_w: bool,
+    use_sr_grad: bool,
+    use_dge: bool,
+    use_hadamard: bool,
+) -> torch.Tensor:
+    if use_hadamard:
+        with torch.no_grad():
+            hadamard_transform = HadamardFactory.create_transform(device=b.device)
+    else:
+        hadamard_transform = None
+    y = MXFP4LinearFunction.apply(
+        a,
+        b,
+        use_2dblock_x,
+        use_2dblock_w,
+        use_sr_grad,
+        use_dge,
+        hadamard_transform,
+    )
+    return y

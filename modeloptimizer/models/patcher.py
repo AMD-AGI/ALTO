@@ -2,8 +2,6 @@ import importlib
 from unittest.mock import patch
 
 import torch
-from modeloptimizer.kernels.mxfp4 import mxfp4_grouped_gemm
-from modeloptimizer.kernels.dsgemm_utils import create_indices_from_offsets_nosync
 
 SUPPORTED_MODELS = ["llama3", "gpt_oss"]
 PATCH_MODULES = ["config_registry", "state_dict_adapter"]
@@ -107,13 +105,3 @@ class ModelPatcher:
         rope.apply_rotary_emb_complex = apply_rotary_emb_complex
         attention.apply_rotary_emb_complex = apply_rotary_emb_complex
         patch("torchtitan.models.common.rope.apply_rotary_emb_complex", apply_rotary_emb_complex).__enter__()
-
-    @classmethod
-    def patch_mxfp4_gmm(cls, **kwargs):
-
-        def gmm(x, w_t, *, offs):
-            m_indices = create_indices_from_offsets_nosync(offs)
-            return mxfp4_grouped_gemm(x, w_t.transpose(-2, -1), m_indices, **kwargs)
-
-        torch._grouped_mm = gmm
-        patch("torch._grouped_mm", gmm).__enter__()

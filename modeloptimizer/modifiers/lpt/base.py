@@ -8,7 +8,7 @@ from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers import Modifier
-from modeloptimizer.kernels.mxfp4.mxfp_linear import MXFP4Linear
+from modeloptimizer.kernels.dispatch import swap_params, MXFP4TrainingOpConfig
 from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 
 __all__ = ["LowPrecisionTrainingModifier"]
@@ -16,46 +16,29 @@ __all__ = ["LowPrecisionTrainingModifier"]
 
 class LowPrecisionTrainingModifier(Modifier):
 
-    precision: Literal["mxfp4_1d2d"] = "mxfp4_1d2d"
+    precision: Literal["mxfp4"] = "mxfp4"
     targets: list[str] = ["Linear"]
     ignore: list[str] = ["output"]
 
+    use_2dblock_x: bool = False
+    use_2dblock_w: bool = True
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
 
-    _extra_kwargs: PrivateAttr = PrivateAttr(default_factory=dict)
+    _config: MXFP4TrainingOpConfig | None = PrivateAttr(default=None)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        assert self.precision.startswith("mxfp4_"), "Only MXFP4 precision is supported for now."
         set_token_group_alignment_size_m(ALIGN_SIZE_M)
-
-        if self.precision.endswith("_1d1d"):
-            self._extra_kwargs = {
-                "use_2dblock_x": False,
-                "use_2dblock_w": False,
-            }
-        elif self.precision.endswith("_1d2d"):
-            self._extra_kwargs = {
-                "use_2dblock_x": False,
-                "use_2dblock_w": True,
-            }
-        elif self.precision.endswith("_2d2d"):
-            self._extra_kwargs = {
-                "use_2dblock_x": True,
-                "use_2dblock_w": True,
-            }
-        else:
-            raise ValueError(f"Unknown MXFP4 recipe: {self.precision}")
-
-        self._extra_kwargs["use_hadamard"] = self.use_hadamard
-        self._extra_kwargs["use_sr_grad"] = self.use_sr_grad
-        self._extra_kwargs["use_dge"] = self.use_dge
-
-        from modeloptimizer.models.patcher import ModelPatcher
-        ModelPatcher.patch_mxfp4_gmm(**self._extra_kwargs)
+        self._config = MXFP4TrainingOpConfig(
+            use_2dblock_x=self.use_2dblock_x,
+            use_2dblock_w=self.use_2dblock_w,
+            use_hadamard=self.use_hadamard,
+            use_sr_grad=self.use_sr_grad,
+            use_dge=self.use_dge,
+        )
 
     @property
     def requires_training_mode(self) -> bool:
@@ -63,9 +46,8 @@ class LowPrecisionTrainingModifier(Modifier):
 
     def on_convert(self, model: Module, **kwargs) -> bool:
         for name, module in match_named_modules(model, self.targets, self.ignore):
-            if isinstance(module, torch.nn.Linear):
-                lp_module = MXFP4Linear.from_float(module, **self._extra_kwargs)
-                model.set_submodule(name, lp_module, strict=True)
+            if isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
+                swap_params(module, config=self._config)
             else:
                 raise ValueError(f"Unsupported module type: {type(module)}")
 

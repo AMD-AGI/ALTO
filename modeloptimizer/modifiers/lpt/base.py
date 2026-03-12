@@ -47,7 +47,7 @@ class LowPrecisionTrainingModifier(Modifier):
     def on_convert(self, model: Module, **kwargs) -> bool:
         for name, module in match_named_modules(model, self.targets, self.ignore):
             if isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
-                swap_params(module, config=self._config)
+                swap_params(module, config=self._config, module_name=name)
             else:
                 raise ValueError(f"Unsupported module type: {type(module)}")
 

@@ -34,6 +34,7 @@ def swap_params(
     module_filter_fn: Optional[Callable[[nn.Module, str], bool]] = None,
     config: Optional[TrainingOpBaseConfig] = None,
     target_parameter_name: Optional[str] = None,
+    module_name: Optional[str] = None,
 ) -> nn.Module:
     """
     Recurses through the nn.Module, recursively swapping the data tensor of
@@ -90,7 +91,14 @@ def swap_params(
                         requires_grad=param.requires_grad,
                     )
                     setattr(module, param_name, new_param)
-                    logger.info(f"Swapped {cur_fqn}.{param_name} to {tensor_cls.__name__}")
+                    logger.info(
+                        f"Swapped {module_name}{'.' if module_name else ''}{cur_fqn}{'.' if cur_fqn else ''}{param_name} to {tensor_cls.__name__}"
+                    )
+
+                    def get_name_func_new():
+                        orignal_name = module.__class__.__name__
+                        return f"{orignal_name}[{config}]"
+                    module._get_name = get_name_func_new
 
     post_order_traversal(root_module)
     return root_module

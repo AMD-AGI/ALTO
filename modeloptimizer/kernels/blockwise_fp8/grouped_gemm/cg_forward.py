@@ -301,7 +301,7 @@ def cg_grouped_gemm_forward(
     # Check if inputs are properly aligned
     M_bufferlen, K = inputs.shape
     M_total = expert_indices.shape[0]
-    torch._check_is_size(M_total)
+    torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
     assert (
         M_total % ALIGN_SIZE_M == 0

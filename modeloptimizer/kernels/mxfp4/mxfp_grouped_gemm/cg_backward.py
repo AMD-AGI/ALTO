@@ -436,7 +436,7 @@ def mxfp4_grouped_gemm_backward_weights(
         K *= 2
     assert M_bufferlen_go == M_bufferlen, f"Output gradient and inputs have different size in M dim: {M_bufferlen_go} vs. {M_bufferlen}"
     M_total = expert_indices.shape[0]
-    torch._check_is_size(M_total)
+    torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
 
     # Check if dimensions match
@@ -543,7 +543,7 @@ def mxfp4_grouped_gemm_backward_inputs(
     assert N == Nw, f"Output gradient and expert weights have different size in N dim: {N} vs. {Nw}"
 
     M_total = expert_indices.shape[0]
-    torch._check_is_size(M_total)
+    torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
 
     # Check if dimensions match

@@ -300,7 +300,7 @@ def cg_grouped_gemm_backward_weights(
     _, N = grad_output.shape
     M_bufferlen, K = inputs.shape
     M_total = expert_indices.shape[0]
-    torch._check_is_size(M_total)
+    torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
 
     # Check if dimensions match
@@ -398,7 +398,7 @@ def cg_grouped_gemm_backward_inputs(
     M_bufferlen, N = grad_output.shape
     num_experts, _, K = expert_weights.shape
     M_total = expert_indices.shape[0]
-    torch._check_is_size(M_total)
+    torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
 
     # Check if dimensions match

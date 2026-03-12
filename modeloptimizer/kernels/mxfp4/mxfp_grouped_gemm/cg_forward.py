@@ -242,7 +242,7 @@ def mxfp4_grouped_gemm_forward(
     # assume packed along K dim
     K *= 2
     M_total = expert_indices.shape[0]
-    torch._check_is_size(M_total)
+    torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
     assert (
         M_total % ALIGN_SIZE_M == 0

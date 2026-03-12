@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import torch
 
-SUPPORTED_MODELS = ["llama3", "gpt_oss"]
+SUPPORTED_MODELS = ["llama3", "gpt_oss", "deepseek_v3"]
 PATCH_MODULES = ["config_registry", "state_dict_adapter"]
 
 
@@ -25,7 +25,6 @@ class ModelPatcher:
                 try:
                     source_module = importlib.import_module(f"modeloptimizer.models.{model_name}.{patch_module}")
                 except ImportError:
-                    print(f"Module {patch_module} not found for {model_name}")
                     continue
                 target_module = importlib.import_module(f"torchtitan.models.{model_name}.{patch_module}")
                 for attr_name in source_module.__all__:

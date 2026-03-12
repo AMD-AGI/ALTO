@@ -545,10 +545,7 @@ def convert_to_mxfp4(
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    torch._check(
-        data_hp.shape[axis] % block_size == 0,
-        f"tensor shape ({data_hp.shape}) at axis={axis} is not divisible by {block_size}"
-    )
+    torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if use_asm is None:
@@ -575,7 +572,7 @@ def convert_to_mxfp4(
                          triton.cdiv(N, META["BLOCK_N"]))
     BLOCK_M = 64 if M >= 64 else M
     BLOCK_N = 64 if N >= 64 else N
-    
+
     if philox_seed is None:
         philox_seed = torch.randint(0, 2**31 - 1, (1,)).item()
     if philox_offset is None:

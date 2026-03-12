@@ -2,6 +2,8 @@ import importlib
 from unittest.mock import patch
 
 import torch
+from modeloptimizer.kernels.mxfp4 import mxfp4_grouped_gemm
+from modeloptimizer.kernels.dsgemm_utils import create_indices_from_offsets_nosync
 
 SUPPORTED_MODELS = ["llama3", "gpt_oss"]
 PATCH_MODULES = ["config_registry", "state_dict_adapter"]
@@ -20,13 +22,14 @@ class ModelPatcher:
         cls.patch_apply_rotary_emb_complex()
 
         for model_name in SUPPORTED_MODELS:
-            model_module = importlib.import_module(
-                f"torchtitan.models.{model_name}")
+            model_module = importlib.import_module(f"torchtitan.models.{model_name}")
             for patch_module in PATCH_MODULES:
-                source_module = importlib.import_module(
-                    f"modeloptimizer.models.{model_name}.{patch_module}")
-                target_module = importlib.import_module(
-                    f"torchtitan.models.{model_name}.{patch_module}")
+                try:
+                    source_module = importlib.import_module(f"modeloptimizer.models.{model_name}.{patch_module}")
+                except ImportError:
+                    print(f"Module {patch_module} not found for {model_name}")
+                    continue
+                target_module = importlib.import_module(f"torchtitan.models.{model_name}.{patch_module}")
                 for attr_name in source_module.__all__:
                     patched_attr = getattr(source_module, attr_name)
                     # print(
@@ -53,8 +56,7 @@ class ModelPatcher:
 
             @staticmethod
             def forward(ctx, x, scale, zero_point, args, g_idx, global_scale):
-                return original_fake_quantize(x, scale, zero_point, args, g_idx,
-                                              global_scale)
+                return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod
             def backward(ctx, grad_output):
@@ -105,3 +107,13 @@ class ModelPatcher:
         rope.apply_rotary_emb_complex = apply_rotary_emb_complex
         attention.apply_rotary_emb_complex = apply_rotary_emb_complex
         patch("torchtitan.models.common.rope.apply_rotary_emb_complex", apply_rotary_emb_complex).__enter__()
+
+    @classmethod
+    def patch_mxfp4_gmm(cls, **kwargs):
+
+        def gmm(x, w_t, *, offs):
+            m_indices = create_indices_from_offsets_nosync(offs)
+            return mxfp4_grouped_gemm(x, w_t.transpose(-2, -1), m_indices, **kwargs)
+
+        torch._grouped_mm = gmm
+        patch("torch._grouped_mm", gmm).__enter__()

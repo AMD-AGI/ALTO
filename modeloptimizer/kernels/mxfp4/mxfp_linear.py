@@ -618,7 +618,7 @@ class MXFP4Linear(nn.Linear):
                                    placements=(output_placement, ))
 
         if self.bias is not None:
-            y = y + self.bias.to(y.device)
+            y = y + self.bias
 
         return y
 

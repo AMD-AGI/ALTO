@@ -8,8 +8,8 @@ from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers import Modifier
-from modeloptimizer.kernels.mxfp4.mxfp_quantization import BLOCK_SIZE_DEFAULT
 from modeloptimizer.kernels.mxfp4.mxfp_linear import MXFP4Linear
+from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 
 __all__ = ["LowPrecisionTrainingModifier"]
 
@@ -30,7 +30,7 @@ class LowPrecisionTrainingModifier(Modifier):
         super().__init__(**kwargs)
 
         assert self.precision.startswith("mxfp4_"), "Only MXFP4 precision is supported for now."
-        set_token_group_alignment_size_m(BLOCK_SIZE_DEFAULT)
+        set_token_group_alignment_size_m(ALIGN_SIZE_M)
 
         if self.precision.endswith("_1d1d"):
             self._extra_kwargs = {
@@ -53,6 +53,9 @@ class LowPrecisionTrainingModifier(Modifier):
         self._extra_kwargs["use_hadamard"] = self.use_hadamard
         self._extra_kwargs["use_sr_grad"] = self.use_sr_grad
         self._extra_kwargs["use_dge"] = self.use_dge
+
+        from modeloptimizer.models.patcher import ModelPatcher
+        ModelPatcher.patch_mxfp4_gmm(**self._extra_kwargs)
 
     @property
     def requires_training_mode(self) -> bool:

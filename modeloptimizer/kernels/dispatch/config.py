@@ -12,3 +12,8 @@ class MXFP4TrainingOpConfig(TrainingOpBaseConfig):
     use_hadamard: bool
     use_sr_grad: bool
     use_dge: bool
+
+
+@dataclass
+class MXFP8TrainingOpConfig(MXFP4TrainingOpConfig):
+    pass

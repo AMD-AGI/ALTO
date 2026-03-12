@@ -425,6 +425,8 @@ def _attn_fwd_inner(
         p_fp4 = _pack_fp4(
             p,
             ps,
+            None,
+            None,
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,

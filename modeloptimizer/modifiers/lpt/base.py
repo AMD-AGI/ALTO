@@ -4,11 +4,16 @@ import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
 from pydantic import PrivateAttr
+from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers import Modifier
-from modeloptimizer.kernels.dispatch import swap_params, MXFP4TrainingOpConfig
+from modeloptimizer.kernels.dispatch import (
+    swap_params,
+    MXFP4TrainingOpConfig,
+    LPScaledDotProductAttentionWrapper,
+)
 from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 
 __all__ = ["LowPrecisionTrainingModifier"]
@@ -45,7 +50,12 @@ class LowPrecisionTrainingModifier(Modifier):
         return True
 
     def on_convert(self, model: Module, **kwargs) -> bool:
+        assert self._config is not None, "TrainingOpConfig is not initialized"
         for name, module in match_named_modules(model, self.targets, self.ignore):
+            if isinstance(module, BaseAttention):
+                assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
+                module.inner_attention = LPScaledDotProductAttentionWrapper(config=self._config)
+                continue
             if isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
                 swap_params(module, config=self._config, module_name=name)
             else:

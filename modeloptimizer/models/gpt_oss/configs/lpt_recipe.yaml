@@ -1,7 +1,7 @@
 training_stage:
   lpt_modifiers:
     LowPrecisionTrainingModifier:
-      precision: "mxfp4"
+      scheme: "mxfp4"
       targets: ["Linear", "GptOssGroupedExperts"]
       ignore: ["output", "re:.*\\.router\\.gate"]
       use_2dblock_x: false

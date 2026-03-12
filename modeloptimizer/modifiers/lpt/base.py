@@ -1,17 +1,17 @@
-from typing import Literal
-
 import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, Field, field_validator
 from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers import Modifier
 from modeloptimizer.kernels.dispatch import (
+    is_preset_scheme,
+    get_scheme_config_class,
     swap_params,
-    MXFP4TrainingOpConfig,
+    TrainingOpBaseConfig,
     LPScaledDotProductAttentionWrapper,
 )
 from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
@@ -21,9 +21,9 @@ __all__ = ["LowPrecisionTrainingModifier"]
 
 class LowPrecisionTrainingModifier(Modifier):
 
-    precision: Literal["mxfp4"] = "mxfp4"
-    targets: list[str] = ["Linear"]
-    ignore: list[str] = ["output"]
+    scheme: str | dict[str, list[str]]
+    targets: str | list[str] = Field(default_factory=lambda: ["Linear"])
+    ignore: list[str] = Field(default_factory=lambda: ["output"])
 
     use_2dblock_x: bool = False
     use_2dblock_w: bool = True
@@ -31,35 +31,73 @@ class LowPrecisionTrainingModifier(Modifier):
     use_sr_grad: bool = False
     use_dge: bool = False
 
-    _config: MXFP4TrainingOpConfig | None = PrivateAttr(default=None)
+    _resolved_config: dict[TrainingOpBaseConfig, list[str]] | None = PrivateAttr(default=None)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
         set_token_group_alignment_size_m(ALIGN_SIZE_M)
-        self._config = MXFP4TrainingOpConfig(
-            use_2dblock_x=self.use_2dblock_x,
-            use_2dblock_w=self.use_2dblock_w,
-            use_hadamard=self.use_hadamard,
-            use_sr_grad=self.use_sr_grad,
-            use_dge=self.use_dge,
-        )
+        # self._config = MXFP4TrainingOpConfig(
+        #     use_2dblock_x=self.use_2dblock_x,
+        #     use_2dblock_w=self.use_2dblock_w,
+        #     use_hadamard=self.use_hadamard,
+        #     use_sr_grad=self.use_sr_grad,
+        #     use_dge=self.use_dge,
+        # )
+        
+    @field_validator("targets", mode="before")
+    def validate_targets(cls, value: str | list[str]) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("scheme", mode="before")
+    def validate_scheme(cls, value: str | dict[str, str|list[str]]) -> str | dict[str, list[str]]:
+        if isinstance(value, str) and not is_preset_scheme(value):
+            raise ValueError(f"Unsupported training op scheme: {value}")
+
+        if isinstance(value, dict):
+            for scheme_name in value:
+                cls.validate_scheme(scheme_name)
+
+            for key, target in value.items():
+                value[key] = cls.validate_targets(target)
+
+        return value
 
     @property
     def requires_training_mode(self) -> bool:
         return True
 
+    @property
+    def resolved_config(self) -> dict[TrainingOpBaseConfig, list[str]]:
+        if self._resolved_config is None:
+            # if target is provided with scheme name
+            if isinstance(self.scheme, str):
+                self.scheme = {self.scheme: self.targets}
+
+            self._resolved_config = {}
+            for scheme_name, targets in self.scheme.items():
+                scheme_obj = get_scheme_config_class(scheme_name)(
+                    use_2dblock_x=self.use_2dblock_x,
+                    use_2dblock_w=self.use_2dblock_w,
+                    use_hadamard=self.use_hadamard,
+                    use_sr_grad=self.use_sr_grad,
+                    use_dge=self.use_dge,
+                )
+                self._resolved_config[scheme_obj] = targets
+        return self._resolved_config
+
     def on_convert(self, model: Module, **kwargs) -> bool:
-        assert self._config is not None, "TrainingOpConfig is not initialized"
-        for name, module in match_named_modules(model, self.targets, self.ignore):
-            if isinstance(module, BaseAttention):
-                assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
-                module.inner_attention = LPScaledDotProductAttentionWrapper(config=self._config)
-                continue
-            if isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
-                swap_params(module, config=self._config, module_name=name)
-            else:
-                raise ValueError(f"Unsupported module type: {type(module)}")
+        for scheme_obj, targets in self.resolved_config.items():
+            for name, module in match_named_modules(model, targets, self.ignore):
+                if isinstance(module, BaseAttention):
+                    assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
+                    module.inner_attention = LPScaledDotProductAttentionWrapper(config=scheme_obj)
+                elif isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
+                    swap_params(module, config=scheme_obj, module_name=name)
+                else:
+                    raise ValueError(f"Unsupported module type: {type(module)}")
 
         logger.info(f"LowPrecisionTrainingModifier converted model: {model}")
         return True

@@ -22,10 +22,10 @@ def _get_tensor_cls_for_config(config: TrainingOpBaseConfig,) -> Type[torch.Tens
     """
     from .tensor import MXFP4TrainingWeightWrapperTensor
 
-    if isinstance(config, MXFP4TrainingOpConfig):
+    if config.precision == "mxfp4":
         return MXFP4TrainingWeightWrapperTensor
     else:
-        raise ValueError(f"Unsupported config type: {type(config)}")
+        raise ValueError(f"Unsupported training op config: {config}")
 
 
 def swap_params(
@@ -53,6 +53,9 @@ def swap_params(
      nn.Module: The modified module with swapped linear layers.
     """
     from .tensor import TrainingWeightWrapperBaseTensor
+
+    if config is None:
+        raise ValueError("training op config is required")
 
     tensor_cls = _get_tensor_cls_for_config(config)
 

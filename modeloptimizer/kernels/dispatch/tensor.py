@@ -223,7 +223,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
 
             assert A_is_2d and B_is_3d and offs is not None, "Only 2d x 3d with offsets is supported for now"
             assert bias is None, "Bias is not supported for now"
-            assert isinstance(config, MXFP4TrainingOpConfig), ("expected MXFP4TrainingOpConfig")
+            assert config.precision == "mxfp4", ("expected MXFP4TrainingOpConfig")
 
             # logger.info(
             #     f"[MXFP4GroupedMM]config: {config} A.shape: {A.shape} B.shape: {B.shape} offs.shape: {offs.shape}")
@@ -251,7 +251,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert isinstance(B, cls), f"B should be a {cls.__name__}"
 
             config = B.config
-            assert isinstance(config, MXFP4TrainingOpConfig), ("expected MXFP4TrainingOpConfig")
+            assert config.precision == "mxfp4", ("expected MXFP4TrainingOpConfig")
             # logger.info(
             #     f"[MXFP4Linear]config: {config} A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}"
             # )

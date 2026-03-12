@@ -20,6 +20,9 @@ class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
         else:
             raise ValueError(f"Unsupported SDPA config: {config}")
 
+    def _get_name(self) -> str:
+        return f"{self.__class__.__name__}[{self.config}]"
+
     def forward(
         self,
         q: torch.Tensor,

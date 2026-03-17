@@ -275,3 +275,6 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # the wrapping behavior of the super() impl, go directly to dispatch
             with torch._C.DisableTorchFunctionSubclass():
                 return func(*args, **kwargs)
+
+
+torch.serialization.add_safe_globals([MXFP4TrainingWeightWrapperTensor])

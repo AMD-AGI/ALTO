@@ -10,13 +10,11 @@ import torch
 from torch import nn
 from torchtitan.tools.logging import logger
 
-from .config import (
-    TrainingOpBaseConfig,
-    MXFP4TrainingOpConfig,
-)
+from .config import TrainingOpConfig
 
 
-def _get_tensor_cls_for_config(config: TrainingOpBaseConfig,) -> Type[torch.Tensor]:
+
+def _get_tensor_cls_for_config(config: TrainingOpConfig) -> Type[torch.Tensor]:
     """
     Returns the appropriate tensor class for the given config.
     """
@@ -32,7 +30,7 @@ def swap_params(
     module: nn.Module,
     *,
     module_filter_fn: Optional[Callable[[nn.Module, str], bool]] = None,
-    config: Optional[TrainingOpBaseConfig] = None,
+    config: Optional[TrainingOpConfig] = None,
     target_parameter_name: Optional[str] = None,
     module_name: Optional[str] = None,
 ) -> nn.Module:

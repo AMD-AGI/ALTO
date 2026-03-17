@@ -19,7 +19,7 @@ from torchtitan.tools.logging import logger
 
 from modeloptimizer.kernels.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
 from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
-from .config import TrainingOpBaseConfig, MXFP4TrainingOpConfig
+from .config import TrainingOpConfig
 
 aten = torch.ops.aten
 
@@ -46,13 +46,13 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
     based on the training config.
     """
 
-    config: TrainingOpBaseConfig = None
+    config: TrainingOpConfig | None = None
 
     @staticmethod
     def __new__(
         cls,
         tensor: torch.Tensor,
-        config: TrainingOpBaseConfig,
+        config: TrainingOpConfig,
     ):
         self = torch.Tensor._make_wrapper_subclass(
             cls,
@@ -72,7 +72,7 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
     def __init__(
         self,
         tensor: torch.Tensor,
-        config: TrainingOpBaseConfig,
+        config: TrainingOpConfig,
     ):
         self._data = tensor
         self.config = config
@@ -93,7 +93,9 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
             if config is None:
                 config = t.config
             else:
-                assert t.config == config, ("All TrainingWeightWrapperBaseTensor instances must have the same config")
+                assert t.config == config, (
+                    f"All TrainingWeightWrapperBaseTensor instances must have the same config, but found {t.config} and {config}"
+                )
             return t._data
 
         args_unwrapped, kwargs_unwrapped = pytree.tree_map_only(TrainingWeightWrapperBaseTensor, unwrap,
@@ -223,7 +225,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
 
             assert A_is_2d and B_is_3d and offs is not None, "Only 2d x 3d with offsets is supported for now"
             assert bias is None, "Bias is not supported for now"
-            assert config.precision == "mxfp4", ("expected MXFP4TrainingOpConfig")
+            assert config.precision == "mxfp4", ("expected TrainingOpConfig with precision=mxfp4")
 
             # logger.info(
             #     f"[MXFP4GroupedMM]config: {config} A.shape: {A.shape} B.shape: {B.shape} offs.shape: {offs.shape}")
@@ -254,7 +256,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert isinstance(B, cls), f"B should be a {cls.__name__} for func {func.__name__}"
 
             config = B.config
-            assert config.precision == "mxfp4", ("expected MXFP4TrainingOpConfig")
+            assert config.precision == "mxfp4", ("expected TrainingOpConfig with precision=mxfp4")
             # logger.info(f"[MXFP4Linear]func: {func.__name__} config: {config}"
             #             f"A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}")
 

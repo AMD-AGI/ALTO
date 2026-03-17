@@ -8,10 +8,8 @@ from torchtitan.tools.logging import logger
 
 from modeloptimizer.modifiers import Modifier
 from modeloptimizer.kernels.dispatch import (
-    is_preset_scheme,
-    get_scheme_config_class,
     swap_params,
-    TrainingOpBaseConfig,
+    TrainingOpConfig,
     LPScaledDotProductAttentionWrapper,
 )
 from modeloptimizer.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
@@ -31,7 +29,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_sr_grad: bool = False
     use_dge: bool = False
 
-    _resolved_config: dict[TrainingOpBaseConfig, list[str]] | None = PrivateAttr(default=None)
+    _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -44,7 +42,7 @@ class LowPrecisionTrainingModifier(Modifier):
         #     use_sr_grad=self.use_sr_grad,
         #     use_dge=self.use_dge,
         # )
-        
+
     @field_validator("targets", mode="before")
     def validate_targets(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
@@ -53,7 +51,7 @@ class LowPrecisionTrainingModifier(Modifier):
 
     @field_validator("scheme", mode="before")
     def validate_scheme(cls, value: str | dict[str, str|list[str]]) -> str | dict[str, list[str]]:
-        if isinstance(value, str) and not is_preset_scheme(value):
+        if isinstance(value, str) and value not in ["mxfp4", "mxfp8"]:
             raise ValueError(f"Unsupported training op scheme: {value}")
 
         if isinstance(value, dict):
@@ -70,7 +68,7 @@ class LowPrecisionTrainingModifier(Modifier):
         return True
 
     @property
-    def resolved_config(self) -> dict[TrainingOpBaseConfig, list[str]]:
+    def resolved_config(self) -> dict[TrainingOpConfig, list[str]]:
         if self._resolved_config is None:
             # if target is provided with scheme name
             if isinstance(self.scheme, str):
@@ -78,7 +76,8 @@ class LowPrecisionTrainingModifier(Modifier):
 
             self._resolved_config = {}
             for scheme_name, targets in self.scheme.items():
-                scheme_obj = get_scheme_config_class(scheme_name)(
+                scheme_obj = TrainingOpConfig(
+                    precision=scheme_name,
                     use_2dblock_x=self.use_2dblock_x,
                     use_2dblock_w=self.use_2dblock_w,
                     use_hadamard=self.use_hadamard,

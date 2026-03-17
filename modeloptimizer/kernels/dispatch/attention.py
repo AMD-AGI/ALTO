@@ -3,19 +3,19 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttentionWrapper)
 
 from modeloptimizer.kernels.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
-from .config import TrainingOpBaseConfig, MXFP4TrainingOpConfig
+from .config import TrainingOpConfig
 
 __all__ = ["LPScaledDotProductAttentionWrapper"]
 
 
 class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
 
-    def __init__(self, config: TrainingOpBaseConfig):
+    def __init__(self, config: TrainingOpConfig):
         super().__init__()
         self.config = config
         self.attn_func = None
 
-        if isinstance(config, MXFP4TrainingOpConfig):
+        if isinstance(config, TrainingOpConfig) and config.precision == "mxfp4":
             self.attn_func = triton_attention_mxfp4
         else:
             raise ValueError(f"Unsupported SDPA config: {config}")

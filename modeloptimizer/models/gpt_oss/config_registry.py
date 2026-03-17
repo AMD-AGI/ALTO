@@ -90,7 +90,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 4
     config.checkpoint.enable = True
-    config.checkpoint.interval = 100
+    config.checkpoint.interval = 1000
+    config.checkpoint.keep_latest_k = 2
     config.validator.enable = True
     config.validator.dataloader.dataset = "c4_validation"
     config.validator.freq = 768

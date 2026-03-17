@@ -80,7 +80,7 @@ class HadamardFactory:
         cls,
         device: device,
     ) -> Tensor:
-        if cls.randomized:
+        if not cls.randomized:
             data = deterministic_hadamard_matrix(cls.block_size, cls.dtype,
                                                  device)
         else:

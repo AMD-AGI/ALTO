@@ -240,25 +240,27 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             )
 
         # linear op override
-        elif func.__name__ in ("linear",):
-            A, B = args[0], args[1]
-            if len(args) > 2:
-                bias = args[2]
+        elif func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
+            trans_b = func.__name__ == "linear"
+            if func.__name__ == "addmm.default":
+                bias, A, B = args[0], args[1], args[2]
             else:
-                bias = None
-            assert not isinstance(A, cls), f"A should not be a {cls.__name__}"
-
-            assert isinstance(B, cls), f"B should be a {cls.__name__}"
+                A, B = args[0], args[1]
+                if len(args) > 2:
+                    bias = args[2]
+                else:
+                    bias = None
+            assert not isinstance(A, cls), f"A should not be a {cls.__name__} for func {func.__name__}"
+            assert isinstance(B, cls), f"B should be a {cls.__name__} for func {func.__name__}"
 
             config = B.config
             assert config.precision == "mxfp4", ("expected MXFP4TrainingOpConfig")
-            # logger.info(
-            #     f"[MXFP4Linear]config: {config} A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}"
-            # )
+            # logger.info(f"[MXFP4Linear]func: {func.__name__} config: {config}"
+            #             f"A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}")
 
             Y = _to_mxfp4_then_scaled_mm(
                 A,
-                B,
+                B if trans_b else B.T,
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,

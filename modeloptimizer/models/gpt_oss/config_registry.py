@@ -103,7 +103,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-pretrain-mxfp4gemm-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-mxfp4gemm_1d2d-hadamard-sr-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./modeloptimizer/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)

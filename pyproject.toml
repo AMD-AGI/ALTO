@@ -27,6 +27,7 @@ include = [
 [tool.poetry.dependencies]
 python = ">=3.9.0"
 torch = ">=2.9.0"
+torchao = "*"
 safetensors = "*"
 compressed_tensors = "*"
 pydantic = "*"

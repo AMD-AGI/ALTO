@@ -1,0 +1,11 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp4"
+      targets: ["Linear", "GroupedExperts"]
+      ignore: ["output", "re:.*\\.router\\.gate"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false

@@ -36,9 +36,7 @@ class QuantizationModifier(Modifier, QuantizationMixin):
         hooks are added. These hooks are disabled until the modifier starts.
         """
         if not QuantizationMixin.has_config(self):
-            raise ValueError(
-                "QuantizationModifier requires that quantization fields be specified"
-            )
+            raise ValueError("QuantizationModifier requires that quantization fields be specified")
         for m in model_parts:
             QuantizationMixin.initialize_quantization(self, m)
 
@@ -50,18 +48,16 @@ class QuantizationModifier(Modifier, QuantizationMixin):
         """
         for m in model_parts:
             QuantizationMixin.start_calibration(self, m)
-            
+
         return True
 
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         for m in model_parts:
-            QuantizationMixin.end_calibration(
-                self, m)  # keep quantization enabled
+            QuantizationMixin.end_calibration(self, m)  # keep quantization enabled
 
             # update weight scales and zero points
             # apply qdq to weights
-            named_modules = list(
-                match_named_modules(m, self.resolved_targets, self.ignore))
+            named_modules = list(match_named_modules(m, self.resolved_targets, self.ignore))
             for _, module in tqdm.tqdm(named_modules, desc="Calibrating weights"):
                 update_weight_zp_scale(module)
 
@@ -74,4 +70,7 @@ class QuantizationModifier(Modifier, QuantizationMixin):
         gc.collect()
         torch.cuda.empty_cache()
 
+        return True
+
+    def on_convert(self, model: Module, **kwargs) -> bool:
         return True

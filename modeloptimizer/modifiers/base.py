@@ -34,14 +34,22 @@ class Modifier(HooksMixin):
     def finalized(self) -> bool:
         return self.finalized_
 
+    @property
+    def requires_replay_buffer(self) -> bool:
+        return False
+
+    @property
+    def requires_training_mode(self) -> bool:
+        return False
+
+    def convert(self, model: Module, **kwargs) -> bool:
+        return self.on_convert(model, **kwargs)
+
     def initialize(self, model_parts: list[Module], **kwargs):
         if self.initialized_:
-            raise RuntimeError(
-                "Cannot initialize a modifier that has already been initialized"
-            )
+            raise RuntimeError("Cannot initialize a modifier that has already been initialized")
         if self.finalized_:
-            raise RuntimeError(
-                "Cannot initialize a modifier that has already been finalized")
+            raise RuntimeError("Cannot initialize a modifier that has already been finalized")
         assert isinstance(model_parts, list), "model_parts must be a list of nn.Module"
 
         self.initialized_ = self.on_initialize(model_parts, **kwargs)
@@ -58,16 +66,12 @@ class Modifier(HooksMixin):
 
     def pre_step(self, model_parts: list[Module], **kwargs):
         if not self.initialized_ or self.finalized_:
-            raise RuntimeError(
-                "cannot call pre-step method on an uninitialized or finalized modifier"
-            )
+            raise RuntimeError("cannot call pre-step method on an uninitialized or finalized modifier")
         self.started_ = self.on_pre_step(model_parts, **kwargs)
 
     def post_step(self, model_parts: list[Module], **kwargs):
         if not self.initialized_ or self.finalized_:
-            raise RuntimeError(
-                "cannot call post-step method on an uninitialized or finalized modifier"
-            )
+            raise RuntimeError("cannot call post-step method on an uninitialized or finalized modifier")
         self.ended_ = self.on_post_step(model_parts, **kwargs)
 
     @abstractmethod
@@ -86,8 +90,11 @@ class Modifier(HooksMixin):
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         raise NotImplementedError
 
-    def _infer_sequential_targets(self,
-                                  model: torch.nn.Module) -> str | list[str]:
+    @abstractmethod
+    def on_convert(self, model: Module, **kwargs) -> bool:
+        raise NotImplementedError
+
+    def _infer_sequential_targets(self, model: torch.nn.Module) -> str | list[str]:
         match self.sequential_targets:
             case None:
                 block_class_name = next(iter(model.layers.values())).__class__.__name__

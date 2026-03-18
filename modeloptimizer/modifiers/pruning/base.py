@@ -220,3 +220,6 @@ class PruningModifierBase(Modifier):
                 "forward_pre",
             )
             observers[module] = observer
+
+    def on_convert(self, model: Module, **kwargs) -> bool:
+        return True

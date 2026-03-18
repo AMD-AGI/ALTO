@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import torch
 
-SUPPORTED_MODELS = ["llama3"]
+SUPPORTED_MODELS = ["llama3", "gpt_oss", "deepseek_v3"]
 PATCH_MODULES = ["config_registry", "state_dict_adapter"]
 
 
@@ -20,13 +20,13 @@ class ModelPatcher:
         cls.patch_apply_rotary_emb_complex()
 
         for model_name in SUPPORTED_MODELS:
-            model_module = importlib.import_module(
-                f"torchtitan.models.{model_name}")
+            model_module = importlib.import_module(f"torchtitan.models.{model_name}")
             for patch_module in PATCH_MODULES:
-                source_module = importlib.import_module(
-                    f"modeloptimizer.models.{model_name}.{patch_module}")
-                target_module = importlib.import_module(
-                    f"torchtitan.models.{model_name}.{patch_module}")
+                try:
+                    source_module = importlib.import_module(f"modeloptimizer.models.{model_name}.{patch_module}")
+                except ImportError:
+                    continue
+                target_module = importlib.import_module(f"torchtitan.models.{model_name}.{patch_module}")
                 for attr_name in source_module.__all__:
                     patched_attr = getattr(source_module, attr_name)
                     # print(
@@ -53,8 +53,7 @@ class ModelPatcher:
 
             @staticmethod
             def forward(ctx, x, scale, zero_point, args, g_idx, global_scale):
-                return original_fake_quantize(x, scale, zero_point, args, g_idx,
-                                              global_scale)
+                return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod
             def backward(ctx, grad_output):

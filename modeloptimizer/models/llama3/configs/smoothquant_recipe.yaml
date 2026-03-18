@@ -1,0 +1,36 @@
+# SmoothQuant W8A8 quantization recipe
+# SmoothQuant smooths activation outliers first, then QuantizationModifier
+# quantizes both weights and activations.
+# Weight: 8-bit integer, symmetric, per-channel
+# Activation: 8-bit integer, symmetric, per-token dynamic, minmax observer
+quantization_stage:
+  quantization_modifiers:
+    SmoothQuantModifier:
+      smoothing_strength: 0.5
+      mappings:
+        - smooth_layer: "re:.*attention_norm"
+          balance_layers:
+            - "re:.*attention.wq"
+            - "re:.*attention.wk"
+            - "re:.*attention.wv"
+        - smooth_layer: "re:.*ffn_norm"
+          balance_layers:
+            - "re:.*feed_forward.w1"
+            - "re:.*feed_forward.w3"
+    QuantizationModifier:
+      ignore: ["output"]
+      config_groups:
+        group_0:
+          weights:
+            num_bits: 8
+            type: "int"
+            symmetric: true
+            strategy: "channel"
+          input_activations:
+            num_bits: 8
+            type: "int"
+            symmetric: true
+            strategy: "token"
+            dynamic: true
+            observer: "minmax"
+          targets: ["Linear"]

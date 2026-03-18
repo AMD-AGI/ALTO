@@ -1,0 +1,20 @@
+# Debug: AWQ smooth only, NO quantization
+# Should produce FP16-level loss if smoothing is correct
+quantization_stage:
+  quantization_modifiers:
+    AWQModifier:
+      n_grid: 20
+      ignore: ["output"]
+      mappings:
+        - smooth_layer: "re:.*attention_norm"
+          balance_layers:
+            - "re:.*attention.wq"
+            - "re:.*attention.wk"
+            - "re:.*attention.wv"
+        - smooth_layer: "re:.*ffn_norm"
+          balance_layers:
+            - "re:.*feed_forward.w1"
+            - "re:.*feed_forward.w3"
+      config_groups:
+        group_0:
+          targets: ["Linear"]

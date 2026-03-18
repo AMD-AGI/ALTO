@@ -1,0 +1,27 @@
+# AWQ W4A8 quantization recipe
+# Weight: 4-bit integer, symmetric, per-group (group_size=128), via AWQ grid search
+# Activation: 8-bit integer, symmetric, per-token dynamic, minmax observer
+quantization_stage:
+  quantization_modifiers:
+    AWQModifier:
+      n_grid: 20
+      ignore: ["output"]
+      mappings:
+        - smooth_layer: "re:.*attention_norm"
+          balance_layers:
+            - "re:.*attention.wq"
+            - "re:.*attention.wk"
+            - "re:.*attention.wv"
+        - smooth_layer: "re:.*ffn_norm"
+          balance_layers:
+            - "re:.*feed_forward.w1"
+            - "re:.*feed_forward.w3"
+      config_groups:
+        group_0:
+          weights:
+            num_bits: 4
+            type: "int"
+            symmetric: true
+            strategy: "group"
+            group_size: 128
+          targets: ["Linear"]

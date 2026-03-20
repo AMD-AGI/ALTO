@@ -22,7 +22,6 @@ __all__ = [
     "llama3_8b_lpt",
     "llama3_1b_gptq",
     "llama3_1b_awq",
-    "llama3_1b_smoothquant",
     "llama3_8b",
     "llama3_8b_gptq",
     "llama3_8b_rtn",
@@ -58,7 +57,7 @@ def llama3_debugmodel_lpt() -> Trainer.Config:
     config = llama3_debugmodel()
     config.training.steps = 10
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",)
     ],)
     return config
 
@@ -100,7 +99,7 @@ def llama3_1b_lpt() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",)
     ],)
     return config
 
@@ -143,7 +142,9 @@ def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",)
+    ],)
+    return config
 
 def llama3_1b_gptq() -> Trainer.Config:
     config = llama3_1b()
@@ -227,17 +228,6 @@ def llama3_8b_awq() -> Trainer.Config:
     return config
 
 
-def llama3_8b_smoothquant() -> Trainer.Config:
-    config = llama3_8b()
-    config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./modeloptimizer/models/llama3/configs/smoothquant_recipe.yaml",),
-    ],)
-    return config
-
-
 def instella_3b() -> Trainer.Config:
     config = instella_3b_orig()
     config.hf_assets_path = "/group/ossmodelzoo/hanwang2/huggingface/hub/models--amd--Instella-3B-Stage1/snapshots/cb33253ab0a5b9f2ea0b98f3edd818d46454580e"
@@ -274,6 +264,6 @@ def instella_3b_lpt() -> Trainer.Config:
     config = instella_3b()
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",)
     ],)
     return config

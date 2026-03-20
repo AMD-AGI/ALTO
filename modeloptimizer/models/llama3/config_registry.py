@@ -9,6 +9,7 @@ from torchtitan.models.llama3.config_registry import (
 )
 
 from modeloptimizer.components.converter import ModelOptConverter
+from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 
 __all__ = [
     "llama3_debugmodel",
@@ -168,7 +169,7 @@ def llama3_1b_awq() -> Trainer.Config:
     return config
 
 
-LLAMA3_8B_PATH = "/wekafs/guanchen/modelzoo/meta-llama/Llama-3.1-8B"
+LLAMA3_8B_PATH = "/workspace/Model-Optimizer/models/meta-llama/Llama-3.1-8B"
 
 
 def llama3_8b() -> Trainer.Config:

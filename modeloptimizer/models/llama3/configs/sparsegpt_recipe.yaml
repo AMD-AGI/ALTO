@@ -1,0 +1,12 @@
+# SparseGPT unstructured sparsification recipe
+# One-shot Hessian-based pruning with error compensation
+sparsification_stage:
+  sparsity_modifiers:
+    SparseGPTModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.5
+      mask_structure: "0:0"
+      block_size: 128
+      dampening_frac: 0.01
+      targets: ["Linear"]
+      ignore: ["output"]

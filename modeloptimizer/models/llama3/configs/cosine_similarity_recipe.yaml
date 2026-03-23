@@ -1,0 +1,11 @@
+# Cosine similarity layer pruning recipe
+# Removes entire decoder blocks with lowest activation influence
+pruning_stage:
+  pruning_modifiers:
+    CosineSimilarityModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.25
+      pruning_dimension: "layer"
+      targets:
+        - "re:.*\\.wq$"
+      ignore: ["output"]

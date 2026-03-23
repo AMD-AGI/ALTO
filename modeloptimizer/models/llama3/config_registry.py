@@ -27,6 +27,18 @@ __all__ = [
     "llama3_8b_gptq",
     "llama3_8b_rtn",
     "llama3_8b_awq",
+    # sparsification
+    "llama3_8b_wanda",
+    "llama3_8b_sparsegpt",
+    "llama3_8b_magnitude",
+    "llama3_8b_admm",
+    "llama3_8b_alps",
+    # structured pruning
+    "llama3_8b_wanda_structured",
+    "llama3_8b_obs",
+    "llama3_8b_admm_structured",
+    "llama3_8b_cosine_similarity",
+    # other
     "instella_3b",
     "instella_3b_opt",
     "instella_3b_lpt",
@@ -227,6 +239,125 @@ def llama3_8b_awq() -> Trainer.Config:
             recipe="./modeloptimizer/models/llama3/configs/awq_recipe.yaml",),
     ],)
     return config
+
+
+# ======================================================================
+# Sparsification configs
+# ======================================================================
+
+
+def llama3_8b_wanda() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/wanda_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_sparsegpt() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.training.global_batch_size = 128
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/sparsegpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_magnitude() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/magnitude_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_admm() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.training.global_batch_size = 128
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/admm_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_alps() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.training.global_batch_size = 128
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/alps_recipe.yaml",),
+    ],)
+    return config
+
+
+# ======================================================================
+# Structured pruning configs
+# ======================================================================
+
+
+def llama3_8b_wanda_structured() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/wanda_structured_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_obs() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.training.global_batch_size = 128
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/obs_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_admm_structured() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.training.global_batch_size = 128
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/admm_structured_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_cosine_similarity() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/cosine_similarity_recipe.yaml",),
+    ],)
+    return config
+
+
+# ======================================================================
+# Instella configs
+# ======================================================================
 
 
 def instella_3b() -> Trainer.Config:

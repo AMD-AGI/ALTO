@@ -1,0 +1,10 @@
+# Magnitude pruning recipe
+# Data-free one-shot pruning based on weight magnitude |W|
+sparsification_stage:
+  sparsity_modifiers:
+    MagnitudeModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.5
+      mask_structure: "0:0"
+      targets: ["Linear"]
+      ignore: ["output"]

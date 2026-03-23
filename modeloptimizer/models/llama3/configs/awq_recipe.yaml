@@ -4,6 +4,7 @@
 quantization_stage:
   quantization_modifiers:
     AWQModifier:
+      sequential_granularity: "sublayer"
       n_grid: 20
       ignore: ["output"]
       mappings:

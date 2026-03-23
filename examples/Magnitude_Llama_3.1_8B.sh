@@ -1,12 +1,9 @@
 #!/usr/bin/bash
-# AWQ W4A8 quantization on Llama-3.1-8B
-# Uses activation-weighted scaling with grid search (4-bit per-group)
-# with dynamic 8-bit activation quantization
+# Magnitude pruning on Llama-3.1-8B
 #
 # Usage:
-#   bash examples/run_awq.sh                          # 8 GPU, Llama-3.1-8B
-#   NGPU=1 COMM_MODE=local_tensor bash examples/run_awq.sh  # single-GPU debug
-#   CONFIG=llama3_1b_awq bash examples/run_awq.sh    # switch to 1B model
+#   bash examples/Magnitude_Llama_3.1_8B.sh
+#   NGPU=1 COMM_MODE=local_tensor bash examples/Magnitude_Llama_3.1_8B.sh
 rm -rf outputs/
 set -ex
 
@@ -15,7 +12,7 @@ export CUDA_VISIBLE_DEVICES=0
 export LOG_RANK=${LOG_RANK:-0}
 TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
 MODULE=${MODULE:-"llama3"}
-CONFIG=${CONFIG:-"llama3_8b_awq"}
+CONFIG=${CONFIG:-"llama3_8b_magnitude"}
 COMM_MODE=${COMM_MODE:-""}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}

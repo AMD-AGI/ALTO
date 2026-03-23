@@ -4,6 +4,7 @@
 quantization_stage:
   quantization_modifiers:
     GPTQModifier:
+      sequential_granularity: "sublayer"
       block_size: 128
       dampening_frac: 0.01
       ignore: ["output"]

@@ -22,7 +22,7 @@ __all__ = [
     "llama3_8b_lpt",
     "llama3_1b_gptq",
     "llama3_1b_awq",
-    "llama3_1b_smoothquant",
+    "llama3_8b_smoothquant",
     "llama3_8b",
     "llama3_8b_gptq",
     "llama3_8b_rtn",
@@ -144,6 +144,9 @@ def llama3_8b_lpt() -> Trainer.Config:
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
 
 def llama3_1b_gptq() -> Trainer.Config:
     config = llama3_1b()

@@ -10,7 +10,6 @@ import torch
 from modeloptimizer.kernels.mxfp8.mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     SUPPORTED_FORMATS,
-    FORMAT_TO_DTYPE,
     FORMAT_TO_TARGET_MAX,
     FORMAT_TO_MBITS,
 )
@@ -67,7 +66,10 @@ def convert_to_mxfp8_pytorch(
     INPUT_SIGN_BIT = 1
         
     # Configure parameters according to the target format
-    fp8_dtype = FORMAT_TO_DTYPE[mxfp_format]
+    if mxfp_format == "e4m3":
+        fp8_dtype = torch.float8_e4m3fn
+    else:
+        fp8_dtype = torch.float8_e5m2
     target_max_pow2 = FORMAT_TO_TARGET_MAX[mxfp_format]
     mbits = FORMAT_TO_MBITS[mxfp_format]
 

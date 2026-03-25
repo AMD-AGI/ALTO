@@ -20,11 +20,6 @@ def is_cdna4():
 
 SUPPORTED_FORMATS = ["e4m3", "e5m2"]
 
-FORMAT_TO_DTYPE = {
-    "e4m3": torch.float8_e4m3fn,
-    "e5m2": torch.float8_e5m2,
-}
-
 # target_max_pow2: max representable power-of-2 exponent (unbiased)
 # Reference: torchao/prototype/mx_formats/constants.py (F8E4M3_MAX_POW2, F8E5M2_MAX_POW2)
 FORMAT_TO_TARGET_MAX = {
@@ -522,10 +517,14 @@ def convert_to_mxfp8(
     assert mxfp_format in SUPPORTED_FORMATS, \
         f"Unsupported format: {mxfp_format}. Supported: {SUPPORTED_FORMATS}"
     
-    fp8_dtype = FORMAT_TO_DTYPE[mxfp_format]
+    if mxfp_format == "e4m3":
+        fp8_dtype = torch.float8_e4m3fn
+        fp8_format_id = 0
+    else:
+        fp8_dtype = torch.float8_e5m2
+        fp8_format_id = 1
     target_max_pow2 = FORMAT_TO_TARGET_MAX[mxfp_format]
     mbits = FORMAT_TO_MBITS[mxfp_format]
-    fp8_format_id = SUPPORTED_FORMATS.index(mxfp_format)
 
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if use_asm is None:

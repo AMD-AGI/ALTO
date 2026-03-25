@@ -480,7 +480,7 @@ def _convert_to_mxfp8_kernel(
     tl.store(s_ptr + offs_s, scales)
 
 
-@triton_op("torchtitan::convert_to_mxfp8", mutates_args={})
+@triton_op("modeloptimizer::convert_to_mxfp8", mutates_args={})
 def convert_to_mxfp8(
     data_hp: torch.Tensor,
     block_size: int = BLOCK_SIZE_DEFAULT,
@@ -589,7 +589,7 @@ def convert_to_mxfp8(
 
     return data_lp.reshape(ori_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
 
-@triton_op("torchtitan::convert_from_mxfp8", mutates_args={})
+@triton_op("modeloptimizer::convert_from_mxfp8", mutates_args={})
 def convert_from_mxfp8(
     data_lp: torch.Tensor,
     scales: torch.Tensor,
@@ -765,8 +765,8 @@ def _calculate_scales_kernel(
     tl.store(s_ptr + offs_s, scales)
 
 
-@triton_op("torchtitan::calculate_scales", mutates_args={})
-def calculate_scales(
+@triton_op("modeloptimizer::calculate_mxfp8_scales", mutates_args={})
+def calculate_mxfp8_scales(
     data_hp: torch.Tensor,
     block_size: int = BLOCK_SIZE_DEFAULT,
     mxfp_format: str = "e4m3",

@@ -6,7 +6,7 @@
 
 import pytest
 import torch
-from modeloptimizer.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8, convert_from_mxfp8, calculate_scales, is_cdna4
+from modeloptimizer.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8, convert_from_mxfp8, calculate_mxfp8_scales, is_cdna4
 from .utils import prepare_data, convert_to_mxfp8_pytorch, convert_from_mxfp8_pytorch
 
 
@@ -205,7 +205,7 @@ def test_mxfp8_scale(tensor_shape, axis, data_type, mxfp_format, is_2d_block, pa
         is_2d_block=is_2d_block,
     )
 
-    scales = calculate_scales(
+    scales = calculate_mxfp8_scales(
         x,
         block_size=block_size,
         mxfp_format=mxfp_format,

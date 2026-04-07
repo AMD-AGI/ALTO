@@ -87,3 +87,102 @@ def blockwise_mxfp8_gemm_kernel(
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(c_ptrs, c, mask=mask_m[:, None] & mask_n[None, :])
 
+@triton_op("modeloptimizer::blockwise_mxfp8_gemm", mutates_args={})
+def blockwise_mxfp8_gemm(
+    a: torch.Tensor,
+    a_s: torch.Tensor,
+    b: torch.Tensor,
+    b_s: torch.Tensor,
+    trans_a: bool = False,
+    trans_b: bool = False,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+    output_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """
+    Blockwise MXFP8 GEMM: C = A @ B with per-block E8M0 scales.
+
+    A scales layout: [M, K//block_size] (trans_a=False) or [K//block_size, M] (trans_a=True).
+    B scales layout: [N, K//block_size] (trans_b=True) or [K//block_size, N] (trans_b=False).
+
+    Args:
+        a: FP8 tensor, shape [M, K] or [K, M] if trans_a.
+        a_s: uint8 E8M0 scales for A.
+        b: FP8 tensor, shape [K, N] or [N, K] if trans_b.
+        b_s: uint8 E8M0 scales for B.
+        trans_a: Whether A is transposed.
+        trans_b: Whether B is transposed.
+        block_size: Quantization block size along K.
+        output_dtype: Output dtype (float32 or bfloat16).
+    """
+    assert a.dim() == 2 and b.dim() == 2
+    if a.dtype != b.dtype:
+        raise ValueError(f"A/B FP8 dtypes must match, got a.dtype={a.dtype}, b.dtype={b.dtype}")
+
+    if a.dtype == torch.float8_e4m3fn:
+        fp8_format_id = 0
+    elif a.dtype == torch.float8_e5m2:
+        fp8_format_id = 1
+    else:
+        raise ValueError(f"Unsupported FP8 dtype: {a.dtype}")
+
+    if trans_a:
+        K, M = a.shape
+        if K % block_size != 0:
+            raise ValueError(f"K={K} must be divisible by block_size={block_size}")
+        assert a_s.shape == torch.Size((K // block_size, M)), \
+            f"A scale has shape {a_s.shape}, expected {(K // block_size, M)}"
+        stride_ak, stride_am = a.stride()
+        stride_ask, stride_asm = a_s.stride()
+    else:
+        M, K = a.shape
+        if K % block_size != 0:
+            raise ValueError(f"K={K} must be divisible by block_size={block_size}")
+        assert a_s.shape == torch.Size((M, K // block_size)), \
+            f"A scale has shape {a_s.shape}, expected {(M, K // block_size)}"
+        stride_am, stride_ak = a.stride()
+        stride_asm, stride_ask = a_s.stride()
+
+    if trans_b:
+        N, KB = b.shape
+        assert KB == K, f"B reduction dim ({KB}) does not match A ({K})"
+        assert b_s.shape == torch.Size((N, K // block_size)), \
+            f"B scale has shape {b_s.shape}, expected {(N, K // block_size)}"
+        stride_bn, stride_bk = b.stride()
+        stride_bsn, stride_bsk = b_s.stride()
+    else:
+        KB, N = b.shape
+        assert KB == K, f"B reduction dim ({KB}) does not match A ({K})"
+        # b_s stored as [K//block_size, N]; kernel accesses as [N, K//block_size] via swapped strides
+        assert b_s.shape == torch.Size((K // block_size, N)), \
+            f"B scale has shape {b_s.shape}, expected {(K // block_size, N)}"
+        stride_bk, stride_bn = b.stride()
+        stride_bsk, stride_bsn = b_s.stride()
+
+    c = a.new_empty((M, N), dtype=output_dtype)
+    stride_cm, stride_cn = c.stride()
+
+    M, N, K = int(M), int(N), int(K)
+    BLOCK_SIZE_M = 64 if M >= 64 else M
+    BLOCK_SIZE_N = 64 if N >= 64 else N
+    BLOCK_SIZE_K = 64 if K >= 64 else K
+
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]),
+        triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
+
+    wrap_triton(blockwise_mxfp8_gemm_kernel)[grid](
+        a, b, c, a_s, b_s,
+        stride_am, stride_ak,
+        stride_bn, stride_bk,
+        stride_cm, stride_cn,
+        stride_asm, stride_ask,
+        stride_bsn, stride_bsk,
+        M=M, N=N, K=K,
+        BLOCK_SIZE_M=BLOCK_SIZE_M,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        BLOCK_SIZE_K=BLOCK_SIZE_K,
+        QUANT_BLOCK_SIZE=block_size,
+        FP8_FORMAT=fp8_format_id,
+    )
+    return c

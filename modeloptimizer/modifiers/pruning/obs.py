@@ -149,7 +149,7 @@ class ObsModifier(PruningModifierBase):
         num_total_groups = W.shape[0]
         num_groups_to_remain = int(num_total_groups * (1 - sparsity))
         W_pruned, error, pruned_mask = self._prune_linear(
-            W, H, G, num_total_groups, num_groups_to_remain, update_iter=self.mlp_pruning_granularity
+            W, H, G, num_total_groups, num_groups_to_remain, pruning_granularity=self.mlp_pruning_granularity
         )
         
         return W_pruned.t().to(final_dtype).reshape(final_shape), pruned_mask
@@ -177,7 +177,7 @@ class ObsModifier(PruningModifierBase):
         num_groups_to_remain = int(num_total_groups * (1 - sparsity))
         
         W_pruned, error, pruned_mask = self._prune_linear(
-            W, H, G, num_total_groups, num_groups_to_remain, update_iter=self.attention_pruning_granularity
+            W, H, G, num_total_groups, num_groups_to_remain, pruning_granularity=self.attention_pruning_granularity
         )
         
         return W_pruned.t().to(final_dtype).reshape(final_shape), pruned_mask

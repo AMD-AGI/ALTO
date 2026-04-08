@@ -1,0 +1,15 @@
+# ALPS sparsification recipe
+# Hessian + ADMM-style iterations with CG refinement
+sparsification_stage:
+  sparsity_modifiers:
+    AlpsModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.5
+      mask_structure: "0:0"
+      dampening_frac: 0.01
+      alps_rho: 1.0
+      alps_iterations: 16
+      alps_update_iter: 16
+      alps_switch_iter: 16
+      targets: ["Linear"]
+      ignore: ["output"]

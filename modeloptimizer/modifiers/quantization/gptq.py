@@ -1,14 +1,18 @@
-# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af/src/llmcompressor/modifiers/quantization/gptq/
-# licensed under the Apache License 2.0
+# GPTQ (https://arxiv.org/abs/2210.17323)
+#
+# Extends QuantizationModifier with Hessian-guided block-wise re-quantization.
+# Only adds: Hessian observers + _process_block override.
+# Sequential infrastructure (capture hook, block loop, forward_block) lives in base.
 
 from copy import copy
 from functools import partial
 from typing import Any
 
 import torch
-import tqdm
 from compressed_tensors.quantization import (
-    QuantizationStatus, QuantizationStrategy, fake_quantize,
+    QuantizationStatus,
+    QuantizationStrategy,
+    fake_quantize,
 )
 from compressed_tensors.utils import getattr_chain, match_named_modules
 from pydantic import PrivateAttr
@@ -32,20 +36,24 @@ def _hessian_hook(module: Module, args: Any, base_name: str):
 
 
 class GPTQModifier(QuantizationModifier):
-    """Extends QuantizationModifier with GPTQ (https://arxiv.org/abs/2210.17323).
+    """Extends QuantizationModifier with GPTQ Hessian re-quantization.
 
-    :param block_size: columns per quantization block (default 128)
+    :param block_size: columns per GPTQ quantization block (default 128)
     :param dampening_frac: Hessian diagonal dampening (default 0.01)
     """
 
     block_size: int = 128
     dampening_frac: float = 0.01
+    sequential: bool = True  # override base default
 
     _hessian_observers: dict[Module, HessianGPTQObserver] = PrivateAttr(default_factory=dict)
     _hessian_names: dict[Module, str] = PrivateAttr(default_factory=dict)
 
+    # ---- lifecycle overrides ------------------------------------------
+
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         result = super().on_initialize(model_parts, **kwargs)
+
         for m in model_parts:
             for name, module in match_named_modules(m, self.resolved_targets, self.ignore):
                 if not getattr_chain(module, "quantization_scheme.weights", None):
@@ -53,62 +61,105 @@ class GPTQModifier(QuantizationModifier):
                 if isinstance(module, torch.nn.Embedding):
                     continue
                 self._hessian_names[module] = name
-                obs = Observer.create_instance("hessian_gptq", base_name=HESSIAN_BASE_NAME,
-                                               args=None, module=module, device=device_type)
+                obs = Observer.create_instance(
+                    "hessian_gptq", base_name=HESSIAN_BASE_NAME,
+                    args=None, module=module, device=device_type,
+                )
                 object.__setattr__(module, f"{HESSIAN_BASE_NAME}_observer", obs)
-                self.register_hook(module, partial(_hessian_hook, base_name=HESSIAN_BASE_NAME), "forward_pre")
+                self.register_hook(
+                    module,
+                    partial(_hessian_hook, base_name=HESSIAN_BASE_NAME),
+                    "forward_pre",
+                )
                 self._hessian_observers[module] = obs
-        logger.info(f"GPTQModifier: {len(self._hessian_observers)} modules")
+
+        logger.info(f"GPTQModifier: {len(self._hessian_observers)} Hessian observers")
         return result
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         result = super().on_pre_step(model_parts, **kwargs)
-        for obs in self._hessian_observers.values():
-            obs.enable()
+        if self.sequential:
+            for obs in self._hessian_observers.values():
+                obs.disable()
+        else:
+            for obs in self._hessian_observers.values():
+                obs.enable()
         return result
 
-    def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
+    # ---- template overrides -------------------------------------------
+
+    def _process_block(self, blk_idx, blk_name, block, block_inputs, block_mods):
+        """Hessian collection → GPTQ quantize for one block."""
+        hessian_mods = [m for m in block_mods if m in self._hessian_observers]
+        if not hessian_mods:
+            for mod in block_mods:
+                update_weight_zp_scale(mod)
+            return
+
+        # (a) Clear & enable Hessian observers
+        for mod in hessian_mods:
+            self._hessian_observers[mod].clear_stats()
+            self._hessian_observers[mod].enable()
+
+        # (b) Forward captured inputs → Hessian accumulates
+        with torch.no_grad():
+            for inp_args, inp_kwargs in block_inputs:
+                block(*inp_args, **inp_kwargs)
+
+        # (c) Disable Hessian
+        for mod in hessian_mods:
+            self._hessian_observers[mod].disable(clear=False)
+
+        # (d) GPTQ quantize each module
+        for mod in hessian_mods:
+            self._gptq_quantize(mod)
+
+        # RTN for any remaining modules without Hessian
+        for mod in block_mods:
+            if mod not in self._hessian_observers:
+                update_weight_zp_scale(mod)
+
+    def _nonsequential_post_step(self, model_parts):
+        """All-at-once GPTQ (Hessian already collected during forward)."""
         for obs in self._hessian_observers.values():
             obs.disable(clear=False)
         for m in model_parts:
-            from .mixin import QuantizationMixin
-            QuantizationMixin.end_calibration(self, m)
-            for _, module in tqdm.tqdm(
-                list(match_named_modules(m, self.resolved_targets, self.ignore)),
-                desc="GPTQ quantization",
-            ):
+            for _, module in match_named_modules(m, self.resolved_targets, self.ignore):
                 if module in self._hessian_observers:
                     self._gptq_quantize(module)
                 else:
                     update_weight_zp_scale(module)
-        self.remove_hooks()
+        return True
+
+    def _post_sequential_cleanup(self, model_parts):
+        self._cleanup_hessian()
+
+    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
+        self._cleanup_hessian()
+        return super().on_finalize(model_parts, **kwargs)
+
+    # ---- internal -----------------------------------------------------
+
+    def _cleanup_hessian(self):
         for module in self._hessian_observers:
             attr = f"{HESSIAN_BASE_NAME}_observer"
             if hasattr(module, attr):
                 delattr(module, attr)
         self._hessian_observers.clear()
         self._hessian_names.clear()
-        return True
-
-    def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
-        return super().on_finalize(model_parts, **kwargs)
-
-    # ------------------------------------------------------------------
 
     def _gptq_quantize(self, module: Module):
-        """Per-module GPTQ: RTN for scale/zp, then re-quantize with Hessian."""
         obs = self._hessian_observers[module]
         quant_args = getattr_chain(module, "quantization_scheme.weights")
         logger.info(f"Quantizing {self._hessian_names[module]} ({obs.num_samples} samples)")
 
         W_orig = module.weight.data.clone()
-        update_weight_zp_scale(module)  # RTN: compute scale/zp + QDQ
+        update_weight_zp_scale(module)
 
         scale = module.weight_scale.data.clone().to(PRECISION)
         zp = module.weight_zero_point.data.clone() if hasattr(module, "weight_zero_point") else None
         gs = getattr(module, "weight_global_scale", None)
 
-        # GPTQ re-quantize with Hessian error propagation
         loss, W_q = _gptq_block_quantize(
             W_orig.to(PRECISION), obs.stats / obs.num_samples,
             scale, zp, quant_args, gs, self.block_size, self.dampening_frac,
@@ -119,8 +170,19 @@ class GPTQModifier(QuantizationModifier):
 
 
 # ======================================================================
-# GPTQ block-wise quantization (OBQ Section 3.4)
+# GPTQ block-wise column quantization (OBQ Section 3.4)
 # ======================================================================
+
+
+def _col_scale(scale, zp, strategy, g_idx, col):
+    if strategy == QuantizationStrategy.TENSOR:
+        return scale, zp
+    if strategy == QuantizationStrategy.CHANNEL:
+        return (scale[:, 0] if scale.ndim > 1 else scale,
+                zp[:, 0] if zp is not None and zp.ndim > 1 else zp)
+    gi = g_idx[col]
+    return scale[:, gi], (zp[:, gi] if zp is not None else None)
+
 
 def _gptq_block_quantize(W, H, scale, zp, quant_args, global_scale, blocksize, dampfrac):
     strategy = quant_args.strategy
@@ -142,6 +204,7 @@ def _gptq_block_quantize(W, H, scale, zp, quant_args, global_scale, blocksize, d
     damp = dampfrac * torch.mean(torch.diag(H))
     diag = torch.arange(num_cols, device=H.device)
     H[diag, diag] += damp
+
     try:
         H = torch.linalg.cholesky(H)
         H = torch.cholesky_inverse(H)
@@ -172,13 +235,3 @@ def _gptq_block_quantize(W, H, scale, zp, quant_args, global_scale, blocksize, d
         W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
     return torch.sum(losses).item(), Q
-
-
-def _col_scale(scale, zp, strategy, g_idx, col):
-    if strategy == QuantizationStrategy.TENSOR:
-        return scale, zp
-    if strategy == QuantizationStrategy.CHANNEL:
-        return (scale[:, 0] if scale.ndim > 1 else scale,
-                zp[:, 0] if zp is not None and zp.ndim > 1 else zp)
-    gi = g_idx[col]
-    return scale[:, gi], (zp[:, gi] if zp is not None else None)

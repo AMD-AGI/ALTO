@@ -263,8 +263,10 @@ class CosineSimilarityModifier(PruningModifierBase):
 
         # Update model config
         new_n_layers = len(new_layers)
-        model.n_layers = new_n_layers
-        model.model_args.n_layers = new_n_layers
+        if hasattr(model, "config"):
+            model.config.n_layers = new_n_layers
+        if hasattr(model, "n_layers"):
+            model.n_layers = new_n_layers
         logger.info(
             f"Model now has {new_n_layers} layers "
             f"(pruned {len(layers_to_prune)} layers)"

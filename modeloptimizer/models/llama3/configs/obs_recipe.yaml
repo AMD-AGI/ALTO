@@ -1,0 +1,13 @@
+# OBS structured pruning recipe
+# Hessian-based structured pruning with compensating weight updates
+pruning_stage:
+  pruning_modifiers:
+    ObsModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.25
+      pruning_dimension: "mlp"
+      mlp_pruning_granularity: 16
+      attention_pruning_granularity: 1
+      dampening_frac: 0.01
+      targets: ["Linear"]
+      ignore: ["output"]

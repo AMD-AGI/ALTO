@@ -1,0 +1,10 @@
+# Wanda structured pruning recipe
+# Structured MLP channel pruning using WANDA-style metrics
+pruning_stage:
+  pruning_modifiers:
+    WandaStructuredModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.25
+      pruning_dimension: "mlp"
+      targets: ["Linear"]
+      ignore: ["output"]

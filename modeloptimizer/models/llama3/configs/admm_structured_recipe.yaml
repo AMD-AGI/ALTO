@@ -1,0 +1,13 @@
+# ADMM structured pruning recipe
+# Hessian-based structured ADMM pruning
+pruning_stage:
+  pruning_modifiers:
+    AdmmStructuredModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.25
+      pruning_dimension: "mlp"
+      admm_rho: 10
+      admm_iterations: 16
+      dampening_frac: 0.01
+      targets: ["Linear"]
+      ignore: ["output"]

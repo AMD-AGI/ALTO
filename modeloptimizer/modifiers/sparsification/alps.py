@@ -178,7 +178,7 @@ class AlpsModifier(SparsityModifierBase):
         k_spar = int(np.round((1-sparsity)*params))  # number of nonzeros to keep
         
         # --- Phase 3: Initial sparsity pattern (projection onto constraint set) ---
-        if prune_n == -1:
+        if prune_n == 0:
             D = B.clone().reshape(-1)
             _, loss_idx = torch.topk(-D**2,totp * num_cout - k_spar)
             D[loss_idx] = 0    
@@ -204,7 +204,7 @@ class AlpsModifier(SparsityModifierBase):
             # D-update: project (V + rho*B)/rho onto sparsity constraint (keep k_spar largest, zero rest)
             if fix_supp:
                 D = ((V + self.alps_rho * B) / self.alps_rho) * D_fix
-            elif prune_n == -1:
+            elif prune_n == 0:
                 # Unstructured: zero out (totp*num_cout - k_spar) smallest entries by magnitude
                 D = ((V + self.alps_rho * B) / self.alps_rho).reshape(-1)
                 _, loss_idx = torch.topk(-D**2,totp * num_cout - k_spar)
@@ -223,7 +223,7 @@ class AlpsModifier(SparsityModifierBase):
             
             # Periodically: check support change, adapt rho, and optionally recompute H_inv
             if (i_admm+1) % self.alps_update_iter == 0:
-                if prune_n == -1:
+                if prune_n == 0:
                     D_supp = (D.reshape(-1) == 0).to(torch.float)
                 supp_change = torch.sum((D_supp-D_suppp)**2)  # measure how much support changed
                 
@@ -258,7 +258,7 @@ class AlpsModifier(SparsityModifierBase):
                 H_inv = (Q @ ((1 / (L + self.alps_rho)) * Q).T).float().to(H.device)
                 
                 # Relative residual error for early termination check
-                if prune_n == -1:
+                if prune_n == 0:
                     Btest = B.reshape(-1)
                     _, loss_idx = torch.topk(-Btest**2,totp * num_cout - k_spar)
                     Btest[loss_idx] = 0    

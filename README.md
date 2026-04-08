@@ -19,13 +19,16 @@ Observe and calculate statistics of module weights/inputs/outputs.
 * Sparsification
   * WandaPruningModifier
   * SparseGPTModifier
+* Low-Precision Training
+  * MXFP4
 
 ### Models
 
 * Llama3
   * Patched [state_dict_adapter](modeloptimizer/models/llama3/state_dict_adapter.py) to save the observer/modifier states in hf safetensors.
-  * Patched [RoPE](modeloptimizer/models/llama3/model.py) to keep wq, wk in the transformers layout.
-
+  * Patched [RoPE](modeloptimizer/models/patcher.py) to keep wq, wk in the transformers layout.
+* DeepSeek
+* GPT-OSS
 
 ## Installation
 
@@ -42,48 +45,75 @@ pip install -e .
 ```
 
 
-## Configuration
+## General Usage
 
-Create a recipe file following the same settings as [llm-compressor](https://github.com/vllm-project/llm-compressor/tree/bede809f388aaeb1438a4d692d2d79109f9357dc).
+Create a recipe file following similar settings as [llm-compressor](https://github.com/vllm-project/llm-compressor/tree/bede809f388aaeb1438a4d692d2d79109f9357dc).
 
-Include the recipe in torchtitan config:
+Include the recipe in the torchtitan config registry:
 
-```toml
-[model]
-converters = ["modeloptimizer"]
-
-[model_optimizer]
-recipe = "./modeloptimizer/models/llama3/configs/recipe.yaml"
+(See [Llama3](modeloptimizer/models/llama3/config_registry.py) for example)
+```python
+config.model_converters = ModelConvertersContainer.Config(converters=[
+  ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/recipe.yaml",),
+],)
 ```
 
+Then start training or post-training optimization.
 
-## Run calibration
+## Low-Precision Training
+
+* Create a recipe with `LowPrecisionTrainingModifier`:
+
+  See [GPT-OSS LPT recipe](modeloptimizer/models/gpt_oss/configs/lpt_recipe.yaml) for example.
+  ```yaml
+  training_stage:
+    lpt_modifiers:
+      LowPrecisionTrainingModifier:
+        scheme: "mxfp4"
+        targets: ["Linear", "GptOssGroupedExperts"]
+        ignore: ["output", "re:.*\\.router\\.gate"]
+        use_2dblock_x: false
+        use_2dblock_w: true
+        use_hadamard: true
+        use_sr_grad: true
+        use_dge: false
+  ```
+* Include the recipe in the config registry
+
+  See [gpt_oss_20b_lpt](modeloptimizer/models/gpt_oss/config_registry.py) for example.
+
+* Start training with
+  ```bash
+  NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_lpt ./run.sh
+  ```
+
+## Post-Training Optimization
+
+### Run calibration
 
 For post-training calibration, set training steps to 1 and adjust calibration steps through `global_batch_size` and `local_batch_size`.
 
-```toml
-[training]
-local_batch_size = 1
-global_batch_size = 10
-steps = 1
+```python
+config.training.local_batch_size = 1
+config.training.global_batch_size = 10
+config.training.steps = 0
 ```
 
 Start calibration by:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 NGPU=1 CONFIG_FILE=./modeloptimizer/models/llama3/configs/llama3_1b.toml ./run.sh
+CUDA_VISIBLE_DEVICES=0 NGPU=1 MODULE=llama CONFIG=llama3_1b_opt ./run.sh
 ```
 
-
-## Export
+### Export
 
 By default torchtitan saves state dict in torch dcp format and converts it to hf safetensors offline.
 
 We have prepared a script for checkpoint conversion, compression and evaluation.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python ./scripts/convert_to_hf.py \
-  ./modeloptimizer/models/llama3/configs/llama3_1b.toml \
+CUDA_VISIBLE_DEVICES=0 python ./modeloptimizer/utils/exportation/export.py \
+  llama3 llama3_1b_opt \
   --tasks wikitext
 ```
 
@@ -99,10 +129,18 @@ CUDA_VISIBLE_DEVICES=0 python ./scripts/convert_to_hf.py \
     * [ ] more quant settings: dtype, granularity, etc.
   * sparsification
     * [x] SparseGPT
-    * [ ] Magnitude
-  * [ ] pruning
+    * [x] Magnitude
+  * [x] pruning
+  * low-precision training
+    * [x] MXFP4
+    * [ ] MXFP8
+    * [ ] blockwise FP8
   * [ ] transform
-* [ ] models
+* models
+  * [x] llama3
+  * [x] deepseek
+  * [x] gpt-oss
+  * [ ] flux
 * checkpointing
   * [x] compressed tensors for quantization
   * [x] compressed tensors for sparsification

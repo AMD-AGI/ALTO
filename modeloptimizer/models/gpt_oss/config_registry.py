@@ -74,7 +74,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.training.local_batch_size = 1
     config.training.global_batch_size = 16
     config.training.seq_len = 8192
-    config.optimizer.lr = 4e-4
+    config.optimizer.lr = 1e-4
     config.optimizer.weight_decay = 0.1
     config.optimizer.beta1 = 0.9
     config.optimizer.beta2 = 0.95
@@ -104,7 +104,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-pretrain-mxfp4gemm_1d2d-hadamard-sr-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-mxfp4gemm_1d2d-hadamard-sr-lr1e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./modeloptimizer/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)

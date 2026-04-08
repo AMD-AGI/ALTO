@@ -84,7 +84,7 @@ Then start training or post-training optimization.
 
 * Start training with
   ```bash
-  NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_lpt ./run.sh
+  NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_lpt ./examples/run.sh
   ```
 
 ## Post-Training Optimization
@@ -96,13 +96,13 @@ For post-training calibration, set training steps to 1 and adjust calibration st
 ```python
 config.training.local_batch_size = 1
 config.training.global_batch_size = 10
-config.training.steps = 0
+config.training.steps = 1
 ```
 
 Start calibration by:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 NGPU=1 MODULE=llama CONFIG=llama3_1b_opt ./run.sh
+CUDA_VISIBLE_DEVICES=0 NGPU=1 MODULE=llama CONFIG=llama3_1b_opt ./examples/run.sh
 ```
 
 ### Export

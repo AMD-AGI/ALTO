@@ -18,6 +18,7 @@ from .utils import prepare_data
 @pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("use_accumulator_add", [False, True])
 def test_mxfp8_linear_kernel(
     shape,
     trans_a,
@@ -26,6 +27,7 @@ def test_mxfp8_linear_kernel(
     mxfp_format,
     data_type,
     output_dtype,
+    use_accumulator_add,
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA device is required.")
@@ -106,6 +108,7 @@ def test_mxfp8_linear_kernel(
         trans_b=trans_b,
         block_size=block_size,
         output_dtype=output_dtype,
+        use_accumulator_add=use_accumulator_add,
     )
     c_ref = (a_dq.T if trans_a else a_dq) @ (b_dq.T if trans_b else b_dq)
     c_ref = c_ref.to(output_dtype)

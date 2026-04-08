@@ -42,6 +42,7 @@ def blockwise_mxfp8_gemm_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     FP8_FORMAT: tl.constexpr,  # 0=e4m3, 1=e5m2
+    USE_ACCUMULATOR_ADD: tl.constexpr,
 ):
     tl.assume(BLOCK_SIZE_K % QUANT_BLOCK_SIZE == 0)
 
@@ -79,9 +80,15 @@ def blockwise_mxfp8_gemm_kernel(
         b_s = tl.load(b_s_ptrs, mask=mask_n[:, None] & mask_k_scale[None, :], other=1)
 
         if FP8_FORMAT == 0:
-            accumulator = tl.dot_scaled(a, a_s, "e4m3", b, b_s, "e4m3", acc=accumulator, out_dtype=tl.float32)
+            if USE_ACCUMULATOR_ADD:
+                accumulator += tl.dot_scaled(a, a_s, "e4m3", b, b_s, "e4m3", out_dtype=tl.float32)
+            else:
+                accumulator = tl.dot_scaled(a, a_s, "e4m3", b, b_s, "e4m3", acc=accumulator, out_dtype=tl.float32)
         else:
-            accumulator = tl.dot_scaled(a, a_s, "e5m2", b, b_s, "e5m2", acc=accumulator, out_dtype=tl.float32)
+            if USE_ACCUMULATOR_ADD:
+                accumulator += tl.dot_scaled(a, a_s, "e5m2", b, b_s, "e5m2", out_dtype=tl.float32)
+            else:
+                accumulator = tl.dot_scaled(a, a_s, "e5m2", b, b_s, "e5m2", acc=accumulator, out_dtype=tl.float32)
 
     c = accumulator.to(c_ptr.dtype.element_ty)
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
@@ -97,6 +104,7 @@ def blockwise_mxfp8_gemm(
     trans_b: bool = False,
     block_size: int = BLOCK_SIZE_DEFAULT,
     output_dtype: torch.dtype = torch.float32,
+    use_accumulator_add: bool = False,
 ) -> torch.Tensor:
     """
     Blockwise MXFP8 GEMM: C = A @ B with per-block E8M0 scales.
@@ -113,6 +121,8 @@ def blockwise_mxfp8_gemm(
         trans_b: Whether B is transposed.
         block_size: Quantization block size along K.
         output_dtype: Output dtype (float32 or bfloat16).
+        use_accumulator_add: Whether to use ``accumulator += tl.dot_scaled(...)`` instead
+            of ``tl.dot_scaled(..., acc=accumulator)`` for performance comparisons.
     """
     assert a.dim() == 2 and b.dim() == 2
     if a.dtype != b.dtype:
@@ -184,5 +194,6 @@ def blockwise_mxfp8_gemm(
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         QUANT_BLOCK_SIZE=block_size,
         FP8_FORMAT=fp8_format_id,
+        USE_ACCUMULATOR_ADD=use_accumulator_add,
     )
     return c

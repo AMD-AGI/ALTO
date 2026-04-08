@@ -1,0 +1,13 @@
+quantization_stage:
+  quantization_modifiers:
+    QuantizationModifier:
+      ignore: ["output"]
+      config_groups:
+        group_0:
+          weights:
+            num_bits: 8
+            type: "int"
+            symmetric: true
+            strategy: "group"
+            group_size: 128
+          targets: ["Linear"]

@@ -1,0 +1,32 @@
+#!/usr/bin/bash
+# AWQ W4A8 quantization on Llama-3.1-8B
+# Uses activation-weighted scaling with grid search (4-bit per-group)
+# with dynamic 8-bit activation quantization
+#
+# Usage:
+#   bash examples/run_awq.sh                          # 8 GPU, Llama-3.1-8B
+#   NGPU=1 COMM_MODE=local_tensor bash examples/run_awq.sh  # single-GPU debug
+#   CONFIG=llama3_1b_awq bash examples/run_awq.sh    # switch to 1B model
+
+set -ex
+
+NGPU=${NGPU:-"1"}
+export CUDA_VISIBLE_DEVICES=0
+export LOG_RANK=${LOG_RANK:-0}
+TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
+MODULE=${MODULE:-"llama3"}
+CONFIG=${CONFIG:-"llama3_8b_awq"}
+COMM_MODE=${COMM_MODE:-""}
+
+TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
+
+if [ -n "$COMM_MODE" ]; then
+    echo "Running with comm_mode=${COMM_MODE}"
+    NGPU="${NGPU}" LOCAL_RANK=0 python3 -m ${TRAIN_FILE} --module ${MODULE} --config ${CONFIG} "$@" --comm.mode=${COMM_MODE} --training.steps 1
+else
+    PYTORCH_ALLOC_CONF="expandable_segments:True" \
+    TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
+    torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+    --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
+    -m ${TRAIN_FILE} --module ${MODULE} --config ${CONFIG} "$@"
+fi

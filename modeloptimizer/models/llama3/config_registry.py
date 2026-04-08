@@ -1,3 +1,4 @@
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.trainer import Trainer
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.models.llama3.config_registry import (
@@ -19,6 +20,13 @@ __all__ = [
     "llama3_8b",
     "llama3_8b_opt",
     "llama3_8b_lpt",
+    "llama3_1b_gptq",
+    "llama3_1b_awq",
+    "llama3_8b_smoothquant",
+    "llama3_8b",
+    "llama3_8b_gptq",
+    "llama3_8b_rtn",
+    "llama3_8b_awq",
     "instella_3b",
     "instella_3b_opt",
     "instella_3b_lpt",
@@ -81,6 +89,7 @@ def llama3_1b() -> Trainer.Config:
 def llama3_1b_opt() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/recipe.yaml",),
     ],)
@@ -135,6 +144,99 @@ def llama3_8b_lpt() -> Trainer.Config:
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_1b_gptq() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/gptq_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_1b_awq() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/awq_recipe.yaml",),
+    ],)
+    return config
+
+
+LLAMA3_8B_PATH = "/wekafs/guanchen/modelzoo/meta-llama/Llama-3.1-8B"
+
+
+def llama3_8b() -> Trainer.Config:
+    config = llama3_8b_orig()
+    config.hf_assets_path = LLAMA3_8B_PATH
+    config.metrics.log_freq = 1
+    config.profiling.enable_profiling = False
+    config.training.steps = 0
+    config.training.local_batch_size = 1
+    config.training.global_batch_size = 8
+    config.training.seq_len = 2048
+    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4_test")
+    config.activation_checkpoint.mode = "none"
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 10
+    config.checkpoint.initial_load_path = LLAMA3_8B_PATH
+    config.checkpoint.initial_load_in_hf = True
+    config.validator.enable = True
+    config.validator.dataloader = HuggingFaceTextDataLoader.Config(
+        dataset="wikitext_test")
+    config.validator.freq = 10
+    config.validator.steps = 10
+    config.debug.seed = 1234
+    return config
+
+
+def llama3_8b_gptq() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.training.global_batch_size = 128
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/gptq_recipe.yaml",),
+    ],)
+    return config
+
+def llama3_8b_rtn() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/rtn_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_awq() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/awq_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_8b_smoothquant() -> Trainer.Config:
+    config = llama3_8b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./modeloptimizer/models/llama3/configs/smoothquant_recipe.yaml",),
     ],)
     return config
 

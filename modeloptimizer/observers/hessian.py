@@ -1,6 +1,8 @@
 # modified from https://github.com/vllm-project/llm-compressor/blob/bede809f388aaeb1438a4d692d2d79109f9357dc/src/llmcompressor/modifiers/pruning/sparsegpt/sgpt_sparsify.py
 # licensed under the Apache License 2.0
 
+import math
+
 import torch
 from modeloptimizer.utils.pytorch.module import TransformerConv1D
 from .base import Observer, register_observer
@@ -10,7 +12,7 @@ PRECISION = torch.float32
 
 @register_observer("hessian")
 class HessianObserver(Observer):
-    """
+    r"""
     Hessian matrix of the activations.
         H = \sum_{i=1}^{N} x_i x_i^T / N.
         A naive implementation of the Hessian matrix.
@@ -77,13 +79,13 @@ class HessianObserver(Observer):
         pass
 
 
-@register_observer("hessian_obs")
-class HessianObsObserver(HessianObserver):
+@register_observer("hessian_sparsegpt")
+class HessianSparseGPTObserver(HessianObserver):
     """
     Hessian matrix of the activations.
         A normalized implementation of the Hessian matrix.
         Sample-by-sample amplitude decay with increasing sample size.
-        Suitable for SparseGPT and GPTQ.
+        Suitable for SparseGPT.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -100,6 +102,40 @@ class HessianObsObserver(HessianObserver):
             self.stats *= self.num_samples / (self.num_samples + num_added)
             self.num_samples += num_added
             inp = (2 / self.num_samples) ** 0.5 * inp.type(PRECISION)
+            self.stats += inp.matmul(inp.t())
+
+        return x_orig
+
+
+@register_observer("hessian_gptq")
+class HessianGPTQObserver(HessianObserver):
+    """
+    Hessian matrix for GPTQ quantization.
+
+    Matches llm-compressor's accumulate_hessian:
+        H += sqrt(2) * x @ x^T   (un-normalized raw sum)
+
+    The caller must divide by num_samples before use:
+        hessian_mean = observer.stats / observer.num_samples
+
+    This un-normalized form is required by llm-compressor's quantize_weight,
+    which expects H / N as input.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Use a float scalar for num_samples (compatible with torch division)
+        self.num_samples = torch.zeros(tuple(), dtype=PRECISION, device=self.device)
+
+    def forward_inner(self, x_orig):
+        if x_orig.numel() == 0:
+            return x_orig
+
+        with torch.no_grad():
+            inp = x_orig.detach()
+            inp, num_added = self.reshape_input(inp)
+            self.num_samples += num_added
+            inp = math.sqrt(2) * inp.type(PRECISION)
             self.stats += inp.matmul(inp.t())
 
         return x_orig

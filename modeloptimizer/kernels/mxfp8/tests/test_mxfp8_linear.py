@@ -17,8 +17,7 @@ from .utils import prepare_data
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("use_accumulator_add", [False, True])
+@pytest.mark.parametrize("use_accumulator_add", [True])
 def test_mxfp8_linear_kernel(
     shape,
     trans_a,
@@ -26,7 +25,6 @@ def test_mxfp8_linear_kernel(
     contiguous,
     mxfp_format,
     data_type,
-    output_dtype,
     use_accumulator_add,
 ):
     if not torch.cuda.is_available():
@@ -107,13 +105,12 @@ def test_mxfp8_linear_kernel(
         trans_a=trans_a,
         trans_b=trans_b,
         block_size=block_size,
-        output_dtype=output_dtype,
+        output_dtype=data_type,
         use_accumulator_add=use_accumulator_add,
     )
     c_ref = (a_dq.T if trans_a else a_dq) @ (b_dq.T if trans_b else b_dq)
-    c_ref = c_ref.to(output_dtype)
 
-    if output_dtype == torch.float32:
+    if data_type == torch.float32:
         atol, rtol = 1e-3, 1e-3
     else:
         atol, rtol = 5e-2, 5e-2

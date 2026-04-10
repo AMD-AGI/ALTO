@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
 import torch
 from torch.library import triton_op, wrap_triton
 
@@ -13,8 +15,65 @@ import triton.language as tl
 from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     SUPPORTED_FORMATS,
+    convert_from_mxfp8,
     is_cdna4,
 )
+
+
+def _use_emulated_fp8_dot(fp8_format: str) -> bool:
+    enabled_formats = {
+        item.strip()
+        for item in os.environ.get("MODELOPTIMIZER_MXFP8_EMULATED_DOT_FORMATS", "").split(",")
+        if item.strip()
+    }
+    if "all" in enabled_formats or fp8_format in enabled_formats:
+        return True
+
+    # Keep the original single-format switch working for the narrower e4m3 experiment.
+    return fp8_format == "e4m3" and os.environ.get("MODELOPTIMIZER_MXFP8_EMULATED_E4M3_DOT", "0") == "1"
+
+
+@triton.jit
+def blockwise_hp_gemm_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    num_blocks_k = tl.cdiv(K, BLOCK_SIZE_K)
+
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    mask_m = offs_m < M
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    mask_n = offs_n < N
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for i in range(num_blocks_k):
+        offs_k = i * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+        mask_k = offs_k < K
+
+        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+        b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+        a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
+        accumulator += tl.dot(a, b, out_dtype=tl.float32)
+
+    c = accumulator.to(c_ptr.dtype.element_ty)
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(c_ptrs, c, mask=mask_m[:, None] & mask_n[None, :])
 
 
 @triton.jit
@@ -94,6 +153,38 @@ def blockwise_mxfp8_gemm_kernel(
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     tl.store(c_ptrs, c, mask=mask_m[:, None] & mask_n[None, :])
 
+
+def _blockwise_hp_gemm(a: torch.Tensor, b: torch.Tensor, output_dtype: torch.dtype) -> torch.Tensor:
+    M, K = a.shape
+    KB, N = b.shape
+    assert KB == K, f"B reduction dim ({KB}) does not match A ({K})"
+
+    c = a.new_empty((M, N), dtype=output_dtype)
+    stride_am, stride_ak = a.stride()
+    stride_bk, stride_bn = b.stride()
+    stride_cm, stride_cn = c.stride()
+
+    BLOCK_SIZE_M = 64 if M >= 64 else M
+    BLOCK_SIZE_N = 64 if N >= 64 else N
+    BLOCK_SIZE_K = 64 if K >= 64 else K
+
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]),
+        triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
+
+    wrap_triton(blockwise_hp_gemm_kernel)[grid](
+        a, b, c,
+        stride_am, stride_ak,
+        stride_bk, stride_bn,
+        stride_cm, stride_cn,
+        M=M, N=N, K=K,
+        BLOCK_SIZE_M=BLOCK_SIZE_M,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        BLOCK_SIZE_K=BLOCK_SIZE_K,
+    )
+    return c
+
 @triton_op("modeloptimizer::blockwise_mxfp8_gemm", mutates_args={})
 def blockwise_mxfp8_gemm(
     a: torch.Tensor,
@@ -167,6 +258,32 @@ def blockwise_mxfp8_gemm(
             f"B scale has shape {b_s.shape}, expected {(K // block_size, N)}"
         stride_bk, stride_bn = b.stride()
         stride_bsk, stride_bsn = b_s.stride()
+
+    fp8_format = "e4m3" if fp8_format_id == 0 else "e5m2"
+    if _use_emulated_fp8_dot(fp8_format):
+        # Diagnostic path: isolate fp8 dot_scaled by dequantizing eagerly, then running a
+        # plain high-precision dot kernel with the same tile geometry.
+        a_hp = convert_from_mxfp8(
+            a,
+            a_s,
+            output_dtype=output_dtype,
+            block_size=block_size,
+            axis=-2 if trans_a else -1,
+            is_2d_block=False,
+        )
+        b_hp = convert_from_mxfp8(
+            b,
+            b_s,
+            output_dtype=output_dtype,
+            block_size=block_size,
+            axis=-1 if trans_b else -2,
+            is_2d_block=False,
+        )
+        if trans_a:
+            a_hp = a_hp.T
+        if trans_b:
+            b_hp = b_hp.T
+        return _blockwise_hp_gemm(a_hp, b_hp, output_dtype)
 
     c = a.new_empty((M, N), dtype=output_dtype)
     stride_cm, stride_cn = c.stride()

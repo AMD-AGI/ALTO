@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
-
 import torch
 from torch.library import triton_op, wrap_triton
 
@@ -16,21 +14,9 @@ from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     SUPPORTED_FORMATS,
     convert_from_mxfp8,
+    convert_to_mxfp8,
     is_cdna4,
 )
-
-
-def _use_emulated_fp8_dot(fp8_format: str) -> bool:
-    enabled_formats = {
-        item.strip()
-        for item in os.environ.get("MODELOPTIMIZER_MXFP8_EMULATED_DOT_FORMATS", "").split(",")
-        if item.strip()
-    }
-    if "all" in enabled_formats or fp8_format in enabled_formats:
-        return True
-
-    # Keep the original single-format switch working for the narrower e4m3 experiment.
-    return fp8_format == "e4m3" and os.environ.get("MODELOPTIMIZER_MXFP8_EMULATED_E4M3_DOT", "0") == "1"
 
 
 @triton.jit
@@ -185,6 +171,42 @@ def _blockwise_hp_gemm(a: torch.Tensor, b: torch.Tensor, output_dtype: torch.dty
     )
     return c
 
+
+def blockwise_mxfp8_gemm_emulated(
+    a: torch.Tensor,
+    a_s: torch.Tensor,
+    b: torch.Tensor,
+    b_s: torch.Tensor,
+    trans_a: bool = False,
+    trans_b: bool = False,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+    output_dtype: torch.dtype = torch.float32,
+    use_accumulator_add: bool = False,
+) -> torch.Tensor:
+    del use_accumulator_add
+    a_hp = convert_from_mxfp8(
+        a,
+        a_s,
+        output_dtype=output_dtype,
+        block_size=block_size,
+        axis=-2 if trans_a else -1,
+        is_2d_block=False,
+    )
+    b_hp = convert_from_mxfp8(
+        b,
+        b_s,
+        output_dtype=output_dtype,
+        block_size=block_size,
+        axis=-1 if trans_b else -2,
+        is_2d_block=False,
+    )
+    if trans_a:
+        a_hp = a_hp.T
+    if trans_b:
+        b_hp = b_hp.T
+    return _blockwise_hp_gemm(a_hp, b_hp, output_dtype)
+
+
 @triton_op("modeloptimizer::blockwise_mxfp8_gemm", mutates_args={})
 def blockwise_mxfp8_gemm(
     a: torch.Tensor,
@@ -258,32 +280,6 @@ def blockwise_mxfp8_gemm(
             f"B scale has shape {b_s.shape}, expected {(K // block_size, N)}"
         stride_bk, stride_bn = b.stride()
         stride_bsk, stride_bsn = b_s.stride()
-
-    fp8_format = "e4m3" if fp8_format_id == 0 else "e5m2"
-    if _use_emulated_fp8_dot(fp8_format):
-        # Diagnostic path: isolate fp8 dot_scaled by dequantizing eagerly, then running a
-        # plain high-precision dot kernel with the same tile geometry.
-        a_hp = convert_from_mxfp8(
-            a,
-            a_s,
-            output_dtype=output_dtype,
-            block_size=block_size,
-            axis=-2 if trans_a else -1,
-            is_2d_block=False,
-        )
-        b_hp = convert_from_mxfp8(
-            b,
-            b_s,
-            output_dtype=output_dtype,
-            block_size=block_size,
-            axis=-1 if trans_b else -2,
-            is_2d_block=False,
-        )
-        if trans_a:
-            a_hp = a_hp.T
-        if trans_b:
-            b_hp = b_hp.T
-        return _blockwise_hp_gemm(a_hp, b_hp, output_dtype)
 
     c = a.new_empty((M, N), dtype=output_dtype)
     stride_cm, stride_cn = c.stride()

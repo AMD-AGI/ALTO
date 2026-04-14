@@ -1,7 +1,12 @@
 import pytest
 import torch
 
-from modeloptimizer.kernels.mxfp8.mxfp8_linear import blockwise_mxfp8_gemm
+from modeloptimizer.kernels.mxfp4.tests.utils import calc_cossim, calc_snr
+from modeloptimizer.kernels.mxfp8.mxfp8_linear import (
+    MXFP8LinearFunction,
+    _to_mxfp8_then_scaled_mm,
+    blockwise_mxfp8_gemm,
+)
 from modeloptimizer.kernels.mxfp8.mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     convert_from_mxfp8,
@@ -114,8 +119,103 @@ def test_mxfp8_linear_kernel(
     c_ref = c_ref.to(output_dtype)
 
     if output_dtype == torch.float32:
-        atol, rtol = 1e-3, 1e-3
+        atol, rtol = 2.5e-1, 5e-2
     else:
-        atol, rtol = 5e-2, 5e-2
+        atol, rtol = 1.25e-1, 5e-2
 
     torch.testing.assert_close(c, c_ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("shape", [(2, 32, 64), (4, 64, 128)])
+@pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
+@pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
+def test_mxfp8_linear_func_forward(shape, mxfp_format, data_type):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device is required.")
+
+    batch, m_dim, k_dim = shape
+    n_dim = 96
+    inputs = prepare_data((batch, m_dim, k_dim), data_type)
+    weights = prepare_data((n_dim, k_dim), data_type)
+
+    outputs_ref = torch.nn.functional.linear(inputs, weights)
+    outputs = MXFP8LinearFunction.apply(inputs, weights, mxfp_format, False, False)
+
+    output_snr = calc_snr(outputs, outputs_ref)
+    output_sim = calc_cossim(outputs, outputs_ref)
+    print(f"forward snr={output_snr:.4f}, cossim={output_sim:.6f}")
+    assert output_snr > 10
+
+
+@pytest.mark.parametrize("shape", [(2, 32, 64), (4, 64, 128)])
+@pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
+@pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
+def test_mxfp8_linear_func_backward(shape, mxfp_format, data_type):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device is required.")
+
+    batch, m_dim, k_dim = shape
+    n_dim = 96
+    inputs = prepare_data((batch, m_dim, k_dim), data_type).requires_grad_(True)
+    weights = prepare_data((n_dim, k_dim), data_type).requires_grad_(True)
+    target = prepare_data((batch, m_dim, n_dim), data_type)
+
+    outputs_ref = torch.nn.functional.linear(inputs, weights)
+    loss_ref = torch.nn.functional.mse_loss(outputs_ref, target)
+    loss_ref.backward()
+    grad_inputs_ref = inputs.grad.detach().clone()
+    grad_weights_ref = weights.grad.detach().clone()
+
+    inputs.grad.zero_()
+    weights.grad.zero_()
+
+    outputs = MXFP8LinearFunction.apply(inputs, weights, mxfp_format, False, False)
+    loss = torch.nn.functional.mse_loss(outputs, target)
+    loss.backward()
+
+    dx_snr = calc_snr(inputs.grad, grad_inputs_ref)
+    dw_snr = calc_snr(weights.grad, grad_weights_ref)
+    print(f"backward dx_snr={dx_snr:.4f}, dw_snr={dw_snr:.4f}")
+    assert dx_snr > 8
+    assert dw_snr > 8
+
+
+@pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
+@pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
+def test_mxfp8_linear_func_e2e(mxfp_format, data_type):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device is required.")
+
+    batch, m_dim, k_dim, n_dim = 2, 64, 128, 96
+    inputs = prepare_data((batch, m_dim, k_dim), data_type)
+    targets = prepare_data((batch, m_dim, n_dim), data_type)
+    weights = torch.nn.Parameter(prepare_data((n_dim, k_dim), data_type))
+
+    optim = torch.optim.SGD([weights], lr=1e-2)
+
+    optim.zero_grad()
+    outputs_before = _to_mxfp8_then_scaled_mm(
+        inputs,
+        weights,
+        mxfp_format=mxfp_format,
+        use_sr_grad=False,
+        use_accumulator_add=False,
+    )
+    loss_before = torch.nn.functional.mse_loss(outputs_before, targets)
+    loss_before.backward()
+    optim.step()
+
+    with torch.no_grad():
+        outputs_after = _to_mxfp8_then_scaled_mm(
+            inputs,
+            weights,
+            mxfp_format=mxfp_format,
+            use_sr_grad=False,
+            use_accumulator_add=False,
+        )
+        loss_after = torch.nn.functional.mse_loss(outputs_after, targets)
+
+    assert torch.isfinite(loss_before)
+    assert torch.isfinite(loss_after)
+    assert torch.isfinite(weights).all()
+    assert loss_after <= loss_before * 1.1

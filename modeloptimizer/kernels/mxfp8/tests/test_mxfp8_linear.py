@@ -4,7 +4,6 @@ import torch
 from modeloptimizer.kernels.mxfp4.tests.utils import calc_cossim, calc_snr
 from modeloptimizer.kernels.mxfp8.mxfp8_linear import (
     MXFP8LinearFunction,
-    _to_mxfp8_then_scaled_mm,
     blockwise_mxfp8_gemm,
 )
 from modeloptimizer.kernels.mxfp8.mxfp8_quantization import (
@@ -126,36 +125,22 @@ def test_mxfp8_linear_kernel(
     torch.testing.assert_close(c, c_ref, atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("shape", [(2, 32, 64), (4, 64, 128)])
+@pytest.mark.parametrize("shape", [(2, 32, 96, 64), (4, 64, 96, 128)])
 @pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
+@pytest.mark.parametrize("use_sr_grad", [False, True])
+@pytest.mark.parametrize("use_accumulator_add", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp8_linear_func_forward(shape, mxfp_format, data_type):
+def test_mxfp8_linear_autograd_function(
+    shape,
+    mxfp_format,
+    use_sr_grad,
+    use_accumulator_add,
+    data_type,
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA device is required.")
 
-    batch, m_dim, k_dim = shape
-    n_dim = 96
-    inputs = prepare_data((batch, m_dim, k_dim), data_type)
-    weights = prepare_data((n_dim, k_dim), data_type)
-
-    outputs_ref = torch.nn.functional.linear(inputs, weights)
-    outputs = MXFP8LinearFunction.apply(inputs, weights, mxfp_format, False, False)
-
-    output_snr = calc_snr(outputs, outputs_ref)
-    output_sim = calc_cossim(outputs, outputs_ref)
-    print(f"forward snr={output_snr:.4f}, cossim={output_sim:.6f}")
-    assert output_snr > 10
-
-
-@pytest.mark.parametrize("shape", [(2, 32, 64), (4, 64, 128)])
-@pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
-@pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp8_linear_func_backward(shape, mxfp_format, data_type):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA device is required.")
-
-    batch, m_dim, k_dim = shape
-    n_dim = 96
+    batch, m_dim, n_dim, k_dim = shape
     inputs = prepare_data((batch, m_dim, k_dim), data_type).requires_grad_(True)
     weights = prepare_data((n_dim, k_dim), data_type).requires_grad_(True)
     target = prepare_data((batch, m_dim, n_dim), data_type)
@@ -163,59 +148,37 @@ def test_mxfp8_linear_func_backward(shape, mxfp_format, data_type):
     outputs_ref = torch.nn.functional.linear(inputs, weights)
     loss_ref = torch.nn.functional.mse_loss(outputs_ref, target)
     loss_ref.backward()
+
     grad_inputs_ref = inputs.grad.detach().clone()
     grad_weights_ref = weights.grad.detach().clone()
 
     inputs.grad.zero_()
     weights.grad.zero_()
 
-    outputs = MXFP8LinearFunction.apply(inputs, weights, mxfp_format, False, False)
+    outputs = MXFP8LinearFunction.apply(
+        inputs,
+        weights,
+        mxfp_format,
+        use_sr_grad,
+        use_accumulator_add,
+    )
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
 
+    output_snr = calc_snr(outputs, outputs_ref)
+    output_sim = calc_cossim(outputs, outputs_ref)
     dx_snr = calc_snr(inputs.grad, grad_inputs_ref)
+    dx_sim = calc_cossim(inputs.grad, grad_inputs_ref)
     dw_snr = calc_snr(weights.grad, grad_weights_ref)
-    print(f"backward dx_snr={dx_snr:.4f}, dw_snr={dw_snr:.4f}")
-    assert dx_snr > 8
-    assert dw_snr > 8
+    dw_sim = calc_cossim(weights.grad, grad_weights_ref)
 
-
-@pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
-@pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp8_linear_func_e2e(mxfp_format, data_type):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA device is required.")
-
-    batch, m_dim, k_dim, n_dim = 2, 64, 128, 96
-    inputs = prepare_data((batch, m_dim, k_dim), data_type)
-    targets = prepare_data((batch, m_dim, n_dim), data_type)
-    weights = torch.nn.Parameter(prepare_data((n_dim, k_dim), data_type))
-
-    optim = torch.optim.SGD([weights], lr=1e-2)
-
-    optim.zero_grad()
-    outputs_before = _to_mxfp8_then_scaled_mm(
-        inputs,
-        weights,
-        mxfp_format=mxfp_format,
-        use_sr_grad=False,
-        use_accumulator_add=False,
+    print(
+        f"output_snr={output_snr:.4f}, output_cossim={output_sim:.6f}, "
+        f"dx_snr={dx_snr:.4f}, dx_cossim={dx_sim:.6f}, "
+        f"dw_snr={dw_snr:.4f}, dw_cossim={dw_sim:.6f}"
     )
-    loss_before = torch.nn.functional.mse_loss(outputs_before, targets)
-    loss_before.backward()
-    optim.step()
 
-    with torch.no_grad():
-        outputs_after = _to_mxfp8_then_scaled_mm(
-            inputs,
-            weights,
-            mxfp_format=mxfp_format,
-            use_sr_grad=False,
-            use_accumulator_add=False,
-        )
-        loss_after = torch.nn.functional.mse_loss(outputs_after, targets)
-
-    assert torch.isfinite(loss_before)
-    assert torch.isfinite(loss_after)
-    assert torch.isfinite(weights).all()
-    assert loss_after <= loss_before * 1.1
+    min_snr = 8 if use_sr_grad else 10
+    assert output_snr > min_snr
+    assert dx_snr > min_snr
+    assert dw_snr > min_snr

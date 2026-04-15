@@ -1,154 +1,160 @@
-# AMD Distributed Model-Optimizer
+# ALTO: Advanced Lightweight Training and Optimization
 
+ALTO is a Python library for large language model (LLM) training and optimization, built on top of the [TorchTitan fork](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto). It ships Triton-backed low-precision kernels (MXFP4, block-scaled FP8, and related utilities) and a configurable stack of **modifiers**—low-precision training (LPT)—wired into TorchTitan through a model-converter pipeline.
+
+*This repository is not an official AMD product.*
+
+## Contents
+
+- [Features](#features)
+- [Supported models](#supported-models)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Examples](#examples)
+- [Export and evaluation](#export-and-evaluation)
 
 ## Features
 
-### Observers
-Observe and calculate statistics of module weights/inputs/outputs.
+### Low-precision training (LPT)
 
-* Quantization
-  * minmax
-* Sparsification
-  * per_channel_norm
-  * hessian
+Training-oriented kernels and schemes include:
+
+- **[Blockwise FP8](alto/kernels/blockwise_fp8)** — linear, grouped GEMM, and FlashAttention.
+- **[MXFP4](alto/kernels/mxfp4)** — linear, grouped GEMM, and FlashAttention.
+
+Techniques used to narrow the gap versus BF16 include:
+
+- 2D block quantization
+- Randomized Hadamard Transform (RHT)
+- Stochastic Rounding (SR)
+- Differential Gradient Estimation (DGE)
 
 ### Modifiers
 
-* Quantization
-  * QuantizationModifier
-* Sparsification
-  * WandaPruningModifier
-  * SparseGPTModifier
-* Low-Precision Training
-  * MXFP4
+Recipes can combine multiple stages under `alto/modifiers/`, e.g. Low-Precision Training (LPT) Modifier.
 
-### Models
+Recipe YAML follows the same general shape as [llm-compressor](https://github.com/vllm-project/llm-compressor/tree/bede809f388aaeb1438a4d692d2d79109f9357dc); use the configs under `alto/models/*/configs/` as concrete templates.
 
-* Llama3
-  * Patched [state_dict_adapter](modeloptimizer/models/llama3/state_dict_adapter.py) to save the observer/modifier states in hf safetensors.
-  * Patched [RoPE](modeloptimizer/models/patcher.py) to keep wq, wk in the transformers layout.
-* DeepSeek
-* GPT-OSS
+## Supported models
+
+| Model | Integration notes |
+|--------|-------------------|
+| **[Llama 3](alto/models/llama3)** | * Extended [state dict adapter](alto/models/llama3/state_dict_adapter.py) for Hugging Face Safetensors with observer/modifier state; <br/>* [patcher](alto/models/patcher.py) keeps query/key projections in the Transformers layout for RoPE; <br/> * Config registry hooks for TorchTitan. |
+| **[DeepSeek V3](alto/models/deepseek_v3)** | Config registry hooks for TorchTitan. |
+| **[GPT-OSS](alto/models/gpt_oss)** | Config registry hooks for TorchTitan. |
+
+## Requirements
+
+- **Python** 3.9+
+- **PyTorch** 2.9+ (see `pyproject.toml` for the full dependency set: `torchao`, `safetensors`, `compressed_tensors`, `lm_eval`, etc.)
+- **GPU** — training paths expect ROCm/CUDA-capable hardware; see TorchTitan documentation for parallel layout details.
 
 ## Installation
 
-Install the modified torchtitan:
+Clone the repository **with submodules** so the vendored TorchTitan tree is present:
+
+```bash
+git clone --recurse-submodules https://github.com/AMD-AGI/ALTO.git
+cd ALTO
+```
+
+If you already cloned without submodules:
+
+```bash
+git submodule update --init --recursive
+```
+
+Install the TorchTitan tree shipped under `3rdparty/torchtitan`, then install ALTO in editable mode:
 
 ```bash
 pip install --no-build-isolation -e 3rdparty/torchtitan
-```
-
-Install this project:
-
-```
 pip install -e .
 ```
 
+## Usage
 
-## General Usage
+### Wire a recipe into TorchTitan
 
-Create a recipe file following similar settings as [llm-compressor](https://github.com/vllm-project/llm-compressor/tree/bede809f388aaeb1438a4d692d2d79109f9357dc).
+1. Author or copy a **recipe YAML** (see existing files under `alto/models/<model>/configs/`).
+2. Register a TorchTitan config that attaches ALTO’s converter to `model_converters`.
 
-Include the recipe in the torchtitan config registry:
+Example (Llama 3 registry pattern):
 
-(See [Llama3](modeloptimizer/models/llama3/config_registry.py) for example)
 ```python
-config.model_converters = ModelConvertersContainer.Config(converters=[
-  ModelOptConverter.Config(recipe="./modeloptimizer/models/llama3/configs/recipe.yaml",),
-],)
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+from alto.components.converter import ModelOptConverter
+
+config.model_converters = ModelConvertersContainer.Config(
+    converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/recipe.yaml"),
+    ],
+)
 ```
 
-Then start training or post-training optimization.
+See [`alto/models/llama3/config_registry.py`](alto/models/llama3/config_registry.py) for full trainer configs.
 
-## Low-Precision Training
+### Launch training
 
-* Create a recipe with `LowPrecisionTrainingModifier`:
+From the repository root, the shared launcher wraps `torchrun` and `python -m alto.train`:
 
-  See [GPT-OSS LPT recipe](modeloptimizer/models/gpt_oss/configs/lpt_recipe.yaml) for example.
-  ```yaml
-  training_stage:
-    lpt_modifiers:
-      LowPrecisionTrainingModifier:
-        scheme: "mxfp4"
-        targets: ["Linear", "GptOssGroupedExperts"]
-        ignore: ["output", "re:.*\\.router\\.gate"]
-        use_2dblock_x: false
-        use_2dblock_w: true
-        use_hadamard: true
-        use_sr_grad: true
-        use_dge: false
-  ```
-* Include the recipe in the config registry
+```bash
+NGPU=8 MODULE=llama3 CONFIG=your_config_name ./examples/run.sh
+```
 
-  See [gpt_oss_20b_lpt](modeloptimizer/models/gpt_oss/config_registry.py) for example.
+Environment variables (see [`examples/run.sh`](examples/run.sh)):
 
-* Start training with
+| Variable | Role |
+|----------|------|
+| `NGPU` | Processes per node (default `8`). |
+| `MODULE` | TorchTitan module name (`llama3`, `gpt_oss`, …). |
+| `CONFIG` | Registered config function name. |
+| `TRAIN_FILE` | Python module for training entrypoint (default `alto.train`). |
+| `COMM_MODE` | Optional: `fake_backend` or `local_tensor` for config checks / single-GPU debugging. |
+
+## Examples
+
+### GPT-OSS 20B — MXFP4 Training
+
+- Recipe: [`alto/models/gpt_oss/configs/lpt_recipe.yaml`](alto/models/gpt_oss/configs/lpt_recipe.yaml)
+
+  uses `LowPrecisionTrainingModifier` with `scheme: "mxfp4"`.
+
+- Config: [`gpt_oss_20b_lpt`](alto/models/gpt_oss/config_registry.py) in the GPT-OSS registry.
+
+- Run:
+
   ```bash
   NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_lpt ./examples/run.sh
   ```
 
-## Post-Training Optimization
+Illustrative recipe fragment:
 
-### Run calibration
-
-For post-training calibration, set training steps to 1 and adjust calibration steps through `global_batch_size` and `local_batch_size`.
-
-```python
-config.training.local_batch_size = 1
-config.training.global_batch_size = 10
-config.training.steps = 1
+```yaml
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore: ["output", "re:.*\\.router\\.gate"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
 ```
 
-Start calibration by:
+## Export and evaluation
+
+TorchTitan typically saves checkpoints in PyTorch DCP format; you can convert to Hugging Face Safetensors and run lm-eval tasks with the bundled export utility:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 NGPU=1 MODULE=llama CONFIG=llama3_1b_opt ./examples/run.sh
-```
-
-### Export
-
-By default torchtitan saves state dict in torch dcp format and converts it to hf safetensors offline.
-
-We have prepared a script for checkpoint conversion, compression and evaluation.
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python ./modeloptimizer/utils/exportation/export.py \
+python ./alto/utils/exportation/export.py \
   llama3 llama3_1b_opt \
   --tasks wikitext
 ```
 
+## Project links
 
-## TODO
-
-* observers
-  * [ ] mse
-  * [x] hessian
-* modifiers
-  * quantization
-    * [ ] GPTQ
-    * [ ] more quant settings: dtype, granularity, etc.
-  * sparsification
-    * [x] SparseGPT
-    * [x] Magnitude
-  * [x] pruning
-  * low-precision training
-    * [x] MXFP4
-    * [ ] MXFP8
-    * [ ] blockwise FP8
-  * [ ] transform
-* models
-  * [x] llama3
-  * [x] deepseek
-  * [x] gpt-oss
-  * [ ] flux
-* checkpointing
-  * [x] compressed tensors for quantization
-  * [x] compressed tensors for sparsification
-  * [x] layer name mapping in the ignore list
-  * [x] include model optimizer states in fqn_to_index_mapping
-  * [x] permutation of Q, K scale/zero_point
-    * The weight in torchtitan has a different layout
-    * We have patched torchtitan llama3 models to use the transformers layout
-* parallelization
-  * [x] PP
-  * [ ] other parallelization dims
+- **Homepage** [github.com/AMD-AGI/ALTO](https://github.com/AMD-AGI/ALTO)
+- **TorchTitan submodule:** [github.com/AMD-AGI/torchtitan-amd](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto) (`3rdparty/torchtitan`)

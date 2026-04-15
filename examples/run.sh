@@ -27,7 +27,7 @@ set -ex
 
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
+TRAIN_FILE=${TRAIN_FILE:-"alto.train"}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 COMM_MODE=${COMM_MODE:-""}

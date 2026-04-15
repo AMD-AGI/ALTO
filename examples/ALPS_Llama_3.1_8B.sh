@@ -10,7 +10,7 @@ set -ex
 NGPU=${NGPU:-"1"}
 export CUDA_VISIBLE_DEVICES=0
 export LOG_RANK=${LOG_RANK:-0}
-TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
+TRAIN_FILE=${TRAIN_FILE:-"alto.train"}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_8b_alps"}
 COMM_MODE=${COMM_MODE:-""}

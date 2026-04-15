@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # ── Config ─────────────────────────────────────────────────────────────────
-CONFIG_FILE="modeloptimizer/models/llama3/configs/llama3_8b.toml"
+CONFIG_FILE="alto/models/llama3/configs/llama3_8b.toml"
 EXPORT_DTYPE="bfloat16"       # float16 | bfloat16 | float32
 EXPORT_MODE="both"    # compressed | uncompressed | both
 
 # ── Resolve paths ──────────────────────────────────────────────────────────
-CONVERT_SCRIPT="modeloptimizer/utils/exportation/convert_to_hf.py"
+CONVERT_SCRIPT="alto/utils/exportation/convert_to_hf.py"
 
 DUMP_FOLDER=$(python3 -c "
 import tomllib

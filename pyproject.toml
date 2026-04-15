@@ -10,7 +10,7 @@ authors = [
     "Xuanwu Yin <Xuanwu.Yin@amd.com>",
     "Dong Li <d.li@amd.com>",
 ]
-license = "BSD-3"
+license = "MIT"
 readme = "README.md"
 packages = [{ include = "alto" }]
 include = [

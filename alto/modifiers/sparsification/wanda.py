@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/pruning/wanda/base.py
 
-
 import torch
 from torch.nn import Module
 from torchtitan.tools.logging import logger

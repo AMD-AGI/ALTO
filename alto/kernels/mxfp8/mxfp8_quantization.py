@@ -15,12 +15,13 @@ def is_cdna4():
     target = triton.runtime.driver.active.get_current_target()
     return target is not None and target.backend == "hip" and target.arch == "gfx950"
 
+
 SUPPORTED_FORMATS = ["e4m3", "e5m2"]
 
 # target_max_pow2: max representable power-of-2 exponent (unbiased)
 # Reference: torchao/prototype/mx_formats/constants.py (F8E4M3_MAX_POW2, F8E5M2_MAX_POW2)
 FORMAT_TO_TARGET_MAX = {
-    "e4m3": 8,   # E4M3FN: max_exp=15, bias=7, unbiased=15-7=8
+    "e4m3": 8,  # E4M3FN: max_exp=15, bias=7, unbiased=15-7=8
     "e5m2": 15,  # E5M2: max_exp=30, bias=15, unbiased=30-15=15
 }
 
@@ -50,7 +51,7 @@ def _calculate_scales(
         hp_int_dtype = tl.int16
         hp_mbits = 7
         hp_ebits = 8
-    
+
     INPUT_SIGN_BIT = 1
 
     # Compute max absolute value per block
@@ -70,7 +71,7 @@ def _calculate_scales(
     val_to_add = 1 << (hp_mbits - mbits - 1)
     mask = ((1 << (hp_ebits + INPUT_SIGN_BIT)) - 1) << hp_mbits
     max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
-    
+
     # scale = max_abs_exponent - target_max_exponent
     scales = max_abs - target_max_pow2
     scales = tl.where(scales < 1, 1, scales)
@@ -111,12 +112,10 @@ def _quantize_fp8(
             if IS_2D_BLOCK:
                 SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
                 scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
-                    SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
-                ).reshape(BLOCK_M, BLOCK_N)
+                    SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
             else:
-                scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(
-                    BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
-                ).reshape(BLOCK_M, BLOCK_N)
+                scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(BLOCK_M, SCALE_BLOCK_N,
+                                                                           QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
 
             randval = _generate_randval(BLOCK_M, BLOCK_N, philox_seed, philox_offset)
 
@@ -186,13 +185,14 @@ def _quantize_fp8(
 
             if IS_2D_BLOCK:
                 SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
-                scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
-                    SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, HALF_QUANT_BLOCK_SIZE
-                ).reshape(BLOCK_M, HALF_BLOCK_N)
+                scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(SCALE_BLOCK_M, QUANT_BLOCK_SIZE,
+                                                                                SCALE_BLOCK_N,
+                                                                                HALF_QUANT_BLOCK_SIZE).reshape(
+                                                                                    BLOCK_M, HALF_BLOCK_N)
             else:
-                scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(
-                    BLOCK_M, SCALE_BLOCK_N, HALF_QUANT_BLOCK_SIZE
-                ).reshape(BLOCK_M, HALF_BLOCK_N)
+                scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(BLOCK_M, SCALE_BLOCK_N,
+                                                                           HALF_QUANT_BLOCK_SIZE).reshape(
+                                                                               BLOCK_M, HALF_BLOCK_N)
 
             x0, x1 = tl.split(x.reshape(BLOCK_M, HALF_BLOCK_N, 2))
 
@@ -220,8 +220,7 @@ def _quantize_fp8(
                         pack=1,
                     )
             else:
-                x_packed = (x1.to(tl.uint16, bitcast=True).to(tl.uint32) << 16) | x0.to(
-                    tl.uint16, bitcast=True)
+                x_packed = (x1.to(tl.uint16, bitcast=True).to(tl.uint32) << 16) | x0.to(tl.uint16, bitcast=True)
                 if FP8_FORMAT == 0:
                     y = tl.inline_asm_elementwise(
                         asm="""
@@ -265,12 +264,12 @@ def _quantize_fp8(
         tl.static_assert(not USE_SR, "USE_SR requires USE_ASM=True")
         if IS_2D_BLOCK:
             SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
-            scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
-                SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
-            ).reshape(BLOCK_M, BLOCK_N)
+            scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(SCALE_BLOCK_M, QUANT_BLOCK_SIZE,
+                                                                            SCALE_BLOCK_N,
+                                                                            QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
         else:
-            scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(
-                BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
+            scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(BLOCK_M, SCALE_BLOCK_N,
+                                                                       QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
 
         qx = x.to(tl.float32) / scales_fp32
 
@@ -306,16 +305,14 @@ def _dequantize_fp8(
         if IS_2D_BLOCK:
             SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
             scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
-                SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, HALF_QUANT_BLOCK_SIZE
-            ).reshape(BLOCK_M, HALF_BLOCK_N)
+                SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, HALF_QUANT_BLOCK_SIZE).reshape(BLOCK_M, HALF_BLOCK_N)
         else:
-            scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(
-                BLOCK_M, SCALE_BLOCK_N, HALF_QUANT_BLOCK_SIZE
-            ).reshape(BLOCK_M, HALF_BLOCK_N)
+            scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(BLOCK_M, SCALE_BLOCK_N,
+                                                                       HALF_QUANT_BLOCK_SIZE).reshape(
+                                                                           BLOCK_M, HALF_BLOCK_N)
 
         x0, x1 = tl.split(x.reshape(BLOCK_M, HALF_BLOCK_N, 2))
-        x_packed = x0.to(tl.uint8, bitcast=True).to(tl.uint16) | (
-            x1.to(tl.uint8, bitcast=True).to(tl.uint16) << 8)
+        x_packed = x0.to(tl.uint8, bitcast=True).to(tl.uint16) | (x1.to(tl.uint8, bitcast=True).to(tl.uint16) << 8)
 
         if output_dtype == tl.float32:
             if FP8_FORMAT == 0:
@@ -341,8 +338,7 @@ def _dequantize_fp8(
                     pack=1,
                 )
             y1 = (y_packed >> 32).to(tl.uint32).to(tl.float32, bitcast=True)
-            y0 = (y_packed & 0x00000000FFFFFFFF).to(tl.uint32).to(tl.float32,
-                                                                    bitcast=True)
+            y0 = (y_packed & 0x00000000FFFFFFFF).to(tl.uint32).to(tl.float32, bitcast=True)
         else:
             if FP8_FORMAT == 0:
                 y_packed = tl.inline_asm_elementwise(
@@ -367,19 +363,18 @@ def _dequantize_fp8(
                     pack=1,
                 )
             y1 = (y_packed >> 16).to(tl.uint16).to(tl.bfloat16, bitcast=True)
-            y0 = (y_packed & 0x0000FFFF).to(tl.uint16).to(tl.bfloat16,
-                                                            bitcast=True)
+            y0 = (y_packed & 0x0000FFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True)
 
         y = tl.join(y0, y1).reshape(BLOCK_M, BLOCK_N)
     else:
         if IS_2D_BLOCK:
             SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
-            scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
-                SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
-            ).reshape(BLOCK_M, BLOCK_N)
+            scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(SCALE_BLOCK_M, QUANT_BLOCK_SIZE,
+                                                                            SCALE_BLOCK_N,
+                                                                            QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
         else:
-            scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(
-                BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
+            scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(BLOCK_M, SCALE_BLOCK_N,
+                                                                       QUANT_BLOCK_SIZE).reshape(BLOCK_M, BLOCK_N)
 
         y = x.to(tl.float32) * scales_fp32
 
@@ -506,14 +501,12 @@ def convert_to_mxfp8(
     Returns:
         Tuple[data_lp, scales]: Quantized FP8 tensor and uint8 scale factors.
     """
-    torch._check(
-        data_hp.shape[axis] % block_size == 0,
-        f"tensor shape ({data_hp.shape}) at axis={axis} is not divisible by {block_size}"
-    )
-    
+    torch._check(data_hp.shape[axis] % block_size == 0,
+                 f"tensor shape ({data_hp.shape}) at axis={axis} is not divisible by {block_size}")
+
     assert mxfp_format in SUPPORTED_FORMATS, \
         f"Unsupported format: {mxfp_format}. Supported: {SUPPORTED_FORMATS}"
-    
+
     if mxfp_format == "e4m3":
         fp8_dtype = torch.float8_e4m3fn
         fp8_format_id = 0
@@ -530,12 +523,10 @@ def convert_to_mxfp8(
 
     data_hp = data_hp.transpose(axis, -1)
     ori_shape = data_hp.shape
-    
+
     if is_2d_block:
-        torch._check(
-            ori_shape[-2] % block_size == 0,
-            f"tensor shape at axis={axis}-1 ({ori_shape[-2]}) is not divisible by {block_size} for 2D block"
-        )
+        torch._check(ori_shape[-2] % block_size == 0,
+                     f"tensor shape at axis={axis}-1 ({ori_shape[-2]}) is not divisible by {block_size} for 2D block")
 
     data_hp = data_hp.reshape(-1, ori_shape[-1])
 
@@ -551,8 +542,7 @@ def convert_to_mxfp8(
     stride_ym, stride_yn = data_lp.stride()
     stride_sm, stride_sn = scales.stride()
     M, N = data_hp.shape
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),
-                         triton.cdiv(N, META["BLOCK_N"]))
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]), triton.cdiv(N, META["BLOCK_N"]))
     BLOCK_M = 64 if M >= 64 else M
     BLOCK_N = 64 if N >= 64 else N
 
@@ -585,6 +575,7 @@ def convert_to_mxfp8(
     )
 
     return data_lp.reshape(ori_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
+
 
 @triton_op("alto::convert_from_mxfp8", mutates_args={})
 def convert_from_mxfp8(
@@ -636,8 +627,7 @@ def convert_from_mxfp8(
     stride_ym, stride_yn = data_hp.stride()
     stride_sm, stride_sn = scales.stride()
     M, N = data_lp.shape
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),
-                         triton.cdiv(N, META["BLOCK_N"]))
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]), triton.cdiv(N, META["BLOCK_N"]))
     BLOCK_M = 64 if M >= 64 else M
     BLOCK_N = 64 if N >= 64 else N
 
@@ -660,6 +650,7 @@ def convert_from_mxfp8(
     )
 
     return data_hp.reshape(ori_shape).transpose(axis, -1)
+
 
 @triton.jit
 def _convert_from_mxfp8_kernel(
@@ -793,15 +784,11 @@ def calculate_mxfp8_scales(
     data_hp = data_hp.transpose(axis, -1)
     ori_shape = data_hp.shape
 
-    torch._check(
-        ori_shape[-1] % block_size == 0,
-        f"tensor shape at axis={axis} ({ori_shape[-1]}) is not divisible by {block_size}"
-    )
+    torch._check(ori_shape[-1] % block_size == 0,
+                 f"tensor shape at axis={axis} ({ori_shape[-1]}) is not divisible by {block_size}")
     if is_2d_block:
-        torch._check(
-            ori_shape[-2] % block_size == 0,
-            f"tensor shape at axis={axis}-1 ({ori_shape[-2]}) is not divisible by {block_size} for 2D block"
-        )
+        torch._check(ori_shape[-2] % block_size == 0,
+                     f"tensor shape at axis={axis}-1 ({ori_shape[-2]}) is not divisible by {block_size} for 2D block")
 
     data_hp = data_hp.reshape(-1, ori_shape[-1])
 
@@ -818,8 +805,7 @@ def calculate_mxfp8_scales(
     BLOCK_M = 64 if M >= 64 else M
     BLOCK_N = 64 if N >= 64 else N
 
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),
-                         triton.cdiv(N, META["BLOCK_N"]))
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]), triton.cdiv(N, META["BLOCK_N"]))
 
     wrap_triton(_calculate_scales_kernel)[grid](
         data_hp,

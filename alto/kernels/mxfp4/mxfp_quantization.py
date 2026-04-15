@@ -39,8 +39,7 @@ def _calculate_scales(
     NEW_BLOCK_N: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
     if IS_2D_BLOCK:
         NEW_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
-        x = x.reshape(NEW_BLOCK_M, QUANT_BLOCK_SIZE, NEW_BLOCK_N,
-                      QUANT_BLOCK_SIZE)
+        x = x.reshape(NEW_BLOCK_M, QUANT_BLOCK_SIZE, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
         max_abs = tl.max(tl.abs(x), axis=-1)
         max_abs = tl.max(max_abs, axis=-2)
     else:
@@ -71,7 +70,7 @@ def _quantize_fp4(
     x,
     scales_fp32,
     randval,
-    USE_SR:tl.constexpr,
+    USE_SR: tl.constexpr,
 ):
     EXP_BIAS_FP32: tl.constexpr = 127
     EXP_BIAS_FP4: tl.constexpr = 1
@@ -123,12 +122,9 @@ def _quantize_fp4(
         denormal_x = tl.where(denorm_mask_high & mask_high, 2, denormal_x)
         denormal_x = tl.where(denorm_mask_high & (not mask_high), 1, denormal_x)
     else:
-        denorm_exp: tl.constexpr = ((EXP_BIAS_FP32 - EXP_BIAS_FP4) +
-                                    (MBITS_F32 - MBITS_FP4) + 1)
+        denorm_exp: tl.constexpr = ((EXP_BIAS_FP32 - EXP_BIAS_FP4) + (MBITS_F32 - MBITS_FP4) + 1)
         denorm_mask_int: tl.constexpr = denorm_exp << MBITS_F32
-        denorm_mask_float: tl.constexpr = tl.cast(denorm_mask_int,
-                                                tl.float32,
-                                                bitcast=True)
+        denorm_mask_float: tl.constexpr = tl.cast(denorm_mask_int, tl.float32, bitcast=True)
 
         denormal_x = qx_fp32 + denorm_mask_float
         denormal_x = denormal_x.to(tl.uint32, bitcast=True)
@@ -247,14 +243,14 @@ def _pack_fp4(
     scales_fp32 = (scales.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
     if IS_2D_BLOCK:
         # scales_fp32: [SCALE_BLOCK_M, SCALE_BLOCK_N]
-        scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
-            SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N,
-            HALF_QUANT_BLOCK_SIZE).reshape(BLOCK_M, HALF_BLOCK_N)
+        scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N,
+                                                                        HALF_QUANT_BLOCK_SIZE).reshape(
+                                                                            BLOCK_M, HALF_BLOCK_N)
     else:
         # scales_fp32: [BLOCK_M, SCALE_BLOCK_N]
-        scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(
-            BLOCK_M, SCALE_BLOCK_N,
-            HALF_QUANT_BLOCK_SIZE).reshape(BLOCK_M, HALF_BLOCK_N)
+        scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(BLOCK_M, SCALE_BLOCK_N,
+                                                                   HALF_QUANT_BLOCK_SIZE).reshape(
+                                                                       BLOCK_M, HALF_BLOCK_N)
     if USE_SR:
         randval0, randval1 = _generate_randval_2x(BLOCK_M, HALF_BLOCK_N, philox_seed, philox_offset)
     else:
@@ -274,8 +270,7 @@ def _pack_fp4(
                     pack=1,
                 )
             else:
-                x0 = (x1.to(tl.uint32, bitcast=True).to(tl.uint64) <<
-                      32) | x0.to(tl.uint32, bitcast=True)
+                x0 = (x1.to(tl.uint32, bitcast=True).to(tl.uint64) << 32) | x0.to(tl.uint32, bitcast=True)
                 y = tl.inline_asm_elementwise(
                     asm="""
                     v_cvt_scalef32_sr_pk_fp4_f32 $0, $1, $2, $3 op_sel:[0,0,0,0];
@@ -287,8 +282,7 @@ def _pack_fp4(
                     pack=1,
                 )
         else:
-            x0 = (x1.to(tl.uint16, bitcast=True).to(tl.uint32) << 16) | x0.to(
-                tl.uint16, bitcast=True)
+            x0 = (x1.to(tl.uint16, bitcast=True).to(tl.uint32) << 16) | x0.to(tl.uint16, bitcast=True)
             if not USE_SR:
                 y = tl.inline_asm_elementwise(
                     asm="""
@@ -339,14 +333,14 @@ def _unpack_fp4(
     scales_fp32 = (scales.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
     if IS_2D_BLOCK:
         # scales_fp32: [SCALE_BLOCK_M, SCALE_BLOCK_N]
-        scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
-            SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N,
-            HALF_QUANT_BLOCK_SIZE).reshape(BLOCK_M, HALF_BLOCK_N)
+        scales_fp32 = scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N,
+                                                                        HALF_QUANT_BLOCK_SIZE).reshape(
+                                                                            BLOCK_M, HALF_BLOCK_N)
     else:
         # scales_fp32: [BLOCK_M, SCALE_BLOCK_N]
-        scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(
-            BLOCK_M, SCALE_BLOCK_N,
-            HALF_QUANT_BLOCK_SIZE).reshape(BLOCK_M, HALF_BLOCK_N)
+        scales_fp32 = scales_fp32.expand_dims(axis=2).broadcast_to(BLOCK_M, SCALE_BLOCK_N,
+                                                                   HALF_QUANT_BLOCK_SIZE).reshape(
+                                                                       BLOCK_M, HALF_BLOCK_N)
 
     if USE_ASM:
         x = x.to(tl.uint16)
@@ -362,8 +356,7 @@ def _unpack_fp4(
                 pack=1,
             )
             y1 = (y_packed >> 32).to(tl.uint32).to(tl.float32, bitcast=True)
-            y0 = (y_packed & 0x00000000FFFFFFFF).to(tl.uint32).to(tl.float32,
-                                                                bitcast=True)
+            y0 = (y_packed & 0x00000000FFFFFFFF).to(tl.uint32).to(tl.float32, bitcast=True)
         else:
             y_packed = tl.inline_asm_elementwise(
                 asm="""
@@ -376,8 +369,7 @@ def _unpack_fp4(
                 pack=1,
             )
             y1 = (y_packed >> 16).to(tl.uint16).to(tl.bfloat16, bitcast=True)
-            y0 = (y_packed & 0x0000FFFF).to(tl.uint16).to(tl.bfloat16,
-                                                        bitcast=True)
+            y0 = (y_packed & 0x0000FFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True)
     else:
         x0 = x & 0xF
         x1 = (x & 0xF0) >> 4
@@ -437,8 +429,7 @@ def _convert_to_mxfp4_kernel(
     offs_x = offs_m[:, None] * stride_xm + offs_xn[None, :] * stride_xn
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
 
-    tl.static_assert(x_ptr.type.element_ty == tl.float32
-                     or x_ptr.type.element_ty == tl.bfloat16)
+    tl.static_assert(x_ptr.type.element_ty == tl.float32 or x_ptr.type.element_ty == tl.bfloat16)
     x = tl.load(x_ptr + offs_x)
     scales = _calculate_scales(
         x,
@@ -514,8 +505,7 @@ def _convert_from_mxfp4_kernel(
     x = tl.load(x_ptr + offs_x)
     s = tl.load(s_ptr + offs_s)
 
-    tl.static_assert(y_ptr.type.element_ty == tl.float32
-                     or y_ptr.type.element_ty == tl.bfloat16)
+    tl.static_assert(y_ptr.type.element_ty == tl.float32 or y_ptr.type.element_ty == tl.bfloat16)
 
     y = _unpack_fp4(
         x,
@@ -551,22 +541,17 @@ def convert_to_mxfp4(
     ori_shape = data_hp.shape
     data_hp = data_hp.reshape(-1, ori_shape[-1])
     new_shape = (*ori_shape[:-1], ori_shape[-1] // 2)
-    data_lp = torch.empty(new_shape, dtype=torch.uint8,
-                          device=data_hp.device).reshape(-1, new_shape[-1])
+    data_lp = torch.empty(new_shape, dtype=torch.uint8, device=data_hp.device).reshape(-1, new_shape[-1])
     if is_2d_block:
-        scales_shape = (*ori_shape[:-2], ori_shape[-2] // block_size,
-                        ori_shape[-1] // block_size)
+        scales_shape = (*ori_shape[:-2], ori_shape[-2] // block_size, ori_shape[-1] // block_size)
     else:
         scales_shape = (*ori_shape[:-1], ori_shape[-1] // block_size)
-    scales = torch.ones(scales_shape,
-                         dtype=torch.uint8,
-                         device=data_hp.device).reshape(-1, scales_shape[-1])
+    scales = torch.ones(scales_shape, dtype=torch.uint8, device=data_hp.device).reshape(-1, scales_shape[-1])
     stride_xm, stride_xn = data_hp.stride()
     stride_ym, stride_yn = data_lp.stride()
     stride_sm, stride_sn = scales.stride()
     M, N = data_hp.shape
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),
-                         triton.cdiv(N, META["BLOCK_N"]))
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]), triton.cdiv(N, META["BLOCK_N"]))
     BLOCK_M = 64 if M >= 64 else M
     BLOCK_N = 64 if N >= 64 else N
 
@@ -594,8 +579,7 @@ def convert_to_mxfp4(
         USE_ASM=use_asm,
     )
 
-    return data_lp.reshape(new_shape).transpose(
-        axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
+    return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
 
 
 @triton_op("torchtitan::convert_from_mxfp4", mutates_args={})
@@ -619,15 +603,13 @@ def convert_from_mxfp4(
     orig_shape = (*orig_shape[:-1], orig_shape[-1] * 2)
 
     scales = scales.reshape(-1, orig_shape[-1] // block_size)
-    data_hp = data_lp.new_empty(orig_shape, dtype=output_dtype).reshape(
-        -1, orig_shape[-1])
+    data_hp = data_lp.new_empty(orig_shape, dtype=output_dtype).reshape(-1, orig_shape[-1])
 
     stride_xm, stride_xn = data_lp.stride()
     stride_ym, stride_yn = data_hp.stride()
     stride_sm, stride_sn = scales.stride()
     M, N = data_hp.shape
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),
-                         triton.cdiv(N, META["BLOCK_N"]))
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]), triton.cdiv(N, META["BLOCK_N"]))
     BLOCK_M = 64 if M >= 64 else M
     BLOCK_N = 64 if N >= 64 else N
     wrap_triton(_convert_from_mxfp4_kernel)[grid](
@@ -664,8 +646,7 @@ def _fake_convert_to_mxfp4(
     new_shape = (*orig_shape[:-1], orig_shape[-1] // 2)
     data_lp = data_hp.new_empty(new_shape, dtype=torch.uint8)
     if is_2d_block:
-        scales_shape = (*orig_shape[:-2], orig_shape[-2] // block_size,
-                        orig_shape[-1] // block_size)
+        scales_shape = (*orig_shape[:-2], orig_shape[-2] // block_size, orig_shape[-1] // block_size)
     else:
         scales_shape = (*orig_shape[:-1], orig_shape[-1] // block_size)
 

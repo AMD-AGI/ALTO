@@ -7,7 +7,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause AND MIT
 
-
 import triton
 import triton.language as tl
 

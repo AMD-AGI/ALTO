@@ -18,7 +18,6 @@ from alto.utils.pytorch.helpers import (
     tensor_sparsity,
 )
 
-
 __ALL__ = [
     "tensor_follows_mask_structure",
     "infer_sparsity_structure_from_modifiers",
@@ -28,8 +27,7 @@ __ALL__ = [
 ]
 
 
-def tensor_follows_mask_structure(tensor: torch.Tensor,
-                                  mask: str = "2:4") -> bool:
+def tensor_follows_mask_structure(tensor: torch.Tensor, mask: str = "2:4") -> bool:
     """
     :param tensor: tensor to check
     :param mask: mask structure to check for, in the format "n:m", also accepts
@@ -89,8 +87,7 @@ def infer_sparsity_structure_from_model(model: torch.nn.Module) -> str | None:
         offloaded_params = get_state_dict_offloaded_model(model)
 
         linear_modules_with_sparsity_structure = [
-            tensor_follows_mask_structure(offloaded_params[f"{name}.weight"])
-            for name in tqdm(
+            tensor_follows_mask_structure(offloaded_params[f"{name}.weight"]) for name in tqdm(
                 linear_modules.keys(),
                 desc="Checking whether model follows "
                 f"{sparsity_structure} sparsity structure",
@@ -100,8 +97,7 @@ def infer_sparsity_structure_from_model(model: torch.nn.Module) -> str | None:
         # we can assume that the model follows the sparsity structure
         # (taking into consideration the fact that some Linear layers like the
         # embedding layer might not be sparse)
-        if (sum(linear_modules_with_sparsity_structure)
-                > len(linear_modules_with_sparsity_structure) * 0.8):
+        if (sum(linear_modules_with_sparsity_structure) > len(linear_modules_with_sparsity_structure) * 0.8):
             return sparsity_structure
 
     return None
@@ -134,9 +130,7 @@ def infer_sparse_targets_and_ignores(
     )
 
 
-def is_sparse_compression_target(module: torch.nn.Module,
-                                 sparsity_threshold: float,
-                                 sparsity_structure: str) -> bool:
+def is_sparse_compression_target(module: torch.nn.Module, sparsity_threshold: float, sparsity_structure: str) -> bool:
     """
     :param module: module to check
     :param sparsity_threshold: threshold for sparsity
@@ -145,17 +139,14 @@ def is_sparse_compression_target(module: torch.nn.Module,
         i.e True if it is sparse and follows the sparsity structure, else False
     """
     with align_module_device(module):
-        result = (hasattr(module, "weight") and
-                  tensor_sparsity(module.weight) >= sparsity_threshold and
-                  tensor_follows_mask_structure(tensor=module.weight,
-                                                mask=sparsity_structure))
+        result = (hasattr(module, "weight") and tensor_sparsity(module.weight) >= sparsity_threshold and
+                  tensor_follows_mask_structure(tensor=module.weight, mask=sparsity_structure))
 
     return result
 
 
-def _get_sparse_targets_ignore_dicts(
-    module: torch.nn.Module, sparsity_structure: str, sparsity_threshold: float
-) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+def _get_sparse_targets_ignore_dicts(module: torch.nn.Module, sparsity_structure: str,
+                                     sparsity_threshold: float) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """
     Get sparse targets and ignore dictionaries
 
@@ -179,9 +170,8 @@ def _get_sparse_targets_ignore_dicts(
     return exhaustive_targets, exhaustive_ignore
 
 
-def _reduce_targets_and_ignores_into_lists(
-        exhaustive_targets: dict[str, list[str]],
-        exhaustive_ignore: dict[str, list[str]]) -> tuple[list[str], list[str]]:
+def _reduce_targets_and_ignores_into_lists(exhaustive_targets: dict[str, list[str]],
+                                           exhaustive_ignore: dict[str, list[str]]) -> tuple[list[str], list[str]]:
     """
     Reduces the targets and ignores dictionaries into lists
 
@@ -193,8 +183,7 @@ def _reduce_targets_and_ignores_into_lists(
     """
 
     targets, ignore = [], []
-    all_submodule_types = set(exhaustive_targets.keys()).union(
-        set(exhaustive_ignore.keys()))
+    all_submodule_types = set(exhaustive_targets.keys()).union(set(exhaustive_ignore.keys()))
     for submodule_type in all_submodule_types:
         curr_targets = exhaustive_targets.get(submodule_type, [])
         curr_ignores = exhaustive_ignore.get(submodule_type, [])

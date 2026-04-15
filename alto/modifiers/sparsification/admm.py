@@ -88,9 +88,7 @@ class AdmmModifier(SparsityModifierBase):
             num_samples = observer.num_samples
 
             logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
-            assert isinstance(
-                observer, HessianObserver
-            ), "ADMMModifier requires hessian observer"
+            assert isinstance(observer, HessianObserver), "ADMMModifier requires hessian observer"
             sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
                 hessian=observer.stats,
@@ -137,36 +135,36 @@ class AdmmModifier(SparsityModifierBase):
         # Dampening for numerical stability
         rho0 = self.dampening_frac * torch.diag(H).mean()
         diag = torch.arange(num_columns, device=H.device)
-        H[diag,diag] += rho0
+        H[diag, diag] += rho0
 
         # ADMM: (H + rho*I) W = G + rho*(Z - U) => W = (H+rho*I)^{-1} (G + rho*(Z-U)); precompute Hinv
         rho = self.admm_rho
         G = H.matmul(W)
-        H[diag,diag] += rho
+        H[diag, diag] += rho
         Hinv = torch.inverse(H)
-        U = torch.zeros_like(W)   # dual variable
+        U = torch.zeros_like(W)  # dual variable
 
         for iter in range(self.admm_iterations):
             # Progressive sparsity: cur_sparsity increases from 0 toward target over admm_pruning_granularity iters (cubic schedule)
             if prune_n != 0:
                 sparsity = 0.5
-                cur_sparsity = sparsity - sparsity * (1 - (iter + 1) / self.admm_pruning_granularity) ** 3
+                cur_sparsity = sparsity - sparsity * (1 - (iter + 1) / self.admm_pruning_granularity)**3
                 # N:M mask: reshape to blocks of size prune_m, keep prune_n largest (by |W+U|) per block
                 WT = (W + U).T.reshape((W.shape[1] * W.shape[0] // prune_m, prune_m)).abs()
                 W_mask = torch.zeros(WT.shape, dtype=torch.bool, device=W.device)
                 sort_inds = WT.sort(dim=1)[1]
                 for i in range(prune_m - prune_n, prune_m):
-                    W_mask[torch.arange(WT.shape[0]), sort_inds[:,i]] = 1
+                    W_mask[torch.arange(WT.shape[0]), sort_inds[:, i]] = 1
                 W_mask = W_mask.reshape(W.T.shape).T
             else:
                 # Unstructured: initial mask = keep (1-sparsity) fraction smallest entries zeroed
-                cur_sparsity = sparsity - sparsity * (1 - (iter + 1) / self.admm_pruning_granularity) ** 3
+                cur_sparsity = sparsity - sparsity * (1 - (iter + 1) / self.admm_pruning_granularity)**3
                 topk = torch.topk((W + U).abs().flatten(), k=int(W.numel() * sparsity), largest=False)
                 W_mask = torch.ones(W.numel(), dtype=torch.bool, device=W.device)
                 W_mask[topk.indices] = 0
                 W_mask = W_mask.reshape(W.shape)
                 del topk
-            
+
             # Refine mask by kth-value threshold: keep entries with |W+U| >= kth largest so that exactly cur_sparsity fraction are nonzero
             local_Z = (W + U).abs()
             local_Z[W_mask] = torch.inf

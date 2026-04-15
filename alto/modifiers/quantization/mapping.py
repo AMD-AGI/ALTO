@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
 # SPDX-License-Identifier: MIT
-
 """
 Shared utilities for mapping resolution between smooth layers and balance layers.
 Used by SmoothQuant and AWQ modifiers to identify which normalization layers
@@ -84,10 +83,8 @@ def resolve_mappings(
                         break
 
             if not balance_modules:
-                logger.warning(
-                    f"SmoothQuant/AWQ: no balance layers found for "
-                    f"{smooth_name}, skipping"
-                )
+                logger.warning(f"SmoothQuant/AWQ: no balance layers found for "
+                               f"{smooth_name}, skipping")
                 continue
 
             resolved.append(
@@ -96,8 +93,7 @@ def resolve_mappings(
                     smooth_layer=smooth_module,
                     balance_layers=balance_modules,
                     balance_names=balance_names,
-                )
-            )
+                ))
 
     return resolved
 
@@ -126,5 +122,5 @@ def _get_block_prefix(name: str) -> str:
     parts = name.split(".")
     for i, part in enumerate(parts):
         if part.isdigit():
-            return ".".join(parts[: i + 1])
+            return ".".join(parts[:i + 1])
     return ""

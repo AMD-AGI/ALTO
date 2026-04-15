@@ -73,9 +73,8 @@ def llama3_debugmodel_opt() -> Trainer.Config:
 def llama3_debugmodel_lpt() -> Trainer.Config:
     config = llama3_debugmodel()
     config.training.steps = 10
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)
-    ],)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config
 
 
@@ -115,9 +114,8 @@ def llama3_1b_opt() -> Trainer.Config:
 def llama3_1b_lpt() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1000
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)
-    ],)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config
 
 
@@ -158,18 +156,17 @@ def llama3_8b_opt() -> Trainer.Config:
 def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1000
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)
-    ],)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config
+
 
 def llama3_1b_gptq() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/gptq_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/gptq_recipe.yaml",),
     ],)
     return config
 
@@ -179,8 +176,7 @@ def llama3_1b_awq() -> Trainer.Config:
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/awq_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/awq_recipe.yaml",),
     ],)
     return config
 
@@ -204,8 +200,7 @@ def llama3_8b() -> Trainer.Config:
     config.checkpoint.initial_load_path = LLAMA3_8B_PATH
     config.checkpoint.initial_load_in_hf = True
     config.validator.enable = True
-    config.validator.dataloader = HuggingFaceTextDataLoader.Config(
-        dataset="wikitext_test")
+    config.validator.dataloader = HuggingFaceTextDataLoader.Config(dataset="wikitext_test")
     config.validator.freq = 10
     config.validator.steps = 10
     config.debug.seed = 1234
@@ -218,18 +213,17 @@ def llama3_8b_gptq() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/gptq_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/gptq_recipe.yaml",),
     ],)
     return config
+
 
 def llama3_8b_rtn() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/rtn_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/rtn_recipe.yaml",),
     ],)
     return config
 
@@ -239,8 +233,7 @@ def llama3_8b_awq() -> Trainer.Config:
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/awq_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/awq_recipe.yaml",),
     ],)
     return config
 
@@ -255,8 +248,7 @@ def llama3_8b_wanda() -> Trainer.Config:
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/wanda_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/wanda_recipe.yaml",),
     ],)
     return config
 
@@ -267,8 +259,7 @@ def llama3_8b_sparsegpt() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/sparsegpt_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/sparsegpt_recipe.yaml",),
     ],)
     return config
 
@@ -278,8 +269,7 @@ def llama3_8b_magnitude() -> Trainer.Config:
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/magnitude_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/magnitude_recipe.yaml",),
     ],)
     return config
 
@@ -290,8 +280,7 @@ def llama3_8b_admm() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/admm_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/admm_recipe.yaml",),
     ],)
     return config
 
@@ -302,8 +291,7 @@ def llama3_8b_alps() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/alps_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/alps_recipe.yaml",),
     ],)
     return config
 
@@ -318,8 +306,7 @@ def llama3_8b_wanda_structured() -> Trainer.Config:
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/wanda_structured_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/wanda_structured_recipe.yaml",),
     ],)
     return config
 
@@ -330,8 +317,7 @@ def llama3_8b_obs() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/obs_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/obs_recipe.yaml",),
     ],)
     return config
 
@@ -342,8 +328,7 @@ def llama3_8b_admm_structured() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/admm_structured_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/admm_structured_recipe.yaml",),
     ],)
     return config
 
@@ -353,8 +338,7 @@ def llama3_8b_cosine_similarity() -> Trainer.Config:
     config.training.steps = 1
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(
-            recipe="./alto/models/llama3/configs/cosine_similarity_recipe.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/cosine_similarity_recipe.yaml",),
     ],)
     return config
 
@@ -399,7 +383,6 @@ def instella_3b_opt() -> Trainer.Config:
 def instella_3b_lpt() -> Trainer.Config:
     config = instella_3b()
     config.training.steps = 1000
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)
-    ],)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config

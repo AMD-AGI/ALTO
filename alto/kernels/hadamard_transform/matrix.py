@@ -16,7 +16,6 @@
 from enum import Enum
 import torch
 
-
 __all__ = ["TransformLocation", "apply_transform_weight", "multihead_matmul"]
 
 
@@ -124,9 +123,7 @@ def apply_transform_weight(
         elif location == TransformLocation.OUTPUT:
             return multihead_matmul(value, transform_weight)
 
-    raise NotImplementedError(
-        f"Applying transforms to {module_type} {location} is not supported"
-    )
+    raise NotImplementedError(f"Applying transforms to {module_type} {location} is not supported")
 
 
 def multihead_matmul(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:

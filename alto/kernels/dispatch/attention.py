@@ -3,8 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import torch
-from torchtitan.models.common.attention import (
-    ScaledDotProductAttentionWrapper)
+from torchtitan.models.common.attention import (ScaledDotProductAttentionWrapper)
 
 from alto.kernels.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
 from .config import TrainingOpConfig

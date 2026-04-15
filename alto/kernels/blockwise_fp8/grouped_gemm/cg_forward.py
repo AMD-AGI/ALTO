@@ -69,8 +69,7 @@ def _kernel_cg_persistent_forward(
         # Group size (for aligned loads)
         GROUP_SIZE_M: tl.constexpr = 128,
         SUPER_GROUP_M: tl.constexpr = 32,  # 32 works best
-        USE_FP8: tl.
-    constexpr = False,  # use FP8 blockwise quantization proposed by DeepSeek-V3
+        USE_FP8: tl.constexpr = False,  # use FP8 blockwise quantization proposed by DeepSeek-V3
 ):
     """
     Contiguous Grouped GEMM kernel forward.
@@ -93,9 +92,7 @@ def _kernel_cg_persistent_forward(
 
     for tile_id in tl.range(start_pid, num_tiles, NUM_SMS):
 
-        tile_m_idx, tile_n_idx = _compute_pid(
-            tile_id, num_pid_in_group, num_pid_m, SUPER_GROUP_M
-        )
+        tile_m_idx, tile_n_idx = _compute_pid(tile_id, num_pid_in_group, num_pid_m, SUPER_GROUP_M)
 
         # starting indices for this tile
         m_start = tile_m_idx * BLOCK_SIZE_M
@@ -131,17 +128,14 @@ def _kernel_cg_persistent_forward(
                 a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
                 # Load expert weights (B) for the expert assigned to this block
-                b_ptrs = (
-                    b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :]
-                )
+                b_ptrs = (b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :])
                 b = tl.load(b_ptrs, mask=mask_b, other=0.0)
                 ab = tl.dot(a, b.T)
 
                 if USE_FP8:
                     a_s_ptrs = a_s_ptr + offs_m * b_s_k + ki
                     a_scale = tl.load(a_s_ptrs, mask=mask_m, other=1.0)
-                    b_s_ptrs = b_s_ptr + expert_idx * b_s_n * b_s_k + (
-                        offs_n // BLOCK_SIZE_K) * b_s_k + ki
+                    b_s_ptrs = b_s_ptr + expert_idx * b_s_n * b_s_k + (offs_n // BLOCK_SIZE_K) * b_s_k + ki
                     b_scale = tl.load(b_s_ptrs, mask=mask_n, other=1.0)
                     ab = ab * a_scale[:, None] * b_scale[None, :]
 
@@ -149,9 +143,7 @@ def _kernel_cg_persistent_forward(
                 accumulator += ab
 
             tile_id_c += NUM_SMS
-            tile_m_idx, tile_n_idx = _compute_pid(
-                tile_id_c, num_pid_in_group, num_pid_m, SUPER_GROUP_M
-            )
+            tile_m_idx, tile_n_idx = _compute_pid(tile_id_c, num_pid_in_group, num_pid_m, SUPER_GROUP_M)
 
             offs_m = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_n = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -269,17 +261,16 @@ def _kernel_cg_forward_aligned(
 
 # =============== End Triton Kernel for CGGEMM ===============
 
-
 # =============== Forward Wrapper for CGGEMM =================
 
 
 @triton_op("torchtitan::cg_grouped_gemm_forward", mutates_args={})
 def cg_grouped_gemm_forward(
-    inputs: torch.Tensor,  # [M_bufferlen, K]
-    expert_weights: torch.Tensor,  # [num_experts, N, K]
-    expert_indices: torch.Tensor,  # [M_total]
-    input_scales: torch.Tensor | None = None,  # [M_bufferlen, K // block_size] or None
-    weight_scales: torch.Tensor | None = None,  # [num_experts, N // block_size, K // block_size] or None
+        inputs: torch.Tensor,  # [M_bufferlen, K]
+        expert_weights: torch.Tensor,  # [num_experts, N, K]
+        expert_indices: torch.Tensor,  # [M_total]
+        input_scales: torch.Tensor | None = None,  # [M_bufferlen, K // block_size] or None
+        weight_scales: torch.Tensor | None = None,  # [num_experts, N // block_size, K // block_size] or None
 ) -> torch.Tensor:
     """
     contiguous grouped GEMM forward pass for MoE.
@@ -303,9 +294,7 @@ def cg_grouped_gemm_forward(
     M_total = expert_indices.shape[0]
     torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
-    assert (
-        M_total % ALIGN_SIZE_M == 0
-    ), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
+    assert (M_total % ALIGN_SIZE_M == 0), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
 
     # Convert expert_indices to int32 if needed
     if expert_indices.dtype != torch.int32:
@@ -321,9 +310,7 @@ def cg_grouped_gemm_forward(
     # ), f"Expert indices length ({expert_indices.shape[0]}) must match M_total ({M_total})"
 
     # Create output tensor
-    output = torch.zeros((M_bufferlen, N),
-                         device=inputs.device,
-                         dtype=torch_dtype)
+    output = torch.zeros((M_bufferlen, N), device=inputs.device, dtype=torch_dtype)
 
     # Calculate grid size for the kernel
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
@@ -353,15 +340,14 @@ def cg_grouped_gemm_forward(
 
     return output
 
+
 @cg_grouped_gemm_forward.register_fake
 def cg_grouped_gemm_forward_fake(
-    inputs: torch.Tensor,  # [M_bufferlen, K]
-    expert_weights: torch.Tensor,  # [num_experts, N, K]
-    expert_indices: torch.Tensor,  # [M_total]
-    a_scales: torch.Tensor
-    | None = None,  # [M_bufferlen, K // block_size] or None
-    b_scales: torch.Tensor
-    | None = None,  # [num_experts, N // block_size, K // block_size] or None
+        inputs: torch.Tensor,  # [M_bufferlen, K]
+        expert_weights: torch.Tensor,  # [num_experts, N, K]
+        expert_indices: torch.Tensor,  # [M_total]
+        a_scales: torch.Tensor | None = None,  # [M_bufferlen, K // block_size] or None
+        b_scales: torch.Tensor | None = None,  # [num_experts, N // block_size, K // block_size] or None
 ) -> torch.Tensor:
     """
     Fake function for cg_grouped_gemm_forward.
@@ -369,16 +355,14 @@ def cg_grouped_gemm_forward_fake(
     """
     M_bufferlen, _ = inputs.shape
     _, N, _ = expert_weights.shape
-    return torch.zeros((M_bufferlen, N),
-                       dtype=torch_dtype,
-                       device=inputs.device)
+    return torch.zeros((M_bufferlen, N), dtype=torch_dtype, device=inputs.device)
 
 
 @triton_op("torchtitan::cg_grouped_gemm_forward_dynamic", mutates_args={})
 def cg_grouped_gemm_forward_dynamic(
-    inputs: torch.Tensor,  # [M_total, K]
-    expert_weights: torch.Tensor,  # [num_experts, N, K]
-    expert_indices: torch.Tensor,  # [M_total]
+        inputs: torch.Tensor,  # [M_total, K]
+        expert_weights: torch.Tensor,  # [num_experts, N, K]
+        expert_indices: torch.Tensor,  # [M_total]
 ) -> torch.Tensor:
     """
     contiguous grouped GEMM forward pass for MoE.
@@ -400,9 +384,7 @@ def cg_grouped_gemm_forward_dynamic(
 
     # Check if inputs are properly aligned
     M_total, K = inputs.shape
-    assert (
-        M_total % ALIGN_SIZE_M == 0
-    ), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
+    assert (M_total % ALIGN_SIZE_M == 0), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
     # assert (
     #    expert_indices.shape[0] == M_total // group_size_m
     # ), "Expert indices length must match number of groups"
@@ -416,18 +398,13 @@ def cg_grouped_gemm_forward_dynamic(
 
     # Validate dimensions
     assert K == K_weights, f"Input K ({K}) must match weight K ({K_weights})"
-    assert (
-        expert_indices.shape[0] == M_total
-    ), "Expert indices length must match M_total"
+    assert (expert_indices.shape[0] == M_total), "Expert indices length must match M_total"
 
     # Create output tensor
     output = torch.empty((M_total, N), device=inputs.device, dtype=inputs.dtype)
 
     # Calculate grid size for the kernel
-    grid = lambda meta: (
-        triton.cdiv(M_total, meta["BLOCK_SIZE_M"])
-        * triton.cdiv(N, meta["BLOCK_SIZE_N"]),
-    )
+    grid = lambda meta: (triton.cdiv(M_total, meta["BLOCK_SIZE_M"]) * triton.cdiv(N, meta["BLOCK_SIZE_N"]),)
 
     # Launch kernel
     wrap_triton(_kernel_cg_forward_aligned)[grid](
@@ -447,9 +424,9 @@ def cg_grouped_gemm_forward_dynamic(
 
 @cg_grouped_gemm_forward_dynamic.register_fake
 def cg_grouped_gemm_forward_dynamic_fake(
-    inputs: torch.Tensor,  # [M_total, K]
-    expert_weights: torch.Tensor,  # [num_experts, N, K]
-    expert_indices: torch.Tensor,  # [M_total]
+        inputs: torch.Tensor,  # [M_total, K]
+        expert_weights: torch.Tensor,  # [num_experts, N, K]
+        expert_indices: torch.Tensor,  # [M_total]
 ) -> torch.Tensor:
     """
     Fake function for cg_grouped_gemm_forward_dynamic.
@@ -496,14 +473,11 @@ def cg_grouped_gemm(
     if expert_indices.dtype != torch.int32:
         expert_indices = expert_indices.to(torch.int32)
 
-    return ContiguousGroupedGEMM.apply(
-        inputs, expert_weights, expert_indices
-    )
+    return ContiguousGroupedGEMM.apply(inputs, expert_weights, expert_indices)
 
 
 # Example usage and verify correctness:
 # Use debug.py
-
 
 # if __name__ == "__main__":
 #   test_contiguous_grouped_gemm()

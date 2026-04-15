@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/sparsification/sparsegpt/base.py
 
-
 import re
 
 import torch
@@ -114,9 +113,7 @@ class CosineSimilarityModifier(PruningModifierBase):
         bi_matrix = self._compute_bi_matrix(layer_activations, total_layers)
 
         # Find layers to prune using greedy search
-        self._layers_to_prune = self._find_toprune_layers(
-            bi_matrix, total_layers, num_layers_to_prune
-        )
+        self._layers_to_prune = self._find_toprune_layers(bi_matrix, total_layers, num_layers_to_prune)
         logger.info(f"Layers to prune (indices): {self._layers_to_prune}")
 
         # Remove layers from each model part
@@ -160,9 +157,7 @@ class CosineSimilarityModifier(PruningModifierBase):
         for i_pos, i in enumerate(sorted_indices):
             for j_pos in range(i_pos + 1, len(sorted_indices)):
                 j = sorted_indices[j_pos]
-                bi_matrix[i][j] = self._compute_bi(
-                    layer_activations[i], layer_activations[j]
-                )
+                bi_matrix[i][j] = self._compute_bi(layer_activations[i], layer_activations[j])
                 logger.info(f"BI[{i}][{j}] = {bi_matrix[i][j]:.6f}")
 
         return bi_matrix
@@ -217,10 +212,8 @@ class CosineSimilarityModifier(PruningModifierBase):
                             best_prune = candidate
 
             if not best_prune:
-                logger.warning(
-                    f"Could not find more layers to prune, "
-                    f"stopping at {len(result)} of {num_layers_to_prune}"
-                )
+                logger.warning(f"Could not find more layers to prune, "
+                               f"stopping at {len(result)} of {num_layers_to_prune}")
                 break
 
             result.extend(best_prune)
@@ -240,10 +233,8 @@ class CosineSimilarityModifier(PruningModifierBase):
         :param layers_to_prune: list of layer indices to remove
         """
         if not hasattr(model, 'layers'):
-            logger.warning(
-                f"Model {type(model).__name__} has no 'layers' attribute, "
-                f"skipping removal."
-            )
+            logger.warning(f"Model {type(model).__name__} has no 'layers' attribute, "
+                           f"skipping removal.")
             return
 
         last_layer_idx = max(int(k) for k in model.layers.keys())
@@ -276,9 +267,7 @@ class CosineSimilarityModifier(PruningModifierBase):
             model.config.n_layers = new_n_layers
         if hasattr(model, "n_layers"):
             model.n_layers = new_n_layers
-        logger.info(
-            f"Model now has {new_n_layers} layers "
-            f"(pruned {len(layers_to_prune)} layers)"
-        )
+        logger.info(f"Model now has {new_n_layers} layers "
+                    f"(pruned {len(layers_to_prune)} layers)")
 
         torch.cuda.empty_cache()

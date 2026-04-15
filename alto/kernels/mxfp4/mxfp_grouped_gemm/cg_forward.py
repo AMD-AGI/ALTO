@@ -7,7 +7,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause AND MIT
 
-
 import torch
 from torch.library import triton_op, wrap_triton
 import triton
@@ -110,9 +109,7 @@ def _kernel_mxfp4_grouped_gemm_forward(
 
     for tile_id in tl.range(start_pid, num_tiles, NUM_SMS):
 
-        tile_m_idx, tile_n_idx = _compute_pid(
-            tile_id, num_pid_in_group, num_pid_m, SUPER_GROUP_M
-        )
+        tile_m_idx, tile_n_idx = _compute_pid(tile_id, num_pid_in_group, num_pid_m, SUPER_GROUP_M)
 
         # starting indices for this tile
         m_start = tile_m_idx * BLOCK_SIZE_M
@@ -137,8 +134,7 @@ def _kernel_mxfp4_grouped_gemm_forward(
             for ki in range(k_tiles):
 
                 # Offsets for K dim
-                offs_k_pack = ki * PACKED_BLOCK_SIZE_K + tl.arange(
-                    0, PACKED_BLOCK_SIZE_K)
+                offs_k_pack = ki * PACKED_BLOCK_SIZE_K + tl.arange(0, PACKED_BLOCK_SIZE_K)
                 offs_k_scale = ki * n_rep_k + tl.arange(0, n_rep_k)
                 mask_k_scale = offs_k_scale < Ks
 
@@ -160,23 +156,17 @@ def _kernel_mxfp4_grouped_gemm_forward(
                 a = tl.load(a_ptrs, mask=mask_a, other=0)
 
                 # Load expert weights (B) for the expert assigned to this block
-                b_ptrs = (b_ptr + expert_idx * stride_be +
-                          offs_n[None, :] * stride_bn +
+                b_ptrs = (b_ptr + expert_idx * stride_be + offs_n[None, :] * stride_bn +
                           offs_k_pack[:, None] * stride_bk)
                 b = tl.load(b_ptrs, mask=mask_b, other=0)
 
-                a_s_ptrs = a_s_ptr + offs_m_scale[:, None] * stride_asm + offs_k_scale[
-                    None, :] * stride_ask
+                a_s_ptrs = a_s_ptr + offs_m_scale[:, None] * stride_asm + offs_k_scale[None, :] * stride_ask
                 # B scales are N x K even though B operand is K x N.
                 b_s_ptrs = b_s_ptr + expert_idx * stride_bse + offs_n_scale[:, None] * stride_bsn + offs_k_scale[
                     None, :] * stride_bsk
 
-                a_s = tl.load(a_s_ptrs,
-                              mask=mask_m[:, None] & mask_k_scale[None, :],
-                              other=1)
-                b_s = tl.load(b_s_ptrs,
-                              mask=mask_n[:, None] & mask_k_scale[None, :],
-                              other=1)
+                a_s = tl.load(a_s_ptrs, mask=mask_m[:, None] & mask_k_scale[None, :], other=1)
+                b_s = tl.load(b_s_ptrs, mask=mask_n[:, None] & mask_k_scale[None, :], other=1)
                 accumulator += tl.dot_scaled(a,
                                              a_s,
                                              "e2m1",
@@ -188,9 +178,7 @@ def _kernel_mxfp4_grouped_gemm_forward(
                                              out_dtype=tl.float32)
 
             tile_id_c += NUM_SMS
-            tile_m_idx, tile_n_idx = _compute_pid(
-                tile_id_c, num_pid_in_group, num_pid_m, SUPER_GROUP_M
-            )
+            tile_m_idx, tile_n_idx = _compute_pid(tile_id_c, num_pid_in_group, num_pid_m, SUPER_GROUP_M)
 
             offs_m = tile_m_idx * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             offs_n = tile_n_idx * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -201,8 +189,7 @@ def _kernel_mxfp4_grouped_gemm_forward(
             mask_c = mask_m[:, None] & mask_n[None, :]
 
             # Store output (C) with bounds checking
-            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[
-                None, :] * stride_cn
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
             tl.store(c_ptrs, accumulator.to(c_type), mask=mask_c)
 
 
@@ -244,9 +231,7 @@ def mxfp4_grouped_gemm_forward(
     M_total = expert_indices.shape[0]
     torch._check(M_total > 0)
     torch._check(M_total % ALIGN_SIZE_M == 0)
-    assert (
-        M_total % ALIGN_SIZE_M == 0
-    ), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
+    assert (M_total % ALIGN_SIZE_M == 0), f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
 
     # Convert expert_indices to int32 if needed
     if expert_indices.dtype != torch.int32:
@@ -271,9 +256,7 @@ def mxfp4_grouped_gemm_forward(
     # ), f"Expert indices length ({expert_indices.shape[0]}) must match M_total ({M_total})"
 
     # Create output tensor
-    output = torch.zeros((M_bufferlen, N),
-                         device=inputs.device,
-                         dtype=output_dtype)
+    output = torch.zeros((M_bufferlen, N), device=inputs.device, dtype=output_dtype)
 
     stride_am, stride_ak = inputs.stride()
     stride_asm, stride_ask = input_scales.stride()

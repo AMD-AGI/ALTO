@@ -45,8 +45,7 @@ class LogitsDistillationLoss(Loss):
         self._temperature: float = temperature
         self._reduction: str = reduction
 
-    def forward(self, logits_s: torch.Tensor,
-                logits_t: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits_s: torch.Tensor, logits_t: torch.Tensor) -> torch.Tensor:
         """Compute KD loss on student and teacher logits.
 
         Args:
@@ -63,9 +62,7 @@ class LogitsDistillationLoss(Loss):
         soft_log_probs = soft_log_probs.view(-1, soft_log_probs.size(-1))
         soft_targets = soft_targets.view(-1, soft_targets.size(-1))
 
-        kd_loss = F.kl_div(soft_log_probs,
-                           soft_targets.detach(),
-                           reduction=self._reduction)
+        kd_loss = F.kl_div(soft_log_probs, soft_targets.detach(), reduction=self._reduction)
 
         # Since the magnitudes of the gradients produced by the soft logits scale as 1/(T^2),
         # multiplying them by T^2 ensures that the relative contributions of the logits
@@ -81,10 +78,7 @@ class MFTLoss(Loss):
     This function implements the distillation loss found in the paper: https://arxiv.org/abs/2506.15702.
     """
 
-    def __init__(self,
-                 temperature: float = 1.0,
-                 threshold: float = 0.2,
-                 reduction: str = "batchmean"):
+    def __init__(self, temperature: float = 1.0, threshold: float = 0.2, reduction: str = "batchmean"):
         """Constructor.
 
         Args:
@@ -100,8 +94,7 @@ class MFTLoss(Loss):
         self._reduction: str = reduction
         self._threshold: float = threshold
 
-    def forward(self, logits_s: torch.Tensor, logits_t: torch.Tensor,
-                labels: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits_s: torch.Tensor, logits_t: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Compute KD loss on student and teacher logits.
 
         Args:
@@ -113,20 +106,19 @@ class MFTLoss(Loss):
 
             Assumes class logits dimension is last.
         """
-        soft_log_probs = F.log_softmax(logits_s / self._temperature,
-                                       dim=-1)  # (B, ..., C)
-        soft_log_probs = soft_log_probs.view(
-            -1, soft_log_probs.size(-1))  # (new B, C)
+        soft_log_probs = F.log_softmax(logits_s / self._temperature, dim=-1)  # (B, ..., C)
+        soft_log_probs = soft_log_probs.view(-1, soft_log_probs.size(-1))  # (new B, C)
 
         target_logits: torch.Tensor = logits_t / self._temperature  # (B, ..., C)
-        target_logits = target_logits.view(-1,
-                                           target_logits.size(-1))  # (new B, C)
-        soft_targets = self._prepare_corrected_distributions(
-            target_logits, labels, self._threshold, apply_threshold_to_all=True)
+        target_logits = target_logits.view(-1, target_logits.size(-1))  # (new B, C)
+        soft_targets = self._prepare_corrected_distributions(target_logits,
+                                                             labels,
+                                                             self._threshold,
+                                                             apply_threshold_to_all=True)
 
         kd_loss = F.kl_div(
-            soft_log_probs, soft_targets.detach(), reduction=self._reduction
-        )  # shape depends on reduction; "batchmean" would result in a scalar (1,)
+            soft_log_probs, soft_targets.detach(),
+            reduction=self._reduction)  # shape depends on reduction; "batchmean" would result in a scalar (1,)
 
         # Since the magnitudes of the gradients produced by the soft logits scale as 1/(T^2),
         # multiplying them by T^2 ensures that the relative contributions of the logits
@@ -157,8 +149,7 @@ class MFTLoss(Loss):
         """
         # Ensure logits is a 2D tensor and labels is a 1D tensor
         if logits.dim() != 2 or labels.dim() != 1:
-            raise ValueError(
-                "Logits must be a 2D tensor and labels must be a 1D tensor.")
+            raise ValueError("Logits must be a 2D tensor and labels must be a 1D tensor.")
         # logits: (batch, channels)
         # labels: (batch)
         distribution = F.softmax(logits, dim=-1)  # (batch, channels)
@@ -166,31 +157,22 @@ class MFTLoss(Loss):
         argmax = distribution.argmax(dim=-1)  # (batch,)
         incorrect_argmax = argmax != labels  # (batch,)
 
-        p_argmax = torch.gather(distribution, 1,
-                                argmax.unsqueeze(1)).squeeze(1)  # (batch,)
-        p_label = torch.gather(distribution, 1,
-                               labels.unsqueeze(1)).squeeze(1)  # (batch,)
+        p_argmax = torch.gather(distribution, 1, argmax.unsqueeze(1)).squeeze(1)  # (batch,)
+        p_label = torch.gather(distribution, 1, labels.unsqueeze(1)).squeeze(1)  # (batch,)
 
         # correction of the distribution at the tokens where the argmax is incorrect
-        mixin_factor = (p_argmax - p_label + threshold) / (
-            1 + p_argmax - p_label + 1e-7)  # (batch,)
-        adjusted_incorrect_distribution = distribution * (
-            1 - mixin_factor.unsqueeze(1))  # (batch, channels)
-        _ = adjusted_incorrect_distribution.scatter_add_(
-            1, labels.unsqueeze(1),
-            mixin_factor.unsqueeze(1))  # (batch, channels)
+        mixin_factor = (p_argmax - p_label + threshold) / (1 + p_argmax - p_label + 1e-7)  # (batch,)
+        adjusted_incorrect_distribution = distribution * (1 - mixin_factor.unsqueeze(1))  # (batch, channels)
+        _ = adjusted_incorrect_distribution.scatter_add_(1, labels.unsqueeze(1),
+                                                         mixin_factor.unsqueeze(1))  # (batch, channels)
 
         if apply_threshold_to_all:
             # correction of the distribution at the tokens where the argmax is correct but
             #  the separation may not be large enough
-            capped_targets = torch.where(p_label > 1 - threshold, 1,
-                                         p_label + threshold)  # (batch,)
-            mixin_factor = (capped_targets - p_argmax) / (1 - p_argmax + 1e-7
-                                                         )  # (batch,)
-            adjusted_correct_distribution = distribution * (
-                1 - mixin_factor.unsqueeze(1))  # (batch, channels)
-            _ = adjusted_correct_distribution.scatter_add_(
-                1, labels.unsqueeze(1), mixin_factor.unsqueeze(1))
+            capped_targets = torch.where(p_label > 1 - threshold, 1, p_label + threshold)  # (batch,)
+            mixin_factor = (capped_targets - p_argmax) / (1 - p_argmax + 1e-7)  # (batch,)
+            adjusted_correct_distribution = distribution * (1 - mixin_factor.unsqueeze(1))  # (batch, channels)
+            _ = adjusted_correct_distribution.scatter_add_(1, labels.unsqueeze(1), mixin_factor.unsqueeze(1))
         else:
             adjusted_correct_distribution = distribution
 

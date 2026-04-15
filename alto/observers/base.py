@@ -34,11 +34,13 @@ AVAILABLE_OBSERVERS = {}
 
 
 def register_observer(name):
+
     def decorator(cls):
         if name in AVAILABLE_OBSERVERS:
             raise RuntimeError(f"Observer {name} already registered")
         AVAILABLE_OBSERVERS[name] = cls
         return cls
+
     return decorator
 
 
@@ -68,8 +70,7 @@ class Observer(ABC, nn.Module):
             self.args.observer_kwargs = self.args.observer_kwargs or {}
             self.args.observer_kwargs.update(observer_kwargs)
 
-            self.avg_constant = self.args.observer_kwargs.get(
-                "averaging_constant", 0.01)
+            self.avg_constant = self.args.observer_kwargs.get("averaging_constant", 0.01)
         self.memoryless = memoryless
         self.should_calculate_gparam = should_calculate_gparam
         self.should_calculate_qparams = should_calculate_qparams
@@ -135,8 +136,7 @@ class Observer(ABC, nn.Module):
             if self.avg_constant != 1.0:
                 # FUTURE: consider scaling by num observations (first dim)
                 #         rather than reducing by first dim
-                min_vals = self._lerp(self.quant_min, min_vals,
-                                      self.avg_constant)
+                min_vals = self._lerp(self.quant_min, min_vals, self.avg_constant)
             self.quant_min.copy_(min_vals)
 
         if self.quant_max.numel() == 0:
@@ -144,8 +144,7 @@ class Observer(ABC, nn.Module):
             self.quant_max.copy_(max_vals)
         else:
             if self.avg_constant != 1.0:
-                max_vals = self._lerp(self.quant_max, max_vals,
-                                      self.avg_constant)
+                max_vals = self._lerp(self.quant_max, max_vals, self.avg_constant)
             self.quant_max.copy_(max_vals)
 
         return self.quant_min, self.quant_max
@@ -170,8 +169,7 @@ class Observer(ABC, nn.Module):
             self.global_quant_min.copy_(min_vals)
         else:
             if self.avg_constant != 1.0:
-                min_vals = self._lerp(self.global_quant_min, min_vals,
-                                      self.avg_constant)
+                min_vals = self._lerp(self.global_quant_min, min_vals, self.avg_constant)
             self.global_quant_min.copy_(min_vals)
 
         if self.global_quant_max.numel() == 0:
@@ -179,8 +177,7 @@ class Observer(ABC, nn.Module):
             self.global_quant_max.copy_(max_vals)
         else:
             if self.avg_constant != 1.0:
-                max_vals = self._lerp(self.global_quant_max, max_vals,
-                                      self.avg_constant)
+                max_vals = self._lerp(self.global_quant_max, max_vals, self.avg_constant)
             self.global_quant_max.copy_(max_vals)
 
         return self.global_quant_min, self.global_quant_max
@@ -194,10 +191,8 @@ class Observer(ABC, nn.Module):
     def forward_inner(self, observed: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             if self.should_calculate_gparam:
-                observed_detached = observed.detach().reshape(
-                    (1, 1, -1))  # per tensor reshape
-                global_min_vals, global_max_vals = self.get_global_min_max(
-                    observed_detached)
+                observed_detached = observed.detach().reshape((1, 1, -1))  # per tensor reshape
+                global_min_vals, global_max_vals = self.get_global_min_max(observed_detached)
 
             if self.should_calculate_qparams:
                 g_idx = self._get_module_param("g_idx")
@@ -264,9 +259,7 @@ class Observer(ABC, nn.Module):
             self.quant_min = None
             self.quant_max = None
 
-    def _lerp(
-        self, input: torch.Tensor, end: torch.Tensor, weight: float
-    ) -> torch.Tensor:
+    def _lerp(self, input: torch.Tensor, end: torch.Tensor, weight: float) -> torch.Tensor:
         """torch lerp_kernel is not implemeneted for all data types"""
         return (input * (1.0 - weight)) + (end * weight)
 

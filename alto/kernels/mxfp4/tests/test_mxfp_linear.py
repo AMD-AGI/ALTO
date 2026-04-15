@@ -27,8 +27,7 @@ from .utils import prepare_data, calc_cossim, calc_snr
 @pytest.mark.parametrize("trans_b", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp4_linear_kernel(shape, use_2dblock_a, use_2dblock_b, trans_a, trans_b,
-                      contiguous, data_type):
+def test_mxfp4_linear_kernel(shape, use_2dblock_a, use_2dblock_b, trans_a, trans_b, contiguous, data_type):
     if not is_cdna4():
         pytest.skip("Real MXFP4 linear kernel is only available on CDNA4.")
     M, N, K = shape
@@ -110,13 +109,10 @@ def test_mxfp4_linear_kernel(shape, use_2dblock_a, use_2dblock_b, trans_a, trans
 @pytest.mark.parametrize("compile", [False])
 @pytest.mark.parametrize("use_hadamard", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w,
-                                        use_grad_sr, compile, use_hadamard,
+def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use_grad_sr, compile, use_hadamard,
                                         data_type):
     if use_2dblock_x and use_hadamard:
-        pytest.skip(
-            "Hadamard transform is applied only if 1D block is used for activations."
-        )
+        pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
 
     B, M, N, K = shape
     inputs = prepare_data((B, M, K), data_type).requires_grad_(True)
@@ -153,8 +149,7 @@ def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w,
     mxfp4_linear_func = MXFP4LinearFunction.apply
     if compile:
         mxfp4_linear_func = torch.compile(mxfp4_linear_func, fullgraph=True)
-    outputs = mxfp4_linear_func(inputs, weights, use_2dblock_x, use_2dblock_w,
-                                use_grad_sr, False, transform)
+    outputs = mxfp4_linear_func(inputs, weights, use_2dblock_x, use_2dblock_w, use_grad_sr, False, transform)
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
 

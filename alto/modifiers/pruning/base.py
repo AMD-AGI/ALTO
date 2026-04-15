@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/sparsification/sparsegpt/sgpt_base.py
 
-
 from abc import abstractmethod
 from functools import partial
 from typing import Any, Generator, Literal
@@ -117,7 +116,9 @@ class PruningModifierBase(Modifier):
         self._initialize_module_name_mappings()
         self._initialize_module_sparsities(model_parts)
         self._initialize_observers(
-            self._observer_name, LAYER_OBSERVER_BASE_NAME, self._layer_observers,
+            self._observer_name,
+            LAYER_OBSERVER_BASE_NAME,
+            self._layer_observers,
         )
 
         # Build sequential block → modules mapping + capture hook
@@ -125,18 +126,17 @@ class PruningModifierBase(Modifier):
             block_dict = get_layers(self.sequential_targets, m)
             self._sequential_blocks = list(block_dict.items())
             for blk_idx, (blk_name, block) in enumerate(self._sequential_blocks):
-                mods = {mod for mod in block.modules()
-                        if mod in self._module_names}
+                mods = {mod for mod in block.modules() if mod in self._module_names}
                 self._block_modules[blk_idx] = mods
             if self._sequential_blocks:
                 self.register_hook(
-                    self._sequential_blocks[0][1], self._capture_hook, "forward_pre",
+                    self._sequential_blocks[0][1],
+                    self._capture_hook,
+                    "forward_pre",
                 )
 
-        logger.info(
-            f"{self.__class__.__name__}: {len(self._module_names)} modules, "
-            f"{len(self._sequential_blocks)} sequential blocks"
-        )
+        logger.info(f"{self.__class__.__name__}: {len(self._module_names)} modules, "
+                    f"{len(self._sequential_blocks)} sequential blocks")
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
@@ -159,11 +159,9 @@ class PruningModifierBase(Modifier):
             return self._fallback_post_step()
 
         mode = f"sequential-{self.sequential_granularity}"
-        logger.info(
-            f"{self.__class__.__name__}.on_post_step: mode={mode}, "
-            f"{len(self._captured_inputs)} microbatches, "
-            f"{len(self._sequential_blocks)} blocks"
-        )
+        logger.info(f"{self.__class__.__name__}.on_post_step: mode={mode}, "
+                    f"{len(self._captured_inputs)} microbatches, "
+                    f"{len(self._sequential_blocks)} blocks")
         block_inputs = self._captured_inputs
         n_blocks = len(self._sequential_blocks)
 
@@ -192,10 +190,8 @@ class PruningModifierBase(Modifier):
             if mod in self._layer_observers:
                 self._layer_observers[mod].clear_stats()
                 self._layer_observers[mod].enable()
-        logger.info(
-            f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
-            f"collecting stats, {len(block_mods)} modules"
-        )
+        logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
+                    f"collecting stats, {len(block_mods)} modules")
         with torch.no_grad():
             for inp_args, inp_kwargs in block_inputs:
                 block(*inp_args, **inp_kwargs)
@@ -216,24 +212,17 @@ class PruningModifierBase(Modifier):
 
         remaining = set(block_mods)
         for grp_idx, patterns in enumerate(self.sublayer_groups):
-            group_mods = {
-                mod for mod in remaining
-                if any(p in mod_name_map.get(mod, "") for p in patterns)
-            }
+            group_mods = {mod for mod in remaining if any(p in mod_name_map.get(mod, "") for p in patterns)}
             if not group_mods:
                 continue
             remaining -= group_mods
-            logger.info(
-                f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
-                f"{[mod_name_map.get(m, '?') for m in group_mods]}"
-            )
+            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
+                        f"{[mod_name_map.get(m, '?') for m in group_mods]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, group_mods)
 
         if remaining:
-            logger.info(
-                f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
-                f"{[mod_name_map.get(m, '?') for m in remaining]}"
-            )
+            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
+                        f"{[mod_name_map.get(m, '?') for m in remaining]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, remaining)
 
     def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
@@ -347,15 +336,20 @@ class PruningModifierBase(Modifier):
             self._module_sparsities[module] = layer_sparsity
 
     def _initialize_observers(
-        self, observer_name: str | None, base_name: str,
+        self,
+        observer_name: str | None,
+        base_name: str,
         observers: dict[str, Observer],
     ):
         if observer_name is None:
             return
         for module, name in self._module_names.items():
             observer = Observer.create_instance(
-                observer_name, base_name=base_name,
-                args=None, module=module, device=device_type,
+                observer_name,
+                base_name=base_name,
+                args=None,
+                module=module,
+                device=device_type,
             )
             object.__setattr__(module, f"{base_name}_observer", observer)
             self.register_hook(

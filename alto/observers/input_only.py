@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-
 import torch
 from alto.utils.pytorch.module import TransformerConv1D
 from .base import Observer, register_observer

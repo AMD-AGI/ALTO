@@ -37,9 +37,7 @@ class SparsityConfigMetadata:
     SPARSITY_THRESHOLD: float = 0.49
 
     @staticmethod
-    def infer_global_sparsity(
-            model: Module,
-            state_dict: dict[str, Tensor] | None = None) -> float:
+    def infer_global_sparsity(model: Module, state_dict: dict[str, Tensor] | None = None) -> float:
         """
         Calculates the global percentage of sparse zero weights in the model
 
@@ -76,8 +74,7 @@ class SparsityConfigMetadata:
         sparsity_structure = None
 
         if modifiers:
-            sparsity_structure = infer_sparsity_structure_from_modifiers(
-                modifiers)
+            sparsity_structure = infer_sparsity_structure_from_modifiers(modifiers)
 
         if check_only_modifiers:
             return sparsity_structure
@@ -113,12 +110,10 @@ class SparsityConfigMetadata:
         :return: compression config inferred from the model
         """
         # TODO: can we remove this? Do we need the state dict?
-        global_sparsity = SparsityConfigMetadata.infer_global_sparsity(
-            model, state_dict=state_dict)
+        global_sparsity = SparsityConfigMetadata.infer_global_sparsity(model, state_dict=state_dict)
 
         if sparsity_structure is None:
-            sparsity_structure = SparsityConfigMetadata.infer_sparsity_structure(
-                model=model)
+            sparsity_structure = SparsityConfigMetadata.infer_sparsity_structure(model=model)
 
         if quantization_format == CompressionFormat.marlin_24:
             warnings.warn(
@@ -130,14 +125,12 @@ class SparsityConfigMetadata:
                 stacklevel=2,
             )
 
-        if (disable_sparse_compression or
-                quantization_format == CompressionFormat.marlin_24):
+        if (disable_sparse_compression or quantization_format == CompressionFormat.marlin_24):
             # sparse compressor should be dense
             # when no_sparse_compression is True
             # or when marlin_24 is used
             format = CompressionFormat.dense.value
-        elif compress and SparsityConfigMetadata.is_sparse24_bitmask_supported(
-                model, sparsity_structure):
+        elif compress and SparsityConfigMetadata.is_sparse24_bitmask_supported(model, sparsity_structure):
             format = CompressionFormat.sparse_24_bitmask.value
         else:
             format = CompressionFormat.dense.value
@@ -177,10 +170,8 @@ class SparsityConfigMetadata:
         :param state_dict: optional state_dict to replace that in model, used for
         gathering global FSDP model info
         """
-        config.global_sparsity = SparsityConfigMetadata.infer_global_sparsity(
-            model, state_dict=state_dict)
-        config.sparsity_structure = SparsityConfigMetadata.infer_sparsity_structure(
-        )
+        config.global_sparsity = SparsityConfigMetadata.infer_global_sparsity(model, state_dict=state_dict)
+        config.sparsity_structure = SparsityConfigMetadata.infer_sparsity_structure()
 
     @staticmethod
     def is_sparse24_bitmask_supported(
@@ -198,18 +189,16 @@ class SparsityConfigMetadata:
             in vLLM for the given model
         """
         if sparsity_structure is None:
-            sparsity_structure = SparsityConfigMetadata.infer_sparsity_structure(
-                model)
+            sparsity_structure = SparsityConfigMetadata.infer_sparsity_structure(model)
 
         if sparsity_structure != SparsityStructure.TWO_FOUR.value:
             # only supported for 2:4 sparsity
             return False
 
         if not is_model_quantized(model):
-            logger.warning(
-                "Compressed Sparse-only 2:4 models are not supported in vLLM<=0.7.0, "
-                "consider saving with `disable_sparse_compression` set, "
-                "`model.save_pretrained(..., disable_sparse_compression=True)`")
+            logger.warning("Compressed Sparse-only 2:4 models are not supported in vLLM<=0.7.0, "
+                           "consider saving with `disable_sparse_compression` set, "
+                           "`model.save_pretrained(..., disable_sparse_compression=True)`")
             return True
 
         # when model is quantized, and has 2:4 sparsity
@@ -230,8 +219,7 @@ class SparsityConfigMetadata:
                 # weight and activation quantization
                 # check schemes are supported
                 for scheme in [weight_scheme, input_scheme]:
-                    scheme_supported = (scheme.num_bits == 8 and
-                                        scheme.type in supported_scheme_types)
+                    scheme_supported = (scheme.num_bits == 8 and scheme.type in supported_scheme_types)
                     if not scheme_supported:
                         logger.info("Quantization scheme not supported,"
                                     " turning off sparse 24 compression."

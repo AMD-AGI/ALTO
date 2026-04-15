@@ -8,8 +8,7 @@ from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8, convert_from
 from .utils import prepare_data, convert_to_mxfp8_pytorch, convert_from_mxfp8_pytorch
 
 
-@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048),
-                                          (4, 128, 64)])
+@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048), (4, 128, 64)])
 @pytest.mark.parametrize("axis", [-1, -2])
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
@@ -18,14 +17,15 @@ from .utils import prepare_data, convert_to_mxfp8_pytorch, convert_from_mxfp8_py
 @pytest.mark.parametrize("use_sr", [False, True])
 @pytest.mark.parametrize("use_asm", [False, True])
 @pytest.mark.parametrize("block_size", [16, 32])
-def test_mxfp8_quantization(tensor_shape, axis, data_type, mxfp_format, pattern, is_2d_block, use_sr, use_asm, block_size):
+def test_mxfp8_quantization(tensor_shape, axis, data_type, mxfp_format, pattern, is_2d_block, use_sr, use_asm,
+                            block_size):
     if use_asm and not is_cdna4():
         pytest.skip("ASM mode is only available on CDNA4 hardwares.")
     if use_sr and not use_asm:
         pytest.skip("use_sr=True requires use_asm=True.")
 
     x = prepare_data(tensor_shape, data_type, pattern=pattern)
-    
+
     # 1. PyTorch Reference
     data_lp_ref, scales_ref = convert_to_mxfp8_pytorch(
         x,
@@ -45,11 +45,11 @@ def test_mxfp8_quantization(tensor_shape, axis, data_type, mxfp_format, pattern,
         use_sr=use_sr,
         use_asm=use_asm,
     )
-    
+
     # 3. Verify scales (SR does not affect scale computation)
     assert torch.all(scales_ref == scales).item(), \
         f"Scale mismatch for format {mxfp_format}, shape {tensor_shape}, pattern {pattern}"
-    
+
     # 4. Verify quantized data
     if not use_sr:
         assert torch.all(data_lp_ref == data_lp).item(), \
@@ -61,8 +61,7 @@ def test_mxfp8_quantization(tensor_shape, axis, data_type, mxfp_format, pattern,
             f"SR data differs from RTE by more than 1 ULP for format {mxfp_format}, shape {tensor_shape}, pattern {pattern}"
 
 
-@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048),
-                                          (4, 128, 64)])
+@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048), (4, 128, 64)])
 @pytest.mark.parametrize("axis", [-1, -2])
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
@@ -72,7 +71,7 @@ def test_mxfp8_quantization(tensor_shape, axis, data_type, mxfp_format, pattern,
 @pytest.mark.parametrize("block_size", [16, 32])
 def test_mxfp8_dequantization(tensor_shape, axis, data_type, mxfp_format, pattern, is_2d_block, use_asm, block_size):
     x = prepare_data(tensor_shape, data_type, pattern=pattern)
-    
+
     # 1. Quantize first
     data_lp, scales = convert_to_mxfp8(
         x,
@@ -82,7 +81,7 @@ def test_mxfp8_dequantization(tensor_shape, axis, data_type, mxfp_format, patter
         is_2d_block=is_2d_block,
         use_asm=use_asm,
     )
-    
+
     # 2. PyTorch Reference Dequantization
     data_hp_ref = convert_from_mxfp8_pytorch(
         data_lp,
@@ -92,7 +91,7 @@ def test_mxfp8_dequantization(tensor_shape, axis, data_type, mxfp_format, patter
         axis=axis,
         is_2d_block=is_2d_block,
     )
-    
+
     # 3. Triton Dequantization
     data_hp = convert_from_mxfp8(
         data_lp,
@@ -103,7 +102,7 @@ def test_mxfp8_dequantization(tensor_shape, axis, data_type, mxfp_format, patter
         is_2d_block=is_2d_block,
         use_asm=use_asm,
     )
-    
+
     # 4. Verify dequantized data matches reference
     assert data_hp.dtype == data_hp_ref.dtype, \
         f"Dtype mismatch: expected {data_hp_ref.dtype}, got {data_hp.dtype}"
@@ -113,8 +112,7 @@ def test_mxfp8_dequantization(tensor_shape, axis, data_type, mxfp_format, patter
         f"Dequant mismatch for format {mxfp_format}, shape {tensor_shape}, pattern {pattern}"
 
 
-@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048),
-                                          (4, 128, 64)])
+@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048), (4, 128, 64)])
 @pytest.mark.parametrize("axis", [-1, -2])
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
@@ -183,8 +181,7 @@ def test_mxfp8_e2e(tensor_shape, axis, data_type, mxfp_format, is_2d_block, use_
             f"E2E SR dequant MAE too large ({dq_mae}) for format {mxfp_format}, shape {tensor_shape}"
 
 
-@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048),
-                                          (4, 128, 64)])
+@pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048), (4, 128, 64)])
 @pytest.mark.parametrize("axis", [-1, -2])
 @pytest.mark.parametrize("is_2d_block", [False, True])
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])

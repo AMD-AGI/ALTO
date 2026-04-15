@@ -7,11 +7,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause AND MIT
 
-
 import torch
 import triton
 import triton.language as tl
-
 
 # ===== Supporting utils, CUDA and TMA =====
 

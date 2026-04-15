@@ -22,13 +22,11 @@ def _load_json_or_yaml_string(content: str) -> Dict[str, Any]:
         try:
             ret = yaml.safe_load(content)
         except yaml.YAMLError as err:
-            raise ValueError(
-                f"Could not parse recipe from string {content}") from err
+            raise ValueError(f"Could not parse recipe from string {content}") from err
 
     if not isinstance(ret, dict):
-        raise ValueError(
-            f"Could not parse recipe from string {content}. If you meant load from "
-            "a file, please make sure that the specified file path exists")
+        raise ValueError(f"Could not parse recipe from string {content}. If you meant load from "
+                         "a file, please make sure that the specified file path exists")
     return ret
 
 
@@ -53,14 +51,11 @@ def _parse_recipe_from_md(file_path, yaml_str):
         yaml_str = result.group(1)
     else:
         # fail if we know whe should have extracted front matter out
-        raise RuntimeError(
-            "Could not extract YAML front matter from recipe card: {}".format(
-                file_path))
+        raise RuntimeError("Could not extract YAML front matter from recipe card: {}".format(file_path))
     return yaml_str
 
 
-def get_yaml_serializable_dict(modifiers: List[Modifier],
-                               stage: str) -> Dict[str, Any]:
+def get_yaml_serializable_dict(modifiers: List[Modifier], stage: str) -> Dict[str, Any]:
     """
     This function is used to convert a list of modifiers into a dictionary
     where the keys are the group names and the values are the modifiers
@@ -90,9 +85,7 @@ def get_yaml_serializable_dict(modifiers: List[Modifier],
         modifier_type = modifier.__class__.__name__
 
         args = {
-            k: v
-            for k, v in modifier.model_dump().items()
-            if v is not None and not k.endswith("_") and k != "group"
+            k: v for k, v in modifier.model_dump().items() if v is not None and not k.endswith("_") and k != "group"
         }
 
         if group_name not in stage_dict[stage_name]:

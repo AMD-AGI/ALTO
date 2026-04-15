@@ -20,21 +20,18 @@ from typing import Optional
 import torch
 from safetensors import safe_open
 
-
 REPO_PATH = Path(__file__).parent / "hadamards.safetensors"
 
-
 __all__ = ["random_hadamard_matrix", "deterministic_hadamard_matrix", "is_pow2"]
-
 
 # note that hadamard matrix multiplication can be accelerated using a library such as
 # https://github.com/Dao-AILab/fast-hadamard-transform/tree/master
 
 
 def deterministic_hadamard_matrix(
-    size: int,
-    dtype: torch.dtype = torch.bfloat16,
-    device: torch.device = torch.device("cpu"),
+        size: int,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = torch.device("cpu"),
 ) -> torch.Tensor:
     """
     Construct an n-by-n Hadamard matrix, using Sylvester's construction.
@@ -64,10 +61,10 @@ def deterministic_hadamard_matrix(
 
 
 def random_hadamard_matrix(
-    size: int,
-    dtype: torch.dtype = torch.bfloat16,
-    device: torch.device = torch.device("cpu"),
-    gen: Optional[torch.Generator] = None,
+        size: int,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = torch.device("cpu"),
+        gen: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
     """
     Produces a randomly generated Hadamard matrix. Differs from
@@ -101,10 +98,10 @@ def is_pow2(n: int) -> bool:
 
 
 def _fetch_hadamard_divisor(
-    n: int,
-    dtype: torch.dtype,
-    device: torch.device = torch.device("cpu"),
-    file_path: str = REPO_PATH,
+        n: int,
+        dtype: torch.dtype,
+        device: torch.device = torch.device("cpu"),
+        file_path: str = REPO_PATH,
 ) -> Optional[torch.Tensor]:
     """
     Fetch a known hadamard matrix from the given file path. The returned matrix will

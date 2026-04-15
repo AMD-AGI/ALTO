@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/pruning/sparsegpt/base.py
 
-
 import torch
 from torch.nn import Module
 from torchtitan.tools.logging import logger
@@ -143,11 +142,9 @@ class SparseGPTModifier(SparsityModifierBase):
             H = torch.linalg.cholesky(H, upper=True)
             Hinv = H
         except torch._C._LinAlgError:
-            logger.warning(
-                "Failed to invert hessian due to numerical instability. Consider "
-                "increasing SparseGPTModifier.dampening_frac, increasing the number "
-                "of calibration samples, or shuffling the calibration dataset"
-            )
+            logger.warning("Failed to invert hessian due to numerical instability. Consider "
+                           "increasing SparseGPTModifier.dampening_frac, increasing the number "
+                           "of calibration samples, or shuffling the calibration dataset")
             Hinv = H = torch.eye(num_columns, dtype=H.dtype, device=H.device)
 
         # sparsity mask
@@ -162,11 +159,9 @@ class SparseGPTModifier(SparsityModifierBase):
             )
             current_sparsity = mask.sum() / W.numel()
             if current_sparsity > sparsity:
-                raise ValueError(
-                    "The target sparsity is lower than the sparsity "
-                    "of the base model. Please retry "
-                    "after turning preserve_sparsity_mask=False"
-                )
+                raise ValueError("The target sparsity is lower than the sparsity "
+                                 "of the base model. Please retry "
+                                 "after turning preserve_sparsity_mask=False")
 
         losses = torch.zeros(num_rows, device=module.weight.device)
 
@@ -186,15 +181,11 @@ class SparseGPTModifier(SparsityModifierBase):
                     mask1 = mask[:, i1:i2]
                     if int(W1.numel() * sparsity) > mask1.sum():
                         # target sparsity is higher than base sparsity, extend mask1
-                        tmp = (
-                            (~mask[:, i1:i2])
-                            * W1**2
-                            / (torch.diag(Hinv1).reshape((1, -1))) ** 2
-                        )
+                        tmp = ((~mask[:, i1:i2]) * W1**2 / (torch.diag(Hinv1).reshape((1, -1)))**2)
                         thresh = torch.sort(tmp.flatten())[0][int(tmp.numel() * sparsity)]
                         mask1 = tmp <= thresh
                 else:
-                    tmp = W1**2 / (torch.diag(Hinv1).reshape((1, -1))) ** 2
+                    tmp = W1**2 / (torch.diag(Hinv1).reshape((1, -1)))**2
                     thresh = torch.sort(tmp.flatten())[0][int(tmp.numel() * sparsity)]
                     mask1 = tmp <= thresh
             else:
@@ -208,22 +199,17 @@ class SparseGPTModifier(SparsityModifierBase):
                 d = Hinv1[i, i]
 
                 if prune_n != 0 and i % prune_m == 0:
-                    tmp = (
-                        W1[:, i : (i + prune_m)] ** 2
-                        / (torch.diag(Hinv1)[i : (i + prune_m)].reshape((1, -1))) ** 2
-                    )
+                    tmp = (W1[:, i:(i + prune_m)]**2 / (torch.diag(Hinv1)[i:(i + prune_m)].reshape((1, -1)))**2)
                     if mask is not None:
-                        tmp = tmp * (~mask[:, i : (i + prune_m)])
+                        tmp = tmp * (~mask[:, i:(i + prune_m)])
 
-                    mask1.scatter_(
-                        1, i + torch.topk(tmp, prune_n, dim=1, largest=False)[1], True
-                    )
+                    mask1.scatter_(1, i + torch.topk(tmp, prune_n, dim=1, largest=False)[1], True)
 
                 q = w.clone()
                 q[mask1[:, i]] = 0
 
                 Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
+                Losses1[:, i] = (w - q)**2 / d**2
 
                 err1 = (w - q) / d
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))

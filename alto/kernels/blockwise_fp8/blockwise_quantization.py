@@ -22,10 +22,10 @@ from .utils import (
     F8_FWD_MAX,
 )
 
-
 # Original implementation at https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/kernel.py
 torch_dtype = torch.bfloat16
 f8_fwd_max_const = x = triton.language.constexpr(F8_FWD_MAX)
+
 
 @triton.autotune(
     configs=[
@@ -70,12 +70,8 @@ def blockwise_fp8_gemm_kernel(
         b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]
         a_s_ptrs = a_s_ptr + offs_m * k + i
         b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k + i
-        a = tl.load(a_ptrs,
-                    mask=mask_m[:, None] & mask_k[None, :],
-                    other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=mask_k[:, None] & mask_n[None, :],
-                    other=0.0)
+        a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+        b = tl.load(b_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
         a_s = tl.load(a_s_ptrs, mask=mask_m, other=1.0)
         b_s = tl.load(b_s_ptrs, mask=mask_n, other=1.0)
         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
@@ -117,6 +113,7 @@ def blockwise_fp8_gemm(
         BLOCK_SIZE_K=block_size,
     )
     return c
+
 
 @blockwise_fp8_gemm.register_fake
 def blockwise_fp8_gemm_fake(
@@ -182,9 +179,7 @@ def blockwise_fp8_gemm_backward_weight_kernel(
 
         go_s_ptrs = go_s_ptr + mi * N + offs_n
         a_s_ptrs = a_s_ptr + mi * K + offs_k
-        go = tl.load(go_ptrs,
-                     mask=mask_m[None, :] & mask_n[:, None],
-                     other=0.0)
+        go = tl.load(go_ptrs, mask=mask_m[None, :] & mask_n[:, None], other=0.0)
         a = tl.load(a_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
         go_s = tl.load(go_s_ptrs, mask=mask_n, other=1.0)
         a_s = tl.load(a_s_ptrs, mask=mask_k, other=1.0)
@@ -207,11 +202,9 @@ def blockwise_fp8_gemm_backward_weight(
     assert a.is_contiguous() and a_s.is_contiguous(), "a and a_s must be contiguous"
     assert grad_output.dim() == 2 and a.dim() == 2, "Input tensors must have 2 dimensions"
     assert grad_output.size(0) % block_size == 0, (
-        f"grad_output's first dimension must be divisible by block_size (block_size={block_size})"
-    )
+        f"grad_output's first dimension must be divisible by block_size (block_size={block_size})")
     assert a.size(0) % block_size == 0, (
-        f"a's first dimension must be divisible by block_size (block_size={block_size})"
-    )
+        f"a's first dimension must be divisible by block_size (block_size={block_size})")
     M, N = grad_output.size()
     _, K = a.size()
     grad_weight = grad_output.new_zeros(N, K, dtype=torch_dtype)
@@ -249,11 +242,9 @@ def blockwise_fp8_gemm_backward_weight_fake(
     assert a.is_contiguous() and a_s.is_contiguous(), "a and a_s must be contiguous"
     assert grad_output.dim() == 2 and a.dim() == 2, "Input tensors must have 2 dimensions"
     assert grad_output.size(0) % block_size == 0, (
-        f"grad_output's first dimension must be divisible by block_size (block_size={block_size})"
-    )
+        f"grad_output's first dimension must be divisible by block_size (block_size={block_size})")
     assert a.size(0) % block_size == 0, (
-        f"a's first dimension must be divisible by block_size (block_size={block_size})"
-    )
+        f"a's first dimension must be divisible by block_size (block_size={block_size})")
 
     M, N = grad_output.size()
     _, K = a.size()
@@ -303,9 +294,7 @@ def blockwise_fp8_gemm_backward_act_kernel(
 
         go_s_ptrs = go_s_ptr + offs_m * (N // BLOCK_SIZE_N) + ni
         b_s_ptrs = b_s_ptr + ni * (K // BLOCK_SIZE_N) + offs_k // BLOCK_SIZE_N
-        go = tl.load(go_ptrs,
-                     mask=mask_m[:, None] & mask_n[None, :],
-                     other=0.0)
+        go = tl.load(go_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0)
         b = tl.load(b_ptrs, mask=mask_n[:, None] & mask_k[None, :], other=0.0)
         go_s = tl.load(go_s_ptrs, mask=mask_m, other=1.0)
         b_s = tl.load(b_s_ptrs, mask=mask_k, other=1.0)
@@ -318,21 +307,19 @@ def blockwise_fp8_gemm_backward_act_kernel(
 
 @triton_op("torchtitan::blockwise_fp8_gemm_backward_act", mutates_args={})
 def blockwise_fp8_gemm_backward_act(
-    grad_output: torch.Tensor, # [M, N]
-    go_s: torch.Tensor, # [M, N // block_size]
-    b: torch.Tensor, # [N, K]
-    b_s: torch.Tensor, # [N // block_size, K // block_size]
+    grad_output: torch.Tensor,  # [M, N]
+    go_s: torch.Tensor,  # [M, N // block_size]
+    b: torch.Tensor,  # [N, K]
+    b_s: torch.Tensor,  # [N // block_size, K // block_size]
     block_size: int = 128,
-) -> torch.Tensor: # [M, K]
+) -> torch.Tensor:  # [M, K]
     assert grad_output.is_contiguous() and go_s.is_contiguous(), "grad_output and go_s must be contiguous"
     assert b.is_contiguous() and b_s.is_contiguous(), "b and b_s must be contiguous"
     assert grad_output.dim() == 2 and b.dim() == 2, "Input tensors must have 3 and 2 dimensions respectively"
     assert b.size(0) // block_size == b_s.size(0), (
-        f"b's first dimension divided by block_size must match b_s's first dimension (block_size={block_size})"
-    )
+        f"b's first dimension divided by block_size must match b_s's first dimension (block_size={block_size})")
     assert b.size(1) // block_size == b_s.size(1), (
-        f"b's second dimension divided by block_size must match b_s's second dimension (block_size={block_size})"
-    )
+        f"b's second dimension divided by block_size must match b_s's second dimension (block_size={block_size})")
     assert grad_output.size(1) // block_size == go_s.size(1), (
         f"grad_output's second dimension divided by block_size must match go_s's second dimension (block_size={block_size})"
     )
@@ -375,11 +362,9 @@ def blockwise_fp8_gemm_backward_act_fake(
     assert b.is_contiguous() and b_s.is_contiguous(), "b and b_s must be contiguous"
     assert grad_output.dim() == 2 and b.dim() == 2, "Input tensors must have 2 dimensions"
     assert b.size(0) // block_size == b_s.size(0), (
-        f"b's first dimension divided by block_size must match b_s's first dimension (block_size={block_size})"
-    )
+        f"b's first dimension divided by block_size must match b_s's first dimension (block_size={block_size})")
     assert b.size(1) // block_size == b_s.size(1), (
-        f"b's second dimension divided by block_size must match b_s's second dimension (block_size={block_size})"
-    )
+        f"b's second dimension divided by block_size must match b_s's second dimension (block_size={block_size})")
     assert grad_output.size(1) // block_size == go_s.size(1), (
         f"grad_output's second dimension divided by block_size must match go_s's second dimension (block_size={block_size})"
     )
@@ -419,15 +404,13 @@ def fp8_blockwise_act_quant_kernel(
     pid_n = tl.program_id(axis=1)
     start_n = pid_n * BLOCK_SIZE
 
-    offs_x = pid_m * stride_xm + (start_n +
-                                  tl.arange(0, BLOCK_SIZE)) * stride_xn
+    offs_x = pid_m * stride_xm + (start_n + tl.arange(0, BLOCK_SIZE)) * stride_xn
 
     x = tl.load(x_ptr + offs_x)
     amax = tl.clamp(tl.max(tl.abs(x)), min=1e-12, max=float("inf")).to(tl.float64)
     s = (amax / f8_fwd_max_const).to(tl.float32)
     y = tl.clamp(x / s, -f8_fwd_max_const, f8_fwd_max_const).to(y_ptr.dtype.element_ty)
-    offs_y = pid_m * stride_ym + (start_n +
-                                  tl.arange(0, BLOCK_SIZE)) * stride_yn
+    offs_y = pid_m * stride_ym + (start_n + tl.arange(0, BLOCK_SIZE)) * stride_yn
     offs_s = pid_m * stride_sm + pid_n * stride_sn
     tl.store(y_ptr + offs_y, y)
     tl.store(s_ptr + offs_s, s.to(s_ptr.dtype.element_ty))
@@ -452,9 +435,7 @@ def fp8_blockwise_act_quant(
             - The quantized tensor with FP8 dtype.
             - A tensor of scaling factors with dtype `torch.float32`.
     """
-    assert x.size(axis) % block_size == 0, (
-        f"Dimension size must be divisible by block_size (block_size={block_size})"
-    )
+    assert x.size(axis) % block_size == 0, (f"Dimension size must be divisible by block_size (block_size={block_size})")
     assert x.dim() == 2, "Input tensor must have 2 dimensions"
 
     dtype = get_f8_fwd_dtype()
@@ -502,9 +483,7 @@ def fp8_blockwise_act_quant_fake(
     Fake implementation of the block-wise quantization for testing purposes.
     Returns the input tensor and a dummy scaling factor tensor.
     """
-    assert x.size(axis) % block_size == 0, (
-        f"Dimension size must be divisible by block_size (block_size={block_size})"
-    )
+    assert x.size(axis) % block_size == 0, (f"Dimension size must be divisible by block_size (block_size={block_size})")
     assert x.dim() == 2, "Input tensor must have 2 dimensions"
 
     dtype = get_f8_fwd_dtype()
@@ -544,16 +523,14 @@ def fp8_blockwise_act_dequant_kernel(
     pid_n = tl.program_id(axis=1)
     start_n = pid_n * BLOCK_SIZE
 
-    offs_x = pid_m * stride_xm + (start_n +
-                                  tl.arange(0, BLOCK_SIZE)) * stride_xn
+    offs_x = pid_m * stride_xm + (start_n + tl.arange(0, BLOCK_SIZE)) * stride_xn
     x = tl.load(x_ptr + offs_x).to(tl.float32)
 
     s = tl.load(s_ptr + pid_m * stride_sm + pid_n * stride_sn)
     y = x * s
     y = y.to(y_ptr.dtype.element_ty)
 
-    offs_y = pid_m * stride_ym + (start_n +
-                                  tl.arange(0, BLOCK_SIZE)) * stride_yn
+    offs_y = pid_m * stride_ym + (start_n + tl.arange(0, BLOCK_SIZE)) * stride_yn
     tl.store(y_ptr + offs_y, y)
 
 
@@ -576,14 +553,10 @@ def fp8_blockwise_act_dequant(
     Returns:
         torch.Tensor: The dequantized tensor of the same shape as `x`.
     """
-    assert x.size(axis) % block_size == 0, (
-        f"Dimension size must be divisible by block_size (block_size={block_size})"
-    )
+    assert x.size(axis) % block_size == 0, (f"Dimension size must be divisible by block_size (block_size={block_size})")
     assert x.dim() == 2, "Input tensor must have 2 dimensions"
 
-    y = torch.zeros_like(x,
-                         dtype=torch_dtype,
-                         memory_format=torch.contiguous_format)
+    y = torch.zeros_like(x, dtype=torch_dtype, memory_format=torch.contiguous_format)
 
     x = x.transpose(axis, -1)
     s = s.transpose(axis, -1)
@@ -624,9 +597,7 @@ def fp8_blockwise_act_dequant_fake(
     Fake implementation of the block-wise dequantization for testing purposes.
     Returns the input tensor multiplied by the scaling factors tensor.
     """
-    assert x.size(axis) % block_size == 0, (
-        f"Dimension size must be divisible by block_size (block_size={block_size})"
-    )
+    assert x.size(axis) % block_size == 0, (f"Dimension size must be divisible by block_size (block_size={block_size})")
     assert x.dim() == 2, "Input tensor must have 2 dimensions"
 
     y = torch.zeros_like(x, dtype=torch_dtype)
@@ -634,8 +605,7 @@ def fp8_blockwise_act_dequant_fake(
 
 
 @triton.jit
-def fp8_blockwise_weight_quant_kernel(x_ptr, y_ptr, s_ptr, M, N,
-                                      BLOCK_SIZE: tl.constexpr):
+def fp8_blockwise_weight_quant_kernel(x_ptr, y_ptr, s_ptr, M, N, BLOCK_SIZE: tl.constexpr):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factors in `s_ptr`.
 
@@ -685,8 +655,7 @@ def fp8_blockwise_weight_quant(
     assert x.is_contiguous(), "Input tensor must be contiguous"
     assert x.dim() in [2, 3], "Input tensor must have 2 or 3 dimensions"
     assert x.size(-2) % block_size == 0 and x.size(-1) % block_size == 0, (
-        f"Both dimensions of x ({x.shape}) must be divisible by block_size (block_size={block_size})"
-    )
+        f"Both dimensions of x ({x.shape}) must be divisible by block_size (block_size={block_size})")
     dtype = get_f8_fwd_dtype()
     if x.dim() == 2:
         M, N = x.size()
@@ -700,12 +669,7 @@ def fp8_blockwise_weight_quant(
         triton.cdiv(M, meta["BLOCK_SIZE"]),
         triton.cdiv(N, meta["BLOCK_SIZE"]),
     )
-    wrap_triton(fp8_blockwise_weight_quant_kernel)[grid](x,
-                                                         y,
-                                                         s,
-                                                         M,
-                                                         N,
-                                                         BLOCK_SIZE=block_size)
+    wrap_triton(fp8_blockwise_weight_quant_kernel)[grid](x, y, s, M, N, BLOCK_SIZE=block_size)
     if x.dim() == 2:
         s = s.squeeze(0)
     return y, s
@@ -723,8 +687,7 @@ def fp8_blockwise_weight_quant_fake(
     assert x.is_contiguous(), "Input tensor must be contiguous"
     assert x.dim() in [2, 3], "Input tensor must have 2 or 3 dimensions"
     assert x.size(-2) % block_size == 0 and x.size(-1) % block_size == 0, (
-        f"Both dimensions of x ({x.shape}) must be divisible by block_size (block_size={block_size})"
-    )
+        f"Both dimensions of x ({x.shape}) must be divisible by block_size (block_size={block_size})")
     dtype = get_f8_fwd_dtype()
     if x.dim() == 2:
         M, N = x.size()
@@ -739,8 +702,7 @@ def fp8_blockwise_weight_quant_fake(
 
 
 @triton.jit
-def fp8_blockwise_weight_dequant_kernel(x_ptr, s_ptr, y_ptr, M, N,
-                                        BLOCK_SIZE: tl.constexpr):
+def fp8_blockwise_weight_dequant_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr):
     """
     Dequantizes weights using the provided scaling factors and stores the result.
 
@@ -771,9 +733,7 @@ def fp8_blockwise_weight_dequant_kernel(x_ptr, s_ptr, y_ptr, M, N,
 
 
 @triton_op("torchtitan::fp8_blockwise_weight_dequant", mutates_args={})
-def fp8_blockwise_weight_dequant(x: torch.Tensor,
-                                 s: torch.Tensor,
-                                 block_size: int = 128) -> torch.Tensor:
+def fp8_blockwise_weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> torch.Tensor:
     """
     Dequantizes the given weight tensor using the provided scale tensor.
 
@@ -788,11 +748,9 @@ def fp8_blockwise_weight_dequant(x: torch.Tensor,
     Raises:
         AssertionError: If `x` or `s` are not contiguous or if their dimensions are not 2.
     """
-    assert x.is_contiguous() and s.is_contiguous(
-    ), "Input tensors must be contiguous"
-    assert (x.dim() == 2 and s.dim() == 2) or (
-        x.dim() == 3
-        and s.dim() == 3), "Input tensors must have 2 or 3 dimensions"
+    assert x.is_contiguous() and s.is_contiguous(), "Input tensors must be contiguous"
+    assert (x.dim() == 2 and s.dim() == 2) or (x.dim() == 3 and
+                                               s.dim() == 3), "Input tensors must have 2 or 3 dimensions"
     if x.dim() == 2:
         M, N = x.size()
         B = 1
@@ -804,8 +762,7 @@ def fp8_blockwise_weight_dequant(x: torch.Tensor,
         triton.cdiv(M, meta["BLOCK_SIZE"]),
         triton.cdiv(N, meta["BLOCK_SIZE"]),
     )
-    wrap_triton(fp8_blockwise_weight_dequant_kernel)[grid](
-        x, s, y, M, N, BLOCK_SIZE=block_size)
+    wrap_triton(fp8_blockwise_weight_dequant_kernel)[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
     return y
 
 
@@ -819,10 +776,8 @@ def fp8_blockwise_weight_dequant_fake(
     Fake implementation of the block-wise weight dequantization for testing purposes.
     Returns the input tensor multiplied by the scaling factor tensor.
     """
-    assert x.is_contiguous() and s.is_contiguous(
-    ), "Input tensors must be contiguous"
-    assert (x.dim() == 2 and s.dim() == 2) or (
-        x.dim() == 3
-        and s.dim() == 3), "Input tensors must have 2 or 3 dimensions"
+    assert x.is_contiguous() and s.is_contiguous(), "Input tensors must be contiguous"
+    assert (x.dim() == 2 and s.dim() == 2) or (x.dim() == 3 and
+                                               s.dim() == 3), "Input tensors must have 2 or 3 dimensions"
     y = torch.zeros_like(x, dtype=torch_dtype)
     return y

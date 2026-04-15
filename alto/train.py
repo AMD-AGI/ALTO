@@ -25,24 +25,19 @@ def log_calibration(
     device_mem_stats = metrics_processor.device_memory_monitor.get_peak_stats()
 
     metrics = {
-        "calibration_metrics/memory/max_active(GiB)":
-            device_mem_stats.max_active_gib,
-        "calibration_metrics/memory/max_active(%)":
-            device_mem_stats.max_active_pct,
-        "calibration_metrics/memory/max_reserved(GiB)":
-            device_mem_stats.max_reserved_gib,
-        "calibration_metrics/memory/max_reserved(%)":
-            device_mem_stats.max_reserved_pct,
+        "calibration_metrics/memory/max_active(GiB)": device_mem_stats.max_active_gib,
+        "calibration_metrics/memory/max_active(%)": device_mem_stats.max_active_pct,
+        "calibration_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+        "calibration_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
     }
     if extra_metrics:
         metrics.update(extra_metrics)
     metrics_processor.logger.log(metrics, micro_step)
 
     color = metrics_processor.color
-    logger.info(
-        f"{color.orange}calibration micro_step: {micro_step:2}  "
-        f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-        f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
+    logger.info(f"{color.orange}calibration micro_step: {micro_step:2}  "
+                f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
     metrics_processor.time_last_log = time.perf_counter()
     metrics_processor.device_memory_monitor.reset_peak_stats()
 
@@ -60,33 +55,25 @@ def log_stage2_optimization(
     device_mem_stats = metrics_processor.device_memory_monitor.get_peak_stats()
 
     metrics = {
-        "stage2_optimization_metrics/student_loss":
-            student_loss,
-        "stage2_optimization_metrics/aggregate_loss":
-            aggregate_loss,
-        "stage2_optimization_metrics/lr":
-            lr,
-        "stage2_optimization_metrics/memory/max_active(GiB)":
-            device_mem_stats.max_active_gib,
-        "stage2_optimization_metrics/memory/max_active(%)":
-            device_mem_stats.max_active_pct,
-        "stage2_optimization_metrics/memory/max_reserved(GiB)":
-            device_mem_stats.max_reserved_gib,
-        "stage2_optimization_metrics/memory/max_reserved(%)":
-            device_mem_stats.max_reserved_pct,
+        "stage2_optimization_metrics/student_loss": student_loss,
+        "stage2_optimization_metrics/aggregate_loss": aggregate_loss,
+        "stage2_optimization_metrics/lr": lr,
+        "stage2_optimization_metrics/memory/max_active(GiB)": device_mem_stats.max_active_gib,
+        "stage2_optimization_metrics/memory/max_active(%)": device_mem_stats.max_active_pct,
+        "stage2_optimization_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
+        "stage2_optimization_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
     }
     if extra_metrics:
         metrics.update(extra_metrics)
     metrics_processor.logger.log(metrics, micro_step)
 
     color = metrics_processor.color
-    logger.info(
-        f"{color.red}stage2 optimization micro_step: {micro_step:2}  "
-        f"{color.green}student_loss: {student_loss:7.4f}  "
-        f"{color.green}aggregate_loss: {aggregate_loss:7.4f}  "
-        f"{color.blue}lr: {lr:7.4f}  "
-        f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-        f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
+    logger.info(f"{color.red}stage2 optimization micro_step: {micro_step:2}  "
+                f"{color.green}student_loss: {student_loss:7.4f}  "
+                f"{color.green}aggregate_loss: {aggregate_loss:7.4f}  "
+                f"{color.blue}lr: {lr:7.4f}  "
+                f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
+                f"({device_mem_stats.max_reserved_pct:.2f}%){color.reset}")
 
     metrics_processor.time_last_log = time.perf_counter()
     metrics_processor.device_memory_monitor.reset_peak_stats()

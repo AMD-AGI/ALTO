@@ -24,16 +24,11 @@ from .utils import prepare_data, calc_cossim, calc_snr
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("use_hadamard", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights,
-                         contiguous, use_hadamard, data_type):
+def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, contiguous, use_hadamard, data_type):
     if use_2dblock_x and use_hadamard:
-        pytest.skip(
-            "Hadamard transform is applied only if 1D block is used for activations."
-        )
+        pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
     if not is_cdna4() and not trans_weights:
-        pytest.skip(
-            "BF16 GroupedMM only supports trans_weights=True."
-        )
+        pytest.skip("BF16 GroupedMM only supports trans_weights=True.")
 
     M_total, N, K, num_experts = shape
     # Ensure M_total is a multiple of group_size_m
@@ -56,20 +51,14 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights,
         inputs = prepare_data((K, M_total), data_type).transpose(-1, -2).requires_grad_(True)
     if trans_weights:
         if contiguous:
-            expert_weights = prepare_data((num_experts, N, K),
-                                          data_type).requires_grad_(True)
+            expert_weights = prepare_data((num_experts, N, K), data_type).requires_grad_(True)
         else:
-            expert_weights = prepare_data(
-                (num_experts, K, N),
-                data_type).transpose(-1, -2).requires_grad_(True)
+            expert_weights = prepare_data((num_experts, K, N), data_type).transpose(-1, -2).requires_grad_(True)
     else:
         if contiguous:
-            expert_weights = prepare_data((num_experts, K, N),
-                                          data_type).requires_grad_(True)
+            expert_weights = prepare_data((num_experts, K, N), data_type).requires_grad_(True)
         else:
-            expert_weights = prepare_data(
-                (num_experts, N, K),
-                data_type).transpose(-1, -2).requires_grad_(True)
+            expert_weights = prepare_data((num_experts, N, K), data_type).transpose(-1, -2).requires_grad_(True)
 
     # Create expert indices - each token in a group has the same expert
     expert_indices = torch.zeros(
@@ -78,10 +67,7 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights,
         device=device,
     )
     for g in range(num_groups):
-        expert_idx = torch.randint(0,
-                                   num_experts, (1, ),
-                                   device=device,
-                                   dtype=torch.int32).item()
+        expert_idx = torch.randint(0, num_experts, (1,), device=device, dtype=torch.int32).item()
         start_idx = g * ALIGN_SIZE_M
         end_idx = (g + 1) * ALIGN_SIZE_M
         expert_indices[start_idx:end_idx] = expert_idx
@@ -100,8 +86,7 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights,
         current_weight = expert_weights[expert_idx]
         if trans_weights:
             current_weight = current_weight.t()
-        outputs_ref[group_start:group_end] = (
-            inputs[group_start:group_end] @ current_weight)
+        outputs_ref[group_start:group_end] = (inputs[group_start:group_end] @ current_weight)
 
     # Compute loss and gradients with PyTorch
     loss_ref = torch.nn.functional.mse_loss(outputs_ref, target)

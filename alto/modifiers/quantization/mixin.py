@@ -148,13 +148,10 @@ class QuantizationMixin(HooksMixin):
         return value
 
     @field_validator("scheme", mode="before")
-    def validate_scheme(
-        cls, value: Optional[Union[str, Dict[str, Any]]]
-    ) -> Optional[Union[str, Dict[str, Any]]]:
+    def validate_scheme(cls, value: Optional[Union[str, Dict[str, Any]]]) -> Optional[Union[str, Dict[str, Any]]]:
         if isinstance(value, str) and not is_preset_scheme(value):
-            raise ValueError(
-                "`scheme` must either be a preset scheme name or a dictionary "
-                "of preset scheme names")
+            raise ValueError("`scheme` must either be a preset scheme name or a dictionary "
+                             "of preset scheme names")
 
         if isinstance(value, dict):
             for scheme_name in value.keys():
@@ -179,9 +176,7 @@ class QuantizationMixin(HooksMixin):
         valid_keys = {"weights", "input", "output"}
         for key in value.keys():
             if key not in valid_keys:
-                raise ValueError(
-                    f"Invalid observer key '{key}'. Valid keys are: {valid_keys}"
-                )
+                raise ValueError(f"Invalid observer key '{key}'. Valid keys are: {valid_keys}")
             if not isinstance(value[key], str):
                 raise ValueError(f"Observer value for '{key}' must be a string")
 
@@ -225,18 +220,15 @@ class QuantizationMixin(HooksMixin):
         :param model: model to attach schemes and observers to
         """
 
-        for _, module in match_named_modules(model, self.resolved_targets,
-                                             self.ignore):
-            reset_quantization_status(
-                module)  # reset any previously applied qconfigs
+        for _, module in match_named_modules(model, self.resolved_targets, self.ignore):
+            reset_quantization_status(module)  # reset any previously applied qconfigs
 
         apply_quantization_config(model, self.resolved_config)
 
         # disable quantization until calibration
         model.apply(disable_quantization)
 
-        for name, module in match_named_modules(model, self.resolved_targets,
-                                             self.ignore):
+        for name, module in match_named_modules(model, self.resolved_targets, self.ignore):
             self._initialize_observers(module, name)
             self._calibration_hooks |= self._initialize_hooks(module)
             reset_quantization_status(module)
@@ -252,8 +244,7 @@ class QuantizationMixin(HooksMixin):
         # disable quantization during calibration
         model.apply(disable_quantization)
 
-        for _, module in match_named_modules(model, self.resolved_targets,
-                                             self.ignore):
+        for _, module in match_named_modules(model, self.resolved_targets, self.ignore):
             apply_calibration_status(module)
 
         for observer in self._observers.values():
@@ -297,8 +288,7 @@ class QuantizationMixin(HooksMixin):
         # remove calibration hooks
         self.remove_hooks(self._calibration_hooks)
         # remove observers
-        for _, module in match_named_modules(model, self.resolved_targets,
-                                             self.ignore):
+        for _, module in match_named_modules(model, self.resolved_targets, self.ignore):
             freeze_module_quantization(module)
         self._observers.clear()
         model.apply(enable_quantization)  # keep quantization enabled
@@ -307,8 +297,7 @@ class QuantizationMixin(HooksMixin):
         """
         Determine if the user has specified a quantization config on this modifier
         """
-        return not (self.config_groups is None and
-                    self.targets == ["Linear"] and self.ignore == [] and
+        return not (self.config_groups is None and self.targets == ["Linear"] and self.ignore == [] and
                     self.scheme is None and self.kv_cache_scheme is None)
 
     def resolve_quantization_config(self) -> QuantizationConfig:
@@ -322,8 +311,7 @@ class QuantizationMixin(HooksMixin):
         ignore = self.ignore
 
         if scheme is not None and config_groups is not None:
-            raise ValueError(
-                "Please specify either `scheme` or `config_groups`")
+            raise ValueError("Please specify either `scheme` or `config_groups`")
 
         if scheme is not None:
             # takes precedence over config_groups
@@ -337,10 +325,7 @@ class QuantizationMixin(HooksMixin):
                 if is_preset_scheme(key):
                     scheme_obj = preset_name_to_scheme(key, scheme[key])
                 else:
-                    scheme_obj = QuantizationScheme.model_validate({
-                        "targets": scheme[key],
-                        **scheme
-                    })
+                    scheme_obj = QuantizationScheme.model_validate({"targets": scheme[key], **scheme})
 
                 # Apply observer overrides if specified
                 scheme_obj = self._apply_observer_overrides(scheme_obj)
@@ -351,8 +336,7 @@ class QuantizationMixin(HooksMixin):
         if config_groups is None or len(config_groups) == 0:
             default_quant_scheme = QuantizationScheme(targets=targets)
             # Apply observer overrides to default scheme as well
-            default_quant_scheme = self._apply_observer_overrides(
-                default_quant_scheme)
+            default_quant_scheme = self._apply_observer_overrides(default_quant_scheme)
             config_groups = {"group_0": default_quant_scheme}
         elif scheme is None:
             # Apply observer overrides to all config groups when config_groups
@@ -367,8 +351,7 @@ class QuantizationMixin(HooksMixin):
             ignore=ignore,
         )
 
-    def _apply_observer_overrides(
-            self, scheme: QuantizationScheme) -> QuantizationScheme:
+    def _apply_observer_overrides(self, scheme: QuantizationScheme) -> QuantizationScheme:
         """
         Apply observer overrides from weight_observer, input_observer, output_observer,
         or observer dict to the quantization scheme.
@@ -377,14 +360,12 @@ class QuantizationMixin(HooksMixin):
         :return: Modified QuantizationScheme with observers applied
         """
         # Validate that both individual params and dict are not specified
-        has_individual = (self.weight_observer is not None or
-                          self.input_observer is not None or
+        has_individual = (self.weight_observer is not None or self.input_observer is not None or
                           self.output_observer is not None)
         if has_individual and self.observer is not None:
-            raise ValueError(
-                "Cannot specify both individual observer parameters (weight_observer, "
-                "input_observer, output_observer) and observer dict. "
-                "Please use either individual parameters or the observer dict.")
+            raise ValueError("Cannot specify both individual observer parameters (weight_observer, "
+                             "input_observer, output_observer) and observer dict. "
+                             "Please use either individual parameters or the observer dict.")
 
         # Resolve observer values from individual params or dict
         weight_obs = self.weight_observer
@@ -409,8 +390,7 @@ class QuantizationMixin(HooksMixin):
             if obs_value is not None and q_args is not None:
                 args_dict = q_args.model_dump()
                 args_dict["observer"] = obs_value
-                setattr(scheme, scheme_attr,
-                        QuantizationArgs.model_validate(args_dict))
+                setattr(scheme, scheme_attr, QuantizationArgs.model_validate(args_dict))
 
         return scheme
 
@@ -458,8 +438,7 @@ class QuantizationMixin(HooksMixin):
             if observer is not None:
                 self._observers[f"{module_name}.output_observer"] = observer
 
-    def _initialize_hooks(self,
-                          module: torch.nn.Module) -> Set[RemovableHandle]:
+    def _initialize_hooks(self, module: torch.nn.Module) -> Set[RemovableHandle]:
         hooks = set()
         if not hasattr(module, "quantization_scheme"):
             return hooks
@@ -475,24 +454,16 @@ class QuantizationMixin(HooksMixin):
         # input activations
         if input:
             if not is_attention:
-                hooks.add(
-                    self.register_hook(module, calibrate_input_hook,
-                                       "forward_pre"))
+                hooks.add(self.register_hook(module, calibrate_input_hook, "forward_pre"))
             else:
                 if hasattr(module, IMPL_ATTR):
-                    hooks.add(
-                        self.register_hook(module, calibrate_query_hook,
-                                           "query"))
+                    hooks.add(self.register_hook(module, calibrate_query_hook, "query"))
                 if hasattr(module, KV_CACHE_ATTR):
-                    hooks.add(
-                        self.register_hook(module, calibrate_key_hook, "key"))
-                    hooks.add(
-                        self.register_hook(module, calibrate_value_hook,
-                                           "value"))
+                    hooks.add(self.register_hook(module, calibrate_key_hook, "key"))
+                    hooks.add(self.register_hook(module, calibrate_value_hook, "value"))
 
         # output activations
         if output:
-            hooks.add(
-                self.register_hook(module, calibrate_output_hook, "forward"))
+            hooks.add(self.register_hook(module, calibrate_output_hook, "forward"))
 
         return hooks

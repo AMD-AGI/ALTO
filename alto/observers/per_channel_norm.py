@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-
 import torch
 from alto.utils.pytorch.module import TransformerConv1D
 from .base import Observer, register_observer
@@ -47,9 +46,7 @@ class PerChannelNormObserver(Observer):
             num_added = inp.shape[0]  # note this is the number of dataset samples, not
             # multiplied by the sequence length
 
-            if isinstance(module,
-                          torch.nn.Linear) or (TransformerConv1D and isinstance(
-                              module, TransformerConv1D)):
+            if isinstance(module, torch.nn.Linear) or (TransformerConv1D and isinstance(module, TransformerConv1D)):
                 if inp.dim() == 3:
                     inp = inp.reshape((-1, inp.shape[-1]))
                 inp = inp.t()
@@ -69,7 +66,7 @@ class PerChannelNormObserver(Observer):
             self.num_samples += num_added
 
             inp = inp.type(PRECISION)
-            self.stats += torch.norm(inp, p=2, dim=1) ** 2 / self.num_samples
+            self.stats += torch.norm(inp, p=2, dim=1)**2 / self.num_samples
 
         return x_orig
 

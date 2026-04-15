@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/modifier.py
 
-
 from abc import abstractmethod
 from pydantic import ConfigDict
 import torch

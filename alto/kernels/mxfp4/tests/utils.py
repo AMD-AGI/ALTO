@@ -4,8 +4,7 @@
 
 import torch
 from torch import Tensor
-from alto.kernels.mxfp4.mxfp_quantization import (
-    BLOCK_SIZE_DEFAULT)
+from alto.kernels.mxfp4.mxfp_quantization import (BLOCK_SIZE_DEFAULT)
 
 
 def prepare_data(tensor_shape, data_type):
@@ -86,8 +85,7 @@ def _f32_to_floatx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     magic_adder = _n_ones(MBITS_F32 - mbits - 1)
 
     # all E bits and M bits are 1s
-    max_normal = 2**(_n_ones(ebits) - exp_bias) * (_n_ones(mbits + 1) /
-                                                   (2**mbits))
+    max_normal = 2**(_n_ones(ebits) - exp_bias) * (_n_ones(mbits + 1) / (2**mbits))
 
     # E bits = 1, M bits = 0
     min_normal = 2**(1 - exp_bias)
@@ -102,8 +100,7 @@ def _f32_to_floatx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     denorm_mask_int = denorm_exp << MBITS_F32
 
     # reinterpret int32 as float32
-    denorm_mask_float = torch.tensor(denorm_mask_int,
-                                     dtype=torch.int32).view(torch.float32)
+    denorm_mask_float = torch.tensor(denorm_mask_int, dtype=torch.int32).view(torch.float32)
 
     # save the sign
     # Note that we have torch.uint32, but some ops like cpu bit shifts
@@ -121,10 +118,8 @@ def _f32_to_floatx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     # rewrite saturate/denorm/norm branches without explicit data dependent
     # control flow, to be more compiler friendly
     saturate_mask = x >= max_normal
-    denormal_mask = torch.logical_and(torch.logical_not(saturate_mask), x
-                                      < min_normal)
-    normal_mask = torch.logical_not(
-        torch.logical_or(saturate_mask, denormal_mask))
+    denormal_mask = torch.logical_and(torch.logical_not(saturate_mask), x < min_normal)
+    normal_mask = torch.logical_not(torch.logical_or(saturate_mask, denormal_mask))
 
     #
     # branch 1: saturate to max val - handled later in the code which combines
@@ -246,22 +241,18 @@ def _floatx_unpacked_to_f32(x: Tensor, ebits: int, mbits: int) -> Tensor:
                 # left shift mantissa until it overflows (create an implicit 1)
                 # subtract exponent by the same amount
                 left_shift = mbits - i
-                mantissa_f32 = (mantissa_cmp -
-                                (1 << i)) << (left_shift + MBITS_F32 - mbits)
-                exp_biased_f32 = (denormal_exp_biased -
-                                  left_shift) << MBITS_F32
+                mantissa_f32 = (mantissa_cmp - (1 << i)) << (left_shift + MBITS_F32 - mbits)
+                exp_biased_f32 = (denormal_exp_biased - left_shift) << MBITS_F32
 
                 # we can update this in-place since the values won't overlap
                 # torch.compile() may complain unsupported operand type(s) for |: 'SymInt' and 'int'
                 # thus we use + instead of | here
-                mantissa_lp_int32[mantissa_lp_int32 == mantissa_cmp] = (
-                    exp_biased_f32 + mantissa_f32)
+                mantissa_lp_int32[mantissa_lp_int32 == mantissa_cmp] = (exp_biased_f32 + mantissa_f32)
 
         result = torch.where(denormal_mask, mantissa_lp_int32, result)
 
     # add sign back
-    sign_f32 = sign_lp.to(
-        torch.int32) << (MBITS_F32 - mbits + EBITS_F32 - ebits)
+    sign_f32 = sign_lp.to(torch.int32) << (MBITS_F32 - mbits + EBITS_F32 - ebits)
     result = result | sign_f32
 
     return result.view(torch.float)
@@ -302,8 +293,7 @@ def unpack_uint4(uint8_data) -> torch.Tensor:
 
     second_elements = (uint8_data >> 4).to(torch.uint8)
     first_elements = (uint8_data & 0b1111).to(torch.uint8)
-    unpacked = torch.stack([first_elements, second_elements],
-                           dim=-1).view(up_size(shape))
+    unpacked = torch.stack([first_elements, second_elements], dim=-1).view(up_size(shape))
     return unpacked
 
 
@@ -337,18 +327,15 @@ def convert_to_mxfp4_pytorch(
     data_hp = data_hp.transpose(axis, -1)
     orig_shape = data_hp.shape
     if is_2d_block:
-        new_shape = (*orig_shape[:-2], orig_shape[-2] // block_size,
-                     block_size, orig_shape[-1] // block_size, block_size)
-        block_shape = (*orig_shape[:-2], orig_shape[-2] // block_size,
-                       orig_shape[-1] // block_size, block_size * block_size)
+        new_shape = (*orig_shape[:-2], orig_shape[-2] // block_size, block_size, orig_shape[-1] // block_size,
+                     block_size)
+        block_shape = (*orig_shape[:-2], orig_shape[-2] // block_size, orig_shape[-1] // block_size,
+                       block_size * block_size)
         data_hp = data_hp.reshape(new_shape)
 
-        max_abs = torch.amax(torch.abs(
-            data_hp.transpose(-2, -3).reshape(block_shape)),
-                             dim=-1)
+        max_abs = torch.amax(torch.abs(data_hp.transpose(-2, -3).reshape(block_shape)), dim=-1)
     else:
-        new_shape = (*orig_shape[:-1], orig_shape[-1] // block_size,
-                     block_size)
+        new_shape = (*orig_shape[:-1], orig_shape[-1] // block_size, block_size)
         data_hp = data_hp.reshape(new_shape)
 
         max_abs = torch.amax(torch.abs(data_hp), dim=-1)
@@ -369,8 +356,7 @@ def convert_to_mxfp4_pytorch(
     # has some gaps.  So, for now just set to the minimum normal value.
     scales = torch.clamp(scales, min=1).to(torch.uint8)
 
-    scales_fp = (scales.to(hp_int_dtype) << hp_mbits).view(
-        data_hp.dtype).unsqueeze(-1)
+    scales_fp = (scales.to(hp_int_dtype) << hp_mbits).view(data_hp.dtype).unsqueeze(-1)
     if is_2d_block:
         scales_fp = scales_fp.unsqueeze(-3)
     data_lp = data_hp / scales_fp
@@ -400,18 +386,15 @@ def convert_from_mxfp4_pytorch(
     orig_shape = (*orig_shape[:-1], orig_shape[-1] * 2)
 
     if is_2d_block:
-        new_shape = (*orig_shape[:-2], orig_shape[-2] // block_size,
-                     block_size, orig_shape[-1] // block_size, block_size)
-        scale_shape = (*orig_shape[:-2], orig_shape[-2] // block_size, 1,
-                       orig_shape[-1] // block_size, 1)
-    else:
-        new_shape = (*orig_shape[:-1], orig_shape[-1] // block_size,
+        new_shape = (*orig_shape[:-2], orig_shape[-2] // block_size, block_size, orig_shape[-1] // block_size,
                      block_size)
+        scale_shape = (*orig_shape[:-2], orig_shape[-2] // block_size, 1, orig_shape[-1] // block_size, 1)
+    else:
+        new_shape = (*orig_shape[:-1], orig_shape[-1] // block_size, block_size)
         scale_shape = (*orig_shape[:-1], orig_shape[-1] // block_size, 1)
 
     data_hp = data_hp.reshape(new_shape)
-    s_fp = (scales.to(torch.int32) << 23).view(
-        torch.float32).reshape(scale_shape).to(output_dtype)
+    s_fp = (scales.to(torch.int32) << 23).view(torch.float32).reshape(scale_shape).to(output_dtype)
     data_hp = data_hp * s_fp
     data_hp = data_hp.reshape(orig_shape)
 

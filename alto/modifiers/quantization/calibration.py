@@ -71,24 +71,18 @@ def initialize_observer(
     else:  # input, q, k, v
         arg_name = "input_activations"
 
-    args: QuantizationArgs = getattr_chain(module,
-                                           f"quantization_scheme.{arg_name}",
-                                           None)
+    args: QuantizationArgs = getattr_chain(module, f"quantization_scheme.{arg_name}", None)
     observer = args.observer
 
     # training is no longer supported: always use memoryless for weights
     if base_name == "weight" and args.observer in ("minmax",):
         observer = "memoryless_minmax"
-        logger.warning(
-            "Overriding weight observer for lower memory usage "
-            f"({args.observer} -> {observer})",
-        )
+        logger.warning("Overriding weight observer for lower memory usage "
+                       f"({args.observer} -> {observer})",)
     if base_name == "weight" and args.observer in ("mse",):
         observer = "memoryless_mse"
-        logger.warning(
-            "Overriding weight observer for lower memory usage "
-            f"({args.observer} -> {observer})",
-        )
+        logger.warning("Overriding weight observer for lower memory usage "
+                       f"({args.observer} -> {observer})",)
 
     if args is not None and args.dynamic is not True:
         observer = Observer.create_instance(
@@ -141,11 +135,8 @@ def update_weight_zp_scale(module: Module):
     if getattr_chain(module, "quantization_scheme.weights", None) is None:
         return
 
-    if getattr(module, "quantization_status",
-               None) != QuantizationStatus.CALIBRATION:
-        logger.warning(
-            "Attempting to calibrate weights of a module not in calibration mode"
-        )
+    if getattr(module, "quantization_status", None) != QuantizationStatus.CALIBRATION:
+        logger.warning("Attempting to calibrate weights of a module not in calibration mode")
 
     call_observer(module=module, base_name="weight")
     observer: Observer = getattr(module, "weight_observer")

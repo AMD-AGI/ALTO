@@ -176,15 +176,10 @@ class BlockwiseFP8Linear(nn.Linear):
                  block_size: int = 128,
                  device: torch.device | None = None,
                  dtype: torch.dtype | None = None):
-        super().__init__(in_features,
-                         out_features,
-                         bias=bias,
-                         device=device,
-                         dtype=dtype)
+        super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
 
         self.block_size = block_size
         assert not self.bias, "Bias is not supported in BlockwiseFP8Linear"
-
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -207,9 +202,7 @@ class BlockwiseFP8Linear(nn.Linear):
                 Shard(x.dim() - 1),  # x
                 Shard(1),  # w
             ]
-            for acceptable_placement in single_mesh_dim_strategies + [
-                    rowwise_abs
-            ]:
+            for acceptable_placement in single_mesh_dim_strategies + [rowwise_abs]:
                 if acceptable_placement[1:] == [x.placements[-1], self.weight.placements[-1]]:
                     output_placement = acceptable_placement[0]
                     break
@@ -222,9 +215,7 @@ class BlockwiseFP8Linear(nn.Linear):
         y = BlockwiseFP8LinearFunction.apply(x, w, self.block_size)
 
         if device_mesh is not None:
-            y = DTensor.from_local(y,
-                                   device_mesh=device_mesh,
-                                   placements=(output_placement, ))
+            y = DTensor.from_local(y, device_mesh=device_mesh, placements=(output_placement,))
 
         return y
 
@@ -252,7 +243,6 @@ class BlockwiseFP8Linear(nn.Linear):
         if layer.bias is not None:
             new_layer.bias.data.copy_(layer.bias.data)
         return new_layer
-
 
 
 # =============== Test functions for verifying correctness =================
@@ -302,18 +292,16 @@ def verify_blockwise_linear_backward(
     # Create test tensors
     torch.manual_seed(0)
     dtype = torch.bfloat16
-    inputs = torch.nn.Parameter(
-        torch.randn(
-            (B, M, K),
-            device=device,
-            dtype=dtype,
-        ) * STD)
-    weights = torch.nn.Parameter(
-        torch.randn(
-            (N, K),
-            dtype=dtype,
-            device=device,
-        ) * STD)
+    inputs = torch.nn.Parameter(torch.randn(
+        (B, M, K),
+        device=device,
+        dtype=dtype,
+    ) * STD)
+    weights = torch.nn.Parameter(torch.randn(
+        (N, K),
+        dtype=dtype,
+        device=device,
+    ) * STD)
 
     # Create a target for gradient computation
     target = torch.randn((B, M, N), dtype=dtype, device=device) * STD
@@ -358,19 +346,11 @@ def verify_blockwise_linear_backward(
         row = (flat_idx % (M * N)) // N
         col = (flat_idx % (M * N)) % N
         print(f"Largest difference at position [{bs}, {row}, {col}]")
-        print(
-            f"Triton: {outputs[bs, row, col].item()}, PyTorch: {outputs_ref[bs, row, col].item()}"
-        )
+        print(f"Triton: {outputs[bs, row, col].item()}, PyTorch: {outputs_ref[bs, row, col].item()}")
 
     # Check if gradients match
-    inputs_grad_match = torch.allclose(inputs.grad,
-                                       grad_inputs_ref,
-                                       atol=atol,
-                                       rtol=rtol)
-    weights_grad_match = torch.allclose(weights.grad,
-                                        grad_weights_ref,
-                                        atol=atol,
-                                        rtol=rtol)
+    inputs_grad_match = torch.allclose(inputs.grad, grad_inputs_ref, atol=atol, rtol=rtol)
+    weights_grad_match = torch.allclose(weights.grad, grad_weights_ref, atol=atol, rtol=rtol)
     print(f"inputs.grad={inputs.grad}")
     print(f"grad_inputs_ref={grad_inputs_ref}")
     print(
@@ -393,9 +373,7 @@ def verify_blockwise_linear_backward(
         row = (flat_idx % (K * M)) // K
         col = (flat_idx % (K * M)) % K
         print(f"Largest difference at position [{bs}, {row}, {col}]")
-        print(
-            f"Triton: {inputs.grad[bs, row, col].item()}, PyTorch: {grad_inputs_ref[bs, row, col].item()}"
-        )
+        print(f"Triton: {inputs.grad[bs, row, col].item()}, PyTorch: {grad_inputs_ref[bs, row, col].item()}")
 
     if not weights_grad_match:
         # Compute max absolute difference for debugging
@@ -403,15 +381,11 @@ def verify_blockwise_linear_backward(
         print(f"Max difference in weight gradients: {max_diff}")
 
         # Find where the largest differences are
-        flat_idx = torch.argmax(
-            torch.abs(weights.grad - grad_weights_ref).view(-1))
+        flat_idx = torch.argmax(torch.abs(weights.grad - grad_weights_ref).view(-1))
         row = flat_idx // K
         col = flat_idx % K
-        print(
-            f"Largest difference at position [{row}, {col}]")
-        print(
-            f"Triton: {weights.grad[row, col].item()}, PyTorch: {grad_weights_ref[row, col].item()}"
-        )
+        print(f"Largest difference at position [{row}, {col}]")
+        print(f"Triton: {weights.grad[row, col].item()}, PyTorch: {grad_weights_ref[row, col].item()}")
 
     return inputs_grad_match, weights_grad_match
 
@@ -419,16 +393,12 @@ def verify_blockwise_linear_backward(
 if __name__ == "__main__":
 
     import argparse
-    parser = argparse.ArgumentParser(
-        description="Test and benchmark blockwise FP8 linear forward/backward pass.")
-    parser.add_argument("--compile",
-                        action="store_true",
-                        help="Use torch.compile")
+    parser = argparse.ArgumentParser(description="Test and benchmark blockwise FP8 linear forward/backward pass.")
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile")
 
     args = parser.parse_args()
     compile = args.compile
 
     # Run verification test
     print("Verifying backward pass correctness...")
-    inputs_match, weights_match = verify_blockwise_linear_backward(
-        compile=compile)
+    inputs_match, weights_match = verify_blockwise_linear_backward(compile=compile)

@@ -7,17 +7,11 @@ from tabulate import tabulate
 import torch
 
 from alto.kernels.mxfp4.triton_flash_attention_mxfp4 import (
-    triton_attention_mxfp4,
-)
+    triton_attention_mxfp4,)
 from .utils import calc_snr, calc_cossim
 
 
-def attention_vanilla_forward_pytorch_ref_impl(q,
-                                               k,
-                                               v,
-                                               sm_scale,
-                                               causal,
-                                               layout="bshd"):
+def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout="bshd"):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
     if layout == "bshd":
@@ -36,8 +30,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q,
                                                              v,
                                                              is_causal=causal,
                                                              scale=sm_scale,
-                                                             enable_gqa=n_rep
-                                                             > 1)
+                                                             enable_gqa=n_rep > 1)
     if layout == "bshd":
         o_ref = o_ref.transpose(1, 2)
     return o_ref
@@ -45,8 +38,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q,
 
 class AttnConfig:
 
-    def __init__(self, seqlen_q, seqlen_kv, num_head_q, num_head_kv,
-                 head_dim_qk, head_dim_v):
+    def __init__(self, seqlen_q, seqlen_kv, num_head_q, num_head_kv, head_dim_qk, head_dim_v):
         self.seqlen_q = seqlen_q
         self.seqlen_kv = seqlen_kv
         self.num_head_q = num_head_q
@@ -56,54 +48,14 @@ class AttnConfig:
 
 
 test_cases = [
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=32,
-               num_head_kv=32,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=64,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=32,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=64,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=16,
-               num_head_kv=16,
-               head_dim_qk=192,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=128,
-               num_head_kv=128,
-               head_dim_qk=192,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=32,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=48,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=32, num_head_kv=32, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=64, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=32, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=64, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=16, num_head_kv=16, head_dim_qk=192, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=128, num_head_kv=128, head_dim_qk=192, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=32, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=48, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
     # begin regression tests for SWDEV-548136
     # this will fail because currently tl.dot_scaled does not support k<64
     # AttnConfig(seqlen_q=4096 + 64,
@@ -112,12 +64,7 @@ test_cases = [
     #            num_head_kv=1,
     #            head_dim_qk=32,
     #            head_dim_v=32),
-    AttnConfig(seqlen_q=2048,
-               seqlen_kv=2048,
-               num_head_q=64,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
+    AttnConfig(seqlen_q=2048, seqlen_kv=2048, num_head_q=64, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
     # end regression tests for SWDEV-548136
 ]
 
@@ -142,23 +89,15 @@ def test_attention(batch, config, causal):
 
     torch.manual_seed(1234)
 
-    query = torch.randn(q_layout,
-                        device=device,
-                        dtype=dtype,
-                        requires_grad=True)
+    query = torch.randn(q_layout, device=device, dtype=dtype, requires_grad=True)
     key = torch.randn(k_layout, device=device, dtype=dtype, requires_grad=True)
-    value = torch.randn(v_layout,
-                        device=device,
-                        dtype=dtype,
-                        requires_grad=True)
+    value = torch.randn(v_layout, device=device, dtype=dtype, requires_grad=True)
     query_ref = query.clone().detach().requires_grad_()
     key_ref = key.clone().detach().requires_grad_()
     value_ref = value.clone().detach().requires_grad_()
 
     sm_scale = query.shape[-1]**(-0.5)
-    o_ref = attention_vanilla_forward_pytorch_ref_impl(query_ref, key_ref,
-                                                       value_ref, sm_scale,
-                                                       causal)
+    o_ref = attention_vanilla_forward_pytorch_ref_impl(query_ref, key_ref, value_ref, sm_scale, causal)
     loss_ref = o_ref.mean()
     loss_ref.backward()
     o = triton_attention_mxfp4(
@@ -185,12 +124,9 @@ def test_attention(batch, config, causal):
     output_snr = calc_snr(o_ref, o)
     output_sim = calc_cossim(o_ref, o)
     print()
-    print(
-        tabulate([
-            ["O", output_snr, output_sim],
-        ],
-                 headers=["Tensor", "SNR", "Cosine Sim"],
-                 tablefmt="github"))
+    print(tabulate([
+        ["O", output_snr, output_sim],
+    ], headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
     # query_grad_snr = compute_snr(query_ref.grad, query.grad)
     # key_grad_snr = compute_snr(key_ref.grad, key.grad)
     # value_grad_snr = compute_snr(value_ref.grad, value.grad)

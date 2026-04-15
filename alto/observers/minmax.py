@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-
 import torch
 
 from .base import Observer, register_observer, MinMaxTuple

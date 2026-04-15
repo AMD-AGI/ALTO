@@ -46,14 +46,14 @@ def _pseudo_quantize_tensor(w, n_bit=4, zero_point=True, q_group_size=-1):
     if zero_point:
         max_val = w.amax(dim=1, keepdim=True)
         min_val = w.amin(dim=1, keepdim=True)
-        max_int = 2 ** n_bit - 1
+        max_int = 2**n_bit - 1
         min_int = 0
         scales = (max_val - min_val).clamp(min=1e-5) / max_int
         zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
     else:
         max_val = w.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
-        max_int = 2 ** (n_bit - 1) - 1
-        min_int = -(2 ** (n_bit - 1))
+        max_int = 2**(n_bit - 1) - 1
+        min_int = -(2**(n_bit - 1))
         scales = max_val / max_int
         zeros = 0
     w = (torch.clamp(torch.round(w / scales) + zeros, min_int, max_int) - zeros) * scales
@@ -99,16 +99,18 @@ class AWQModifier(QuantizationModifier):
                         continue
                     self._awq_names[bl] = bn
                     obs = Observer.create_instance(
-                        "activation_scale", base_name=AWQ_OBSERVER_BASE_NAME,
-                        args=None, module=bl, device=device_type,
+                        "activation_scale",
+                        base_name=AWQ_OBSERVER_BASE_NAME,
+                        args=None,
+                        module=bl,
+                        device=device_type,
                     )
                     object.__setattr__(bl, f"{AWQ_OBSERVER_BASE_NAME}_observer", obs)
                     self.register_hook(bl, partial(_awq_hook, base_name=AWQ_OBSERVER_BASE_NAME), "forward_pre")
                     self._awq_observers[bl] = obs
             for blk_idx, (blk_name, _) in enumerate(self._sequential_blocks):
                 self._block_mappings[blk_idx] = [
-                    mp for mp in self._resolved_mappings
-                    if mp.smooth_name.startswith(blk_name + ".")
+                    mp for mp in self._resolved_mappings if mp.smooth_name.startswith(blk_name + ".")
                 ]
         logger.info(f"AWQModifier: {len(self._resolved_mappings)} mappings, {len(self._awq_observers)} observers")
         return result
@@ -158,8 +160,8 @@ class AWQModifier(QuantizationModifier):
         self._cleanup_awq()
         for m in model_parts:
             for _, module in tqdm.tqdm(
-                list(match_named_modules(m, self.resolved_targets, self.ignore)),
-                desc="AWQ weight calibration",
+                    list(match_named_modules(m, self.resolved_targets, self.ignore)),
+                    desc="AWQ weight calibration",
             ):
                 update_weight_zp_scale(module)
         return True
@@ -168,8 +170,8 @@ class AWQModifier(QuantizationModifier):
         self._cleanup_awq()
         for m in model_parts:
             for _, module in tqdm.tqdm(
-                list(match_named_modules(m, self.resolved_targets, self.ignore)),
-                desc="AWQ weight calibration",
+                    list(match_named_modules(m, self.resolved_targets, self.ignore)),
+                    desc="AWQ weight calibration",
             ):
                 update_weight_zp_scale(module)
 

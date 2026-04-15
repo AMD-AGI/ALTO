@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """Utility / helper functions."""
 
 import random
@@ -39,9 +38,8 @@ __all__ = [
 ##############################
 
 
-def tensors_to_device(
-        tensors: Union[Tensor, Iterable[Tensor], Dict[Any, Tensor]],
-        device: str) -> Union[Tensor, Iterable[Tensor], Dict[Any, Tensor]]:
+def tensors_to_device(tensors: Union[Tensor, Iterable[Tensor], Dict[Any, Tensor]],
+                      device: str) -> Union[Tensor, Iterable[Tensor], Dict[Any, Tensor]]:
     """
     Default function for putting a tensor or collection of tensors to the proper device.
     Returns the tensor references after being placed on the proper device.
@@ -64,14 +62,10 @@ def tensors_to_device(
         return tensors.to(device)
 
     if isinstance(tensors, OrderedDict):
-        return OrderedDict([(key, tensors_to_device(tens, device))
-                            for key, tens in tensors.items()])
+        return OrderedDict([(key, tensors_to_device(tens, device)) for key, tens in tensors.items()])
 
     if isinstance(tensors, Mapping):
-        return {
-            key: tensors_to_device(tens, device)
-            for key, tens in tensors.items()
-        }
+        return {key: tensors_to_device(tens, device) for key, tens in tensors.items()}
 
     if isinstance(tensors, tuple):
         return tuple(tensors_to_device(tens, device) for tens in tensors)
@@ -79,14 +73,11 @@ def tensors_to_device(
     if isinstance(tensors, Iterable):
         return [tensors_to_device(tens, device) for tens in tensors]
 
-    raise ValueError("unrecognized type for tensors given of {}".format(
-        tensors.__class__.__name__))
+    raise ValueError("unrecognized type for tensors given of {}".format(tensors.__class__.__name__))
 
 
-def tensors_to_precision(
-        tensors: Union[Tensor, Iterable[Tensor],
-                       Dict[Any, Tensor]], full_precision: bool
-) -> Union[Tensor, Iterable[Tensor], Dict[Any, Tensor]]:
+def tensors_to_precision(tensors: Union[Tensor, Iterable[Tensor], Dict[Any, Tensor]],
+                         full_precision: bool) -> Union[Tensor, Iterable[Tensor], Dict[Any, Tensor]]:
     """
     :param tensors: the tensors to change the precision of
     :param full_precision: True for full precision (float 32) and
@@ -97,20 +88,15 @@ def tensors_to_precision(
         return tensors.float() if full_precision else tensors.half()
 
     if isinstance(tensors, Mapping):
-        return {
-            key: tensors_to_precision(tens, full_precision)
-            for key, tens in tensors.items()
-        }
+        return {key: tensors_to_precision(tens, full_precision) for key, tens in tensors.items()}
 
     if isinstance(tensors, tuple):
-        return tuple(
-            tensors_to_precision(tens, full_precision) for tens in tensors)
+        return tuple(tensors_to_precision(tens, full_precision) for tens in tensors)
 
     if isinstance(tensors, Iterable):
         return [tensors_to_precision(tens, full_precision) for tens in tensors]
 
-    raise ValueError("unrecognized type for tensors given of {}".format(
-        tensors.__class__.__name__))
+    raise ValueError("unrecognized type for tensors given of {}".format(tensors.__class__.__name__))
 
 
 # used by calibration function, TODO: remove with data pipelines
@@ -138,13 +124,10 @@ def tensors_module_forward(
         the first element assuming it's the features False to not check
     :return: the result of calling into the model for a forward pass
     """
-    if ((isinstance(tensors, tuple) or isinstance(tensors, List)) and
-            len(tensors) == 2 and check_feat_lab_inp):
+    if ((isinstance(tensors, tuple) or isinstance(tensors, List)) and len(tensors) == 2 and check_feat_lab_inp):
         # assume if this is a list or tuple of 2 items that it is made up of
         # (features, labels) pass the features into a recursive call for the model
-        return tensors_module_forward(tensors[0],
-                                      module,
-                                      check_feat_lab_inp=False)
+        return tensors_module_forward(tensors[0], module, check_feat_lab_inp=False)
 
     if isinstance(tensors, Tensor):
         return module(tensors)
@@ -155,13 +138,10 @@ def tensors_module_forward(
     if isinstance(tensors, Iterable):
         return module(*tensors)
 
-    raise ValueError("unrecognized type for data given of {}".format(
-        tensors.__class__.__name__))
+    raise ValueError("unrecognized type for data given of {}".format(tensors.__class__.__name__))
 
 
-def tensor_sparsity(
-        tens: Tensor,
-        dim: Union[None, int, List[int], Tuple[int, ...]] = None) -> Tensor:
+def tensor_sparsity(tens: Tensor, dim: Union[None, int, List[int], Tuple[int, ...]] = None) -> Tensor:
     """
     :param tens: the tensor to calculate the sparsity for
     :param dim: the dimension(s) to split the calculations over;
@@ -178,17 +158,13 @@ def tensor_sparsity(
         dim = [dim]
 
     if max(dim) >= len(tens.shape):
-        raise ValueError(
-            "Unsupported dim given of {} in {} for tensor shape {}".format(
-                max(dim), dim, tens.shape))
+        raise ValueError("Unsupported dim given of {} in {} for tensor shape {}".format(max(dim), dim, tens.shape))
 
     sum_dims = [ind for ind in range(len(tens.shape)) if ind not in dim]
     zeros = (tens == 0).sum(dim=sum_dims) if sum_dims else tens == 0
-    total = numpy.prod(
-        [tens.shape[ind] for ind in range(len(tens.shape)) if ind not in dim])
+    total = numpy.prod([tens.shape[ind] for ind in range(len(tens.shape)) if ind not in dim])
 
-    permute_order = sorted(((d, len(dim) - i - 1) for i, d in enumerate(dim)),
-                           reverse=True)
+    permute_order = sorted(((d, len(dim) - i - 1) for i, d in enumerate(dim)), reverse=True)
     permute = [d[1] for d in permute_order]
 
     if permute != [i for i in range(len(permute))]:
@@ -210,11 +186,7 @@ def get_linear_layers(module: Module) -> Dict[str, Module]:
     :param module: the module to grab all linear layers for
     :return: a list of all linear layers in the module
     """
-    return {
-        name: mod
-        for name, mod in module.named_modules()
-        if isinstance(mod, Linear)
-    }
+    return {name: mod for name, mod in module.named_modules() if isinstance(mod, Linear)}
 
 
 def get_quantized_layers(module: Module) -> List[Tuple[str, Module]]:

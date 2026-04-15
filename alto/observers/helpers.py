@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """Helper functions for observer token counting and analysis.
 
 Provides utility functions for analyzing observer statistics
@@ -54,9 +53,7 @@ def flatten_for_calibration(
         raise ValueError(f"Unknown quantization base name: {base_name}")
 
 
-def _flatten_weight(value: torch.Tensor,
-                    args: QuantizationArgs,
-                    g_idx: Optional[torch.Tensor] = None):
+def _flatten_weight(value: torch.Tensor, args: QuantizationArgs, g_idx: Optional[torch.Tensor] = None):
     # value.shape = (num_rows, num_cols)
 
     if args.strategy == QuantizationStrategy.TENSOR:
@@ -70,8 +67,7 @@ def _flatten_weight(value: torch.Tensor,
         # (1, num_rows, 1, num_cols)
         return value.unsqueeze(-2).unsqueeze(0)
 
-    if args.strategy in (QuantizationStrategy.GROUP,
-                         QuantizationStrategy.TENSOR_GROUP):
+    if args.strategy in (QuantizationStrategy.GROUP, QuantizationStrategy.TENSOR_GROUP):
         if g_idx is not None:
             value = value.index_select(dim=1, index=torch.argsort(g_idx))
 
@@ -82,21 +78,13 @@ def _flatten_weight(value: torch.Tensor,
         # (1, num_block_rows, num_block_cols, block_width * block_height)
         block_height, block_width = args.block_structure
         rows, cols = value.shape
-        block_rows = strategy_cdiv(rows,
-                                   block_height,
-                                   args.strategy,
-                                   strict=True)
-        block_cols = strategy_cdiv(cols,
-                                   block_width,
-                                   args.strategy,
-                                   strict=True)
-        return (value.reshape(block_rows, block_height,
-                              block_cols, block_width).transpose(1, 2).flatten(
-                                  -2, -1).unsqueeze(0))
+        block_rows = strategy_cdiv(rows, block_height, args.strategy, strict=True)
+        block_cols = strategy_cdiv(cols, block_width, args.strategy, strict=True)
+        return (value.reshape(block_rows, block_height, block_cols,
+                              block_width).transpose(1, 2).flatten(-2, -1).unsqueeze(0))
 
     if args.strategy == QuantizationStrategy.ATTN_HEAD:
-        raise ValueError(
-            "Attention head quantization cannot be applied to weights")
+        raise ValueError("Attention head quantization cannot be applied to weights")
 
     assert False, f"Unknown strategy {args.strategy}"
 
@@ -114,11 +102,9 @@ def _flatten_activation(value: torch.Tensor, args: QuantizationArgs):
         return value
 
     if args.strategy == QuantizationStrategy.CHANNEL:
-        raise ValueError(
-            "Channel quantization cannot be applied to activations")
+        raise ValueError("Channel quantization cannot be applied to activations")
 
-    if args.strategy in (QuantizationStrategy.GROUP,
-                         QuantizationStrategy.TENSOR_GROUP):
+    if args.strategy in (QuantizationStrategy.GROUP, QuantizationStrategy.TENSOR_GROUP):
         # (batch_size * seq_len, num_groups, group_size)
         # warning: group activation quantization uses compute_dynamic_scales_and_zp
         return value.flatten(0, 1).unflatten(-1, (-1, args.group_size))
@@ -127,8 +113,7 @@ def _flatten_activation(value: torch.Tensor, args: QuantizationArgs):
         raise ValueError("Block quantization cannot be applied to activations")
 
     if args.strategy == QuantizationStrategy.ATTN_HEAD:
-        raise ValueError(
-            "Attention head quantization cannot be applied to activations")
+        raise ValueError("Attention head quantization cannot be applied to activations")
 
     assert False, f"Unknown strategy {args.strategy}"
 
@@ -146,8 +131,7 @@ def _flatten_attention(value: torch.Tensor, args: QuantizationArgs):
     if args.strategy == QuantizationStrategy.CHANNEL:
         raise ValueError("Channel quantization cannot be applied to attention")
 
-    if args.strategy in (QuantizationStrategy.GROUP,
-                         QuantizationStrategy.TENSOR_GROUP):
+    if args.strategy in (QuantizationStrategy.GROUP, QuantizationStrategy.TENSOR_GROUP):
         raise ValueError("Group quantization cannot be applied to attention")
 
     if args.strategy == QuantizationStrategy.BLOCK:

@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/recipe/recipe.py
 
-
 import json
 import os
 from typing import Any, Dict, List, Optional, Union
@@ -129,15 +128,13 @@ class Recipe(BaseModel):
             return path_or_modifiers
 
         if isinstance(path_or_modifiers, (Modifier, list)):
-            return cls.from_modifiers(modifiers=path_or_modifiers,
-                                      modifier_group_name=modifier_group_name)
+            return cls.from_modifiers(modifiers=path_or_modifiers, modifier_group_name=modifier_group_name)
 
         if not os.path.isfile(path_or_modifiers):
             # not a local file
             # assume it's a string
-            logger.debug(
-                "Could not initialize recipe as a file path or zoo stub, "
-                "attempting to process as a string.")
+            logger.debug("Could not initialize recipe as a file path or zoo stub, "
+                         "attempting to process as a string.")
             logger.debug(f"Input string: {path_or_modifiers}")
             obj = _load_json_or_yaml_string(path_or_modifiers)
             return cls.from_dict(filter_dict(obj, target_stage=target_stage))
@@ -151,15 +148,13 @@ class Recipe(BaseModel):
 
             if path_or_modifiers.lower().endswith(".json"):
                 obj = json.loads(content)
-            elif path_or_modifiers.lower().endswith(
-                    ".yaml") or path_or_modifiers.lower().endswith(".yml"):
+            elif path_or_modifiers.lower().endswith(".yaml") or path_or_modifiers.lower().endswith(".yml"):
                 obj = yaml.safe_load(content)
             else:
                 try:
                     obj = _load_json_or_yaml_string(content)
                 except ValueError:
-                    raise ValueError(
-                        f"Could not parse recipe from path {path_or_modifiers}")
+                    raise ValueError(f"Could not parse recipe from path {path_or_modifiers}")
             return cls.from_dict(filter_dict(obj, target_stage=target_stage))
 
     @classmethod
@@ -182,8 +177,7 @@ class Recipe(BaseModel):
             if stage_key.endswith("_stage") and isinstance(stage_val, dict):
                 stage = stage_key.replace("_stage", "")
                 for group_key, group_val in stage_val.items():
-                    if group_key.endswith("_modifiers") and isinstance(
-                            group_val, dict):
+                    if group_key.endswith("_modifiers") and isinstance(group_val, dict):
                         inferred_group = group_key.replace("_modifiers", "")
                         for mod_type, mod_args in group_val.items():
                             group = mod_args.get("group", inferred_group)
@@ -207,8 +201,7 @@ class Recipe(BaseModel):
         :return: A dictionary representation of the recipe
         """
 
-        return get_yaml_serializable_dict(modifiers=self.modifiers,
-                                          stage=self.stage)
+        return get_yaml_serializable_dict(modifiers=self.modifiers, stage=self.stage)
 
     def yaml(
         self,

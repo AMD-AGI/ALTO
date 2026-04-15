@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """Utility / helper functions."""
 
 import difflib
@@ -69,8 +68,7 @@ ALL_PRUNABLE_TARGET = "__ALL_PRUNABLE__"
 ALL_QUANTIZABLE_TARGET = "__ALL_QUANTIZABLE__"
 
 
-def match_targets(name: str, targets: Union[str,
-                                            List[str]]) -> Tuple[bool, int]:
+def match_targets(name: str, targets: Union[str, List[str]]) -> Tuple[bool, int]:
     if isinstance(targets, str):
         targets = [targets]
 
@@ -85,8 +83,7 @@ def match_targets(name: str, targets: Union[str,
     return False, -1
 
 
-def match_class(layer: Module, targets: Union[str,
-                                              List[str]]) -> Tuple[bool, int]:
+def match_class(layer: Module, targets: Union[str, List[str]]) -> Tuple[bool, int]:
     if isinstance(targets, str):
         targets = [targets]
 
@@ -107,10 +104,9 @@ def get_default_params(layers: Dict[str, Module]) -> Dict[str, Parameter]:
     return params
 
 
-def match_layers_params(
-        targets: Union[str, List[str]],
-        module: Module,
-        params: bool = False) -> Dict[str, Union[Module, Parameter]]:
+def match_layers_params(targets: Union[str, List[str]],
+                        module: Module,
+                        params: bool = False) -> Dict[str, Union[Module, Parameter]]:
     if targets == ALL_TARGET:
         values = get_terminal_layers(module)
 
@@ -147,15 +143,12 @@ def match_layers_params(
             if "." in param_name:  # skip parameters of nested layers
                 continue
 
-            param_match, param_match_index = match_targets(
-                f"{name}.{param_name}", targets)
+            param_match, param_match_index = match_targets(f"{name}.{param_name}", targets)
             if param_match:
                 targets_found[param_match_index] = True
                 resolved[f"{name}"] = layer if not params else param
 
-    missed = [
-        target for found, target in zip(targets_found, targets) if not found
-    ]
+    missed = [target for found, target in zip(targets_found, targets) if not found]
     if len(missed) > 0:
         raise ValueError(f"Could not find targets {missed} in module {module}")
 
@@ -183,11 +176,7 @@ def get_layers(
     """
     layer_dict = match_layers_params(targets, module)
     if exclude_internal_modules:
-        layer_dict = {
-            name: layer
-            for name, layer in layer_dict.items()
-            if not isinstance(layer, InternalModule)
-        }
+        layer_dict = {name: layer for name, layer in layer_dict.items() if not isinstance(layer, InternalModule)}
 
     return layer_dict
 
@@ -195,8 +184,7 @@ def get_layers(
 def get_layer(target: str, module: Module) -> Tuple[str, Module]:
     layers = get_layers(target, module)
     if len(layers) != 1:
-        raise ValueError(
-            f"Expected 1 layer for target {target}, found {len(layers)}")
+        raise ValueError(f"Expected 1 layer for target {target}, found {len(layers)}")
     name, layer = next(iter(layers.items()))
 
     return name, layer
@@ -214,16 +202,14 @@ def set_layer(target: str, layer: Module, module: Module) -> Module:
     return old_layer
 
 
-def get_params(targets: Union[str, List[str]],
-               module: Module) -> Dict[str, Parameter]:
+def get_params(targets: Union[str, List[str]], module: Module) -> Dict[str, Parameter]:
     return match_layers_params(targets, module, params=True)
 
 
 def get_param(target: str, module: Module) -> Tuple[str, Parameter]:
     params = get_params(target, module)
     if len(params) != 1:
-        raise ValueError(
-            f"Expected 1 parameter for target {target}, found {len(params)}")
+        raise ValueError(f"Expected 1 parameter for target {target}, found {len(params)}")
     name, param = next(iter(params.items()))
 
     return name, param
@@ -245,10 +231,8 @@ def get_prunable_layers(module: Module) -> Dict[str, Module]:
     prunable = {}
 
     for name, layer in module.named_modules():
-        if (isinstance(layer, Linear) or isinstance(layer, _ConvNd) or
-            (QATLinear and isinstance(layer, QATLinear)) or
-            (QATConv2d and isinstance(layer, QATConv2d)) or
-            (QATConv3d and isinstance(layer, QATConv3d)) or
+        if (isinstance(layer, Linear) or isinstance(layer, _ConvNd) or (QATLinear and isinstance(layer, QATLinear)) or
+            (QATConv2d and isinstance(layer, QATConv2d)) or (QATConv3d and isinstance(layer, QATConv3d)) or
             (TransformerConv1D and isinstance(layer, TransformerConv1D))):
             prunable[name] = layer
 
@@ -302,8 +286,7 @@ def qat_active(module: Module) -> bool:
 #     return parameterized_layers
 
 
-def get_matching_layer(target: str, name_to_match: str,
-                       module: Module) -> Optional[Tuple[str, Module]]:
+def get_matching_layer(target: str, name_to_match: str, module: Module) -> Optional[Tuple[str, Module]]:
     """
     Given a target regex, find the layer name in the module that most closely matches
     the name_to_match string. This is used to matches submodules in the same layer, for
@@ -321,8 +304,7 @@ def get_matching_layer(target: str, name_to_match: str,
     match = None
     for name, module in potential_matches.items():
         seq_matcher = difflib.SequenceMatcher(None, name, name_to_match)
-        _, _, match_length = seq_matcher.find_longest_match(
-            0, len(name), 0, len(name_to_match))
+        _, _, match_length = seq_matcher.find_longest_match(0, len(name), 0, len(name_to_match))
         if match_length > largest_substring:
             match = (name, module)
             largest_substring = match_length
@@ -363,9 +345,7 @@ def get_module_to_name_dict(model: Module) -> dict[Module, str]:
     module_to_name = {}
     for name, module in model.named_modules():
         if module in module_to_name:
-            logger.warning(
-                f"Warning, {name} and {module_to_name[module]} both "
-                "share the same module, which can result in unexpected behavior"
-            )
+            logger.warning(f"Warning, {name} and {module_to_name[module]} both "
+                           "share the same module, which can result in unexpected behavior")
         module_to_name[module] = name
     return module_to_name

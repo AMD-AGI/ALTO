@@ -66,8 +66,11 @@ class GPTQModifier(QuantizationModifier):
                     continue
                 self._hessian_names[module] = name
                 obs = Observer.create_instance(
-                    "hessian_gptq", base_name=HESSIAN_BASE_NAME,
-                    args=None, module=module, device=device_type,
+                    "hessian_gptq",
+                    base_name=HESSIAN_BASE_NAME,
+                    args=None,
+                    module=module,
+                    device=device_type,
                 )
                 object.__setattr__(module, f"{HESSIAN_BASE_NAME}_observer", obs)
                 self.register_hook(
@@ -165,8 +168,14 @@ class GPTQModifier(QuantizationModifier):
         gs = getattr(module, "weight_global_scale", None)
 
         loss, W_q = _gptq_block_quantize(
-            W_orig.to(PRECISION), obs.stats / obs.num_samples,
-            scale, zp, quant_args, gs, self.block_size, self.dampening_frac,
+            W_orig.to(PRECISION),
+            obs.stats / obs.num_samples,
+            scale,
+            zp,
+            quant_args,
+            gs,
+            self.block_size,
+            self.dampening_frac,
         )
         module.weight.data.copy_(W_q.to(module.weight.dtype))
         module.quantization_status = QuantizationStatus.COMPRESSED
@@ -182,8 +191,7 @@ def _col_scale(scale, zp, strategy, g_idx, col):
     if strategy == QuantizationStrategy.TENSOR:
         return scale, zp
     if strategy == QuantizationStrategy.CHANNEL:
-        return (scale[:, 0] if scale.ndim > 1 else scale,
-                zp[:, 0] if zp is not None and zp.ndim > 1 else zp)
+        return (scale[:, 0] if scale.ndim > 1 else scale, zp[:, 0] if zp is not None and zp.ndim > 1 else zp)
     gi = g_idx[col]
     return scale[:, gi], (zp[:, gi] if zp is not None else None)
 
@@ -229,7 +237,7 @@ def _gptq_block_quantize(W, H, scale, zp, quant_args, global_scale, blocksize, d
             s, z = _col_scale(scale, zp, strategy, g_idx, i1 + i)
             q = fake_quantize(w, s, z, col_args, global_scale=global_scale)
 
-            Q1[:, i], L1[:, i] = q, (w - q) ** 2 / d ** 2
+            Q1[:, i], L1[:, i] = q, (w - q)**2 / d**2
             err = (w - q) / d
             W1[:, i:] -= err.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
             Err1[:, i] = err

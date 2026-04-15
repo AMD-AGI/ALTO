@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/factory.py
 
-
 import importlib
 import pkgutil
 
@@ -38,8 +37,7 @@ class ModifierFactory:
         A method to refresh the factory by reloading the modifiers
         Note: this will clear any previously registered modifiers
         """
-        ModifierFactory._main_registry = ModifierFactory.load_from_package(
-            ModifierFactory._MAIN_PACKAGE_PATH)
+        ModifierFactory._main_registry = ModifierFactory.load_from_package(ModifierFactory._MAIN_PACKAGE_PATH)
         ModifierFactory._experimental_registry = ModifierFactory.load_from_package(
             ModifierFactory._EXPERIMENTAL_PACKAGE_PATH)
         ModifierFactory._loaded = True
@@ -56,8 +54,7 @@ class ModifierFactory:
         # exclude deprecated packages from registry so
         # their new location is used instead
         deprecated_packages = []
-        for _importer, modname, _is_pkg in pkgutil.walk_packages(
-                main_package.__path__, package_path + "."):
+        for _importer, modname, _is_pkg in pkgutil.walk_packages(main_package.__path__, package_path + "."):
             if modname in deprecated_packages:
                 continue
             try:
@@ -74,12 +71,10 @@ class ModifierFactory:
                         attr = getattr(module, attribute_name)
 
                         if not isinstance(attr, type):
-                            raise ValueError(
-                                f"Attribute {attribute_name} is not a type")
+                            raise ValueError(f"Attribute {attribute_name} is not a type")
 
                         if not issubclass(attr, Modifier):
-                            raise ValueError(
-                                f"Attribute {attribute_name} is not a Modifier")
+                            raise ValueError(f"Attribute {attribute_name} is not a Modifier")
 
                         loaded[attribute_name] = attr
                     except Exception as err:
@@ -144,8 +139,7 @@ class ModifierFactory:
             the Modifier base class
         """
         if not issubclass(modifier_class, Modifier):
-            raise ValueError(
-                "The provided class does not subclass the Modifier base class.")
+            raise ValueError("The provided class does not subclass the Modifier base class.")
         if not isinstance(modifier_class, type):
             raise ValueError("The provided class is not a type.")
 

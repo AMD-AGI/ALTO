@@ -17,7 +17,6 @@ from torchtitan.tools.logging import logger
 from .config import TrainingOpConfig
 
 
-
 def _get_tensor_cls_for_config(config: TrainingOpConfig) -> Type[torch.Tensor]:
     """
     Returns the appropriate tensor class for the given config.
@@ -103,6 +102,7 @@ def swap_params(
                     def get_name_func_new():
                         orignal_name = module.__class__.__name__
                         return f"{orignal_name}[{config}]"
+
                     module._get_name = get_name_func_new
 
     post_order_traversal(root_module)

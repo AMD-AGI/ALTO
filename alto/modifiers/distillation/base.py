@@ -21,8 +21,7 @@ from alto.observers import Observer
 from alto.modifiers import Modifier
 from alto.modifiers.quantization.calibration import calibrate_activations
 from alto.utils.pytorch.module import (
-    get_layers,
-)
+    get_layers,)
 from alto.modifiers.distillation.utils import losses
 
 TEACHER_OBSERVER_BASE_NAME = "output"

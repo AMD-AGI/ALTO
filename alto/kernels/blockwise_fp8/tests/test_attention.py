@@ -15,12 +15,7 @@ from alto.kernels.blockwise_fp8.triton_flash_attention_fp8_block import (
 )
 
 
-def attention_vanilla_forward_pytorch_ref_impl(q,
-                                               k,
-                                               v,
-                                               sm_scale,
-                                               causal,
-                                               layout="bshd"):
+def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout="bshd"):
     """Compute reference output and softmax_lse using PyTorch's built-in function"""
 
     if layout == "bshd":
@@ -39,8 +34,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q,
                                                              v,
                                                              is_causal=causal,
                                                              scale=sm_scale,
-                                                             enable_gqa=n_rep
-                                                             > 1)
+                                                             enable_gqa=n_rep > 1)
     if layout == "bshd":
         o_ref = o_ref.transpose(1, 2)
     return o_ref
@@ -49,8 +43,7 @@ def attention_vanilla_forward_pytorch_ref_impl(q,
 def check_and_convert(t, scale):
     float8_fw = get_f8_fwd_dtype()
     finfo = torch.finfo(float8_fw)
-    return ((t * scale).clamp(min=finfo.min, max=finfo.max).to(
-        dtype=float8_fw) if t.dtype != float8_fw else t)
+    return ((t * scale).clamp(min=finfo.min, max=finfo.max).to(dtype=float8_fw) if t.dtype != float8_fw else t)
 
 
 # SNR
@@ -59,14 +52,12 @@ def compute_snr(x: torch.Tensor, y: torch.Tensor):
     x, y = x.float(), y.float()
     signal_power = torch.norm(x).pow(2)
     noise_power = torch.norm(x - y).pow(2)
-    return 10 * torch.log10(signal_power /
-                            (noise_power + 1e-12)).detach().item()
+    return 10 * torch.log10(signal_power / (noise_power + 1e-12)).detach().item()
 
 
 class AttnConfig:
 
-    def __init__(self, seqlen_q, seqlen_kv, num_head_q, num_head_kv,
-                 head_dim_qk, head_dim_v):
+    def __init__(self, seqlen_q, seqlen_kv, num_head_q, num_head_kv, head_dim_qk, head_dim_v):
         self.seqlen_q = seqlen_q
         self.seqlen_kv = seqlen_kv
         self.num_head_q = num_head_q
@@ -76,67 +67,17 @@ class AttnConfig:
 
 
 test_cases = [
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=32,
-               num_head_kv=32,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=64,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=32,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=64,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=16,
-               num_head_kv=16,
-               head_dim_qk=192,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=128,
-               num_head_kv=128,
-               head_dim_qk=192,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=32,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
-    AttnConfig(seqlen_q=1024,
-               seqlen_kv=1024,
-               num_head_q=48,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=32, num_head_kv=32, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=64, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=32, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=64, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=16, num_head_kv=16, head_dim_qk=192, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=128, num_head_kv=128, head_dim_qk=192, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=32, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=48, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
     # begin regression tests for SWDEV-548136
-    AttnConfig(seqlen_q=4096 + 64,
-               seqlen_kv=4096 + 64,
-               num_head_q=2,
-               num_head_kv=1,
-               head_dim_qk=32,
-               head_dim_v=32),
-    AttnConfig(seqlen_q=2048,
-               seqlen_kv=2048,
-               num_head_q=64,
-               num_head_kv=8,
-               head_dim_qk=128,
-               head_dim_v=128),
+    AttnConfig(seqlen_q=4096 + 64, seqlen_kv=4096 + 64, num_head_q=2, num_head_kv=1, head_dim_qk=32, head_dim_v=32),
+    AttnConfig(seqlen_q=2048, seqlen_kv=2048, num_head_q=64, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
     # end regression tests for SWDEV-548136
 ]
 
@@ -162,23 +103,15 @@ def test_attention(batch, config, causal, use_fp8):
 
     torch.manual_seed(1234)
 
-    query = torch.randn(q_layout,
-                        device=device,
-                        dtype=dtype,
-                        requires_grad=True)
+    query = torch.randn(q_layout, device=device, dtype=dtype, requires_grad=True)
     key = torch.randn(k_layout, device=device, dtype=dtype, requires_grad=True)
-    value = torch.randn(v_layout,
-                        device=device,
-                        dtype=dtype,
-                        requires_grad=True)
+    value = torch.randn(v_layout, device=device, dtype=dtype, requires_grad=True)
     query_ref = query.clone().detach().requires_grad_()
     key_ref = key.clone().detach().requires_grad_()
     value_ref = value.clone().detach().requires_grad_()
 
     sm_scale = query.shape[-1]**(-0.5)
-    o_ref = attention_vanilla_forward_pytorch_ref_impl(query_ref, key_ref,
-                                                       value_ref, sm_scale,
-                                                       causal)
+    o_ref = attention_vanilla_forward_pytorch_ref_impl(query_ref, key_ref, value_ref, sm_scale, causal)
     loss_ref = o_ref.sum()
     loss_ref.backward()
     o = triton_attention_block(
@@ -237,10 +170,8 @@ def test_attention_fp8_with_sparse_do(batch, config, causal):
     do_shape = (batch, seqlen_q, num_head_q, head_dim_v)
 
     do = torch.randn(do_shape, device=device, dtype=dtype) * 1e-3
-    do_mask_0 = (torch.randn(do_shape[:-2], device=device, dtype=dtype)
-                 > 0.9).unsqueeze(-1).unsqueeze(-1)
-    do_mask_1 = (torch.randn(do_shape[:-1], device=device, dtype=dtype)
-                 > 0.9).unsqueeze(-1)
+    do_mask_0 = (torch.randn(do_shape[:-2], device=device, dtype=dtype) > 0.9).unsqueeze(-1).unsqueeze(-1)
+    do_mask_1 = (torch.randn(do_shape[:-1], device=device, dtype=dtype) > 0.9).unsqueeze(-1)
     do = do * do_mask_0 * do_mask_1
 
     q = torch.randn(q_shape, device=device, dtype=dtype)

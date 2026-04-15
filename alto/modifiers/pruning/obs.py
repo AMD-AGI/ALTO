@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/sparsification/wanda/base.py
 
-
 import torch
 from torch.nn import Module
 from torchtitan.tools.logging import logger
@@ -75,18 +74,18 @@ class ObsModifier(PruningModifierBase):
             name = self._module_names[module]
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
-            
+
             logger.info(f"Pruning {name} using {num_samples.item()} samples")
             assert isinstance(observer, HessianObserver), \
                 "ObsModifier requires hessian observer"
-            
+
             # Determine pruning method based on dimension and layer name
             prune_fn = None
             if 'mlp' in self.pruning_dimension and 'w3' in name:
                 prune_fn = self._prune_mlp
             elif 'attn' in self.pruning_dimension and 'wo' in name:
                 prune_fn = self._prune_attn
-            
+
             if prune_fn:
                 pruned_weight, pruned_mask = prune_fn(
                     module=module,
@@ -96,10 +95,8 @@ class ObsModifier(PruningModifierBase):
                 module.weight.data.copy_(pruned_weight)
 
     def _observe_preprocess(
-        self, 
-        module: Module, 
-        hessian: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Size, torch.dtype]:
+            self, module: Module,
+            hessian: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Size, torch.dtype]:
         """
         Preprocess weight and Hessian for OBS pruning.
         
@@ -115,27 +112,27 @@ class ObsModifier(PruningModifierBase):
         final_shape = module.weight.shape
         final_dtype = module.weight.dtype
         W = module.weight.data.clone()
-        
+
         # Handle special layer types
         if isinstance(module, torch.nn.Conv2d):
             W = W.flatten(1)
         if TransformerConv1D and isinstance(module, TransformerConv1D):
             W = W.t()
-        
+
         # Transpose and convert to higher precision for computation
         W = W.to(dtype=PRECISION).t()
         H = hessian
-        
+
         # Zero out dead neurons (those with zero Hessian diagonal)
         dead = torch.diag(H) == 0
         W[dead, :] = 0
-        
+
         # Add regularization to Hessian for numerical stability
         H += torch.eye(W.shape[0]).to(W.device) * torch.mean(torch.diag(H)) * self.dampening_frac
-        
+
         # Compute gradient matrix
         G = H @ W
-        
+
         return W, H, G, final_shape, final_dtype
 
     def _prune_mlp(
@@ -153,14 +150,17 @@ class ObsModifier(PruningModifierBase):
         :return: (pruned_weight, pruned_mask)
         """
         W, H, G, final_shape, final_dtype = self._observe_preprocess(module, hessian)
-        
+
         # Prune entire channels
         num_total_groups = W.shape[0]
         num_groups_to_remain = int(num_total_groups * (1 - sparsity))
-        W_pruned, error, pruned_mask = self._prune_linear(
-            W, H, G, num_total_groups, num_groups_to_remain, pruning_granularity=self.mlp_pruning_granularity
-        )
-        
+        W_pruned, error, pruned_mask = self._prune_linear(W,
+                                                          H,
+                                                          G,
+                                                          num_total_groups,
+                                                          num_groups_to_remain,
+                                                          pruning_granularity=self.mlp_pruning_granularity)
+
         return W_pruned.t().to(final_dtype).reshape(final_shape), pruned_mask
 
     def _prune_attn(
@@ -178,17 +178,20 @@ class ObsModifier(PruningModifierBase):
         :return: (pruned_weight, pruned_mask)
         """
         W, H, G, final_shape, final_dtype = self._observe_preprocess(module, hessian)
-        
+
         # Get model dimensions for grouped attention head pruning
         num_attention_heads = self._model_args.layer.attention.n_heads
         num_key_value_heads = getattr(self._model_args.layer.attention, "n_kv_heads", num_attention_heads)
         num_total_groups = num_key_value_heads if num_key_value_heads is not None else num_attention_heads
         num_groups_to_remain = int(num_total_groups * (1 - sparsity))
-        
-        W_pruned, error, pruned_mask = self._prune_linear(
-            W, H, G, num_total_groups, num_groups_to_remain, pruning_granularity=self.attention_pruning_granularity
-        )
-        
+
+        W_pruned, error, pruned_mask = self._prune_linear(W,
+                                                          H,
+                                                          G,
+                                                          num_total_groups,
+                                                          num_groups_to_remain,
+                                                          pruning_granularity=self.attention_pruning_granularity)
+
         return W_pruned.t().to(final_dtype).reshape(final_shape), pruned_mask
 
     @torch.no_grad()
@@ -258,7 +261,7 @@ class ObsModifier(PruningModifierBase):
                     if pruned_group_mask[g]:
                         continue
                     sl = slice(g * group_size, (g + 1) * group_size)
-                    H_block = torch.linalg.inv(H_inv[sl, sl]) 
+                    H_block = torch.linalg.inv(H_inv[sl, sl])
                     obj_mat[sl, :] = (H_block @ W[sl, :] / 2.0)
             else:
                 # Scalar per row: (1/2) * w^2 / H_inv_ii
@@ -270,10 +273,8 @@ class ObsModifier(PruningModifierBase):
             sorted_groups = torch.argsort(obj_val_masked)
             k = int(groups_to_prune_each_round[round_id].item())
             pick_groups = sorted_groups[:k]
-            pick_idx = torch.cat([
-                torch.arange(g * group_size, (g + 1) * group_size, device=device)
-                for g in pick_groups
-            ])
+            pick_idx = torch.cat(
+                [torch.arange(g * group_size, (g + 1) * group_size, device=device) for g in pick_groups])
             # OBS update: remove pruned weights' contribution; downdate H_inv (block Sherman-Morrison)
             Hinv_block_inv = torch.linalg.inv(H_inv[pick_idx][:, pick_idx])  # ≈ H[pick_idx, pick_idx]
             W -= H_inv[:, pick_idx] @ Hinv_block_inv @ W[pick_idx, :]

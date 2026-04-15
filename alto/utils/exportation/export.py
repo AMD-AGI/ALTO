@@ -60,8 +60,7 @@ def patch_finfo():
     torch.finfo = orig_finfo_func
 
 
-def hot_fix_for_tied_word_embeddings(model: torch.nn.Module,
-                                     compressor: ModelCompressor):
+def hot_fix_for_tied_word_embeddings(model: torch.nn.Module, compressor: ModelCompressor):
     if not getattr(model.config, "enable_weight_tying", False):
         return
     # in the current impl, lm_head is not a linear layer,
@@ -84,8 +83,7 @@ def get_model_compressor(
     # modified from https://github.com/vllm-project/llm-compressor/blob/4ce1bdfc197ccd95e2be0297bfa4a7c8d7d9a614/src/llmcompressor/transformers/compression/compressed_tensors_utils.py#L152-L242
 
     converter = next(
-        (c for c in model_converters.converters
-         if isinstance(c, ModelOptConverter)),
+        (c for c in model_converters.converters if isinstance(c, ModelOptConverter)),
         None,
     )
     if converter is None:
@@ -116,8 +114,7 @@ def get_model_compressor(
                 "the sparsity structure. Sparisty will be inferred from the model. "
                 "Consider providing the structure to skip this step ",
             )
-            sparsity_config.sparsity_structure = (
-                SparsityConfigMetadata.infer_sparsity_structure(model))
+            sparsity_config.sparsity_structure = (SparsityConfigMetadata.infer_sparsity_structure(model))
 
     if not save_compressed:
         if quantization_format not in (None, CompressionFormat.dense.value):
@@ -254,8 +251,7 @@ def eval_tasks(model_dir: str, tasks: list[str]):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Convert DCP weights to HF format.")
+    parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
     parser.add_argument("module", type=str, default="llama3")
     parser.add_argument("config", type=str, default="llama3_8b")
     parser.add_argument(

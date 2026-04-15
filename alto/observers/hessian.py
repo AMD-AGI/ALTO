@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-
 import math
 
 import torch
@@ -93,7 +92,6 @@ class HessianSparseGPTObserver(HessianObserver):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-
     def forward_inner(self, x_orig):
         if x_orig.numel() == 0:
             return x_orig
@@ -103,7 +101,7 @@ class HessianSparseGPTObserver(HessianObserver):
             inp, num_added = self.reshape_input(inp)
             self.stats *= self.num_samples / (self.num_samples + num_added)
             self.num_samples += num_added
-            inp = (2 / self.num_samples) ** 0.5 * inp.type(PRECISION)
+            inp = (2 / self.num_samples)**0.5 * inp.type(PRECISION)
             self.stats += inp.matmul(inp.t())
 
         return x_orig

@@ -33,7 +33,6 @@ class HadamardFactory:
     seed: Optional[int] = None
     generator: torch.Generator = torch.Generator()
 
-
     @classmethod
     def configure(
         cls,
@@ -85,8 +84,7 @@ class HadamardFactory:
         device: device,
     ) -> Tensor:
         if not cls.randomized:
-            data = deterministic_hadamard_matrix(cls.block_size, cls.dtype,
-                                                 device)
+            data = deterministic_hadamard_matrix(cls.block_size, cls.dtype, device)
         else:
             data = random_hadamard_matrix(cls.block_size, cls.dtype, device, cls.generator)
         return data
@@ -95,6 +93,7 @@ class HadamardFactory:
     def _create_permutation(cls, weight: Tensor) -> Tensor:
         data = torch.randperm(weight.size(0), generator=cls.generator)
         return data
+
 
 class HadamardTransform:
     """
@@ -111,12 +110,9 @@ class HadamardTransform:
     ):
         self.weight = weight
         self.perm = perm
-        self._scale = torch.tensor(weight.size(0),
-                                   dtype=torch.float64,
-                                   device=weight.device).sqrt()
+        self._scale = torch.tensor(weight.size(0), dtype=torch.float64, device=weight.device).sqrt()
 
-    def __call__(self, value: Tensor, inverse: bool = False,
-                 left_mul: bool = False) -> Tensor:
+    def __call__(self, value: Tensor, inverse: bool = False, left_mul: bool = False) -> Tensor:
         """
         Apply the Hadamard transform to a tensor.
 
@@ -139,10 +135,8 @@ class HadamardTransform:
             weight = weight.to_local()
 
         if left_mul:
-            return (multihead_matmul(weight.to(device=value.device),
-                                     value.to(dtype=weight.dtype)) /
-                    self._scale).to(value.dtype)
+            return (multihead_matmul(weight.to(device=value.device), value.to(dtype=weight.dtype)) / self._scale).to(
+                value.dtype)
         else:
-            return (multihead_matmul(value.to(dtype=weight.dtype),
-                                     weight.to(device=value.device)) /
-                    self._scale).to(value.dtype)
+            return (multihead_matmul(value.to(dtype=weight.dtype), weight.to(device=value.device)) / self._scale).to(
+                value.dtype)

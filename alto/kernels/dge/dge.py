@@ -43,16 +43,14 @@ else:
 def calculate_break_points(dtype):
     match dtype:
         case torch.float4_e2m1fn_x2:
-            break_points = torch.tensor(
-                [-6, -4, -3, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 3, 4, 6],
-                dtype=hp_dtype,
-                device=device)
+            break_points = torch.tensor([-6, -4, -3, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 3, 4, 6],
+                                        dtype=hp_dtype,
+                                        device=device)
         case _:
             bitwidth = BITS[dtype]
             int_dtype = INT_DTYPES[dtype]
-            break_points = torch.arange(
-                0, 2**bitwidth, dtype=int_dtype,
-                device=device).view(dtype).to(hp_dtype).sort()[0]
+            break_points = torch.arange(0, 2**bitwidth, dtype=int_dtype,
+                                        device=device).view(dtype).to(hp_dtype).sort()[0]
             break_points = break_points[torch.isnan(break_points) == False]
 
     return break_points
@@ -60,10 +58,7 @@ def calculate_break_points(dtype):
 
 BREAK_POINTS = {t: calculate_break_points(t) for t in BITS.keys()}
 
-INTERVALS = {
-    t: (BREAK_POINTS[t][1:] - BREAK_POINTS[t][:-1]).to(hp_dtype)
-    for t in BITS.keys()
-}
+INTERVALS = {t: (BREAK_POINTS[t][1:] - BREAK_POINTS[t][:-1]).to(hp_dtype) for t in BITS.keys()}
 
 
 def dge_fwd(x, dtype):
@@ -75,8 +70,7 @@ def dge_fwd(x, dtype):
     delta = intervals[idx]
     half_delta = delta / 2.
     mid_point = break_points[idx] + half_delta
-    return half_delta**(1 - 1 / k) * torch.sign(x - mid_point) * (
-        torch.abs(x - mid_point)**(1 / k)) + mid_point
+    return half_delta**(1 - 1 / k) * torch.sign(x - mid_point) * (torch.abs(x - mid_point)**(1 / k)) + mid_point
 
 
 def dge_bwd(x, dtype):
@@ -88,9 +82,7 @@ def dge_bwd(x, dtype):
     delta = intervals[idx]
     half_delta = delta / 2.
     mid_point = break_points[idx] + half_delta
-    return torch.clamp(
-        half_delta**(1 - 1 / k) * (torch.abs(x - mid_point)**(1 / k - 1)) / k,
-        0, 3.)
+    return torch.clamp(half_delta**(1 - 1 / k) * (torch.abs(x - mid_point)**(1 / k - 1)) / k, 0, 3.)
 
 
 @triton.jit
@@ -121,8 +113,7 @@ def dge_bwd_triton(
     pow1 = 1.0 / k
     pow2 = 1.0 - pow1
     safe_abs_diff = tl.where(abs_diff > 1e-7, abs_diff, 1e-7)
-    out = triton_pow(half_delta, pow2) * triton_pow(safe_abs_diff,
-                                                    (pow1 - 1.0)) / k
+    out = triton_pow(half_delta, pow2) * triton_pow(safe_abs_diff, (pow1 - 1.0)) / k
     out = tl.clamp(out, 0.0, 3.0)
     return out.view(64, 64)
 
@@ -159,7 +150,7 @@ def dge_bwd_triton_wrapper(x, dtype):
     intervals = INTERVALS[dtype].to(x.device)
 
     out = torch.empty_like(x, dtype=hp_dtype)
-    grid = (1, )
+    grid = (1,)
 
     dge_bwd_kernel[grid](
         x,

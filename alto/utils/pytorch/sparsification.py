@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """Helper functions for retrieving information related to model sparsification."""
 
 import json
@@ -32,9 +31,7 @@ class ModuleSparsificationInfo:
     is used when analyzing an FSDP model, where the full weights may not be accessible
     """
 
-    def __init__(self,
-                 module: Module,
-                 state_dict: Optional[Dict[str, torch.Tensor]] = None):
+    def __init__(self, module: Module, state_dict: Optional[Dict[str, torch.Tensor]] = None):
         self.module = module
 
         if state_dict is not None:
@@ -47,11 +44,7 @@ class ModuleSparsificationInfo:
             if hasattr(module, "_hf_hook"):
                 self.trainable_params = get_state_dict_offloaded_model(module)
             else:
-                self.trainable_params = {
-                    k: v
-                    for k, v in self.module.named_parameters()
-                    if v.requires_grad
-                }
+                self.trainable_params = {k: v for k, v in self.module.named_parameters() if v.requires_grad}
 
     def __str__(self):
         return json.dumps({
@@ -70,8 +63,7 @@ class ModuleSparsificationInfo:
         """
         :return: total number of trainable parameters in the model
         """
-        return sum(
-            torch.numel(param) for param in self.trainable_params.values())
+        return sum(torch.numel(param) for param in self.trainable_params.values())
 
     @property
     def params_sparse(self) -> int:
@@ -80,8 +72,7 @@ class ModuleSparsificationInfo:
         """
         return sum(
             round(tensor_sparsity(param).item() * torch.numel(param))
-            for param in tqdm(self.trainable_params.values(),
-                              desc="Calculating model sparsity"))
+            for param in tqdm(self.trainable_params.values(), desc="Calculating model sparsity"))
 
     @property
     def params_sparse_percent(self) -> float:

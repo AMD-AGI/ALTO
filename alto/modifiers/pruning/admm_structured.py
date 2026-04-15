@@ -9,7 +9,6 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/sparsification/wanda/base.py
 
-
 import torch
 from torch.nn import Module
 from torchtitan.tools.logging import logger
@@ -74,18 +73,18 @@ class AdmmStructuredModifier(PruningModifierBase):
             name = self._module_names[module]
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
-            
+
             logger.info(f"Pruning {name} using {num_samples.item()} samples")
             assert isinstance(observer, HessianObserver), \
                 "AdmmStructuredModifier requires hessian observer"
-            
+
             # Determine pruning method based on dimension and layer name
             prune_fn = None
             if 'mlp' in self.pruning_dimension and 'w3' in name:
                 prune_fn = self._prune_mlp
             elif 'attn' in self.pruning_dimension and 'wo' in name:
                 prune_fn = self._prune_attn
-            
+
             if prune_fn:
                 pruned_weight, pruned_mask = prune_fn(
                     module=module,
@@ -95,9 +94,7 @@ class AdmmStructuredModifier(PruningModifierBase):
                 module.weight.data.copy_(pruned_weight)
 
     def _observe_preprocess(
-        self, 
-        module: Module, 
-        hessian: torch.Tensor
+        self, module: Module, hessian: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Size, torch.dtype]:
         """
         Preprocess weight and Hessian for ADMM pruning.
@@ -119,22 +116,22 @@ class AdmmStructuredModifier(PruningModifierBase):
         final_shape = module.weight.shape
         final_dtype = module.weight.dtype
         W = module.weight.data.clone()
-        
+
         # Handle special layer types
         if isinstance(module, torch.nn.Conv2d):
             W = W.flatten(1)
         if TransformerConv1D and isinstance(module, TransformerConv1D):
             W = W.t()
-        
+
         W = W.to(dtype=PRECISION)
         H = hessian
-        
+
         # Normalize Hessian and weight by diagonal sqrt
         norm = torch.diag(H).sqrt() + 1e-8
         H = H / norm
         H = (H.T / norm).T
         W = (W * norm).T
-        
+
         # Add regularization to Hessian for numerical stability
         diag = torch.arange(H.shape[0], device=H.device)
         H[diag, diag] += self.dampening_frac * torch.diag(H).mean()
@@ -143,11 +140,11 @@ class AdmmStructuredModifier(PruningModifierBase):
         rho = self.admm_rho
         G = H.matmul(W)
         H[diag, diag] += rho
-        
+
         # Compute Hessian inverse (expensive operation)
         torch.cuda.empty_cache()
         Hinv = torch.inverse(H)
-        
+
         return W, H, G, Hinv, norm, final_shape, final_dtype
 
     def _prune_mlp(
@@ -165,29 +162,29 @@ class AdmmStructuredModifier(PruningModifierBase):
         :return: (pruned_weight, pruned_mask)
         """
         W, H, G, Hinv, norm, final_shape, final_dtype = self._observe_preprocess(module, hessian)
-        
+
         # ADMM optimization: iteratively prune channels with lowest importance
         # U: dual variable in ADMM, Z: auxiliary variable with sparsity constraint
         rho = 10  # ADMM penalty parameter
         U = torch.zeros_like(W)
-        
+
         for _ in range(self.admm_iterations):  # ADMM iterations
             # Compute channel importance using L2 norm per channel
             channel_importance = (W + U).abs().norm(dim=1)
-            
+
             # Select channels to prune (lowest importance)
             num_channels_to_prune = int(channel_importance.size(0) * sparsity)
             prune_indices = torch.topk(channel_importance, k=num_channels_to_prune, largest=False).indices
-            
+
             # Create mask (False for pruned channels)
             mask = torch.ones_like(W, dtype=torch.bool, device=W.device)
             mask[prune_indices, :] = False
-            
+
             # ADMM update steps
-            Z = (W + U) * mask              # Project onto sparsity constraint
-            U = U + (W - Z)                  # Update dual variable
+            Z = (W + U) * mask  # Project onto sparsity constraint
+            U = U + (W - Z)  # Update dual variable
             W = Hinv.matmul(G + rho * (Z - U))  # Update primal variable with Hessian info
-        
+
         # Final projection and denormalization
         Z = (W + U) * mask
         pruned_W = (Z.T / norm).reshape(final_shape).to(final_dtype)
@@ -208,36 +205,36 @@ class AdmmStructuredModifier(PruningModifierBase):
         :return: (pruned_weight, pruned_mask)
         """
         W, H, G, Hinv, norm, final_shape, final_dtype = self._observe_preprocess(module, hessian)
-        
+
         # Get model dimensions for attention head pruning
         num_attention_heads = self._model_args.layer.attention.n_heads
         head_dim = W.shape[1] // num_attention_heads
-        
+
         # ADMM optimization: iteratively prune attention heads with lowest importance
         # U: dual variable in ADMM, Z: auxiliary variable with sparsity constraint
         rho = self.admm_rho  # ADMM penalty parameter
         U = torch.zeros_like(W)
-        
+
         for _ in range(self.admm_iterations):  # ADMM iterations
             # Compute head importance: reshape to [num_heads, head_dim, out_features], then compute norm
             WU_grouped = (W + U).abs().view(num_attention_heads, head_dim, W.shape[1])
             head_importance = WU_grouped.norm(dim=(1, 2))
-            
+
             # Select heads to prune (lowest importance)
             num_heads_to_prune = int(num_attention_heads * sparsity)
             prune_head_indices = torch.topk(head_importance, k=num_heads_to_prune, largest=False).indices
-            
+
             # Create mask (False for pruned heads)
             mask = torch.ones_like(W, dtype=torch.bool, device=W.device)
             mask_grouped = mask.view(num_attention_heads, head_dim, W.shape[1])
             mask_grouped[prune_head_indices, :, :] = False
             mask = mask_grouped.view(W.shape)
-            
+
             # ADMM update steps
-            Z = (W + U) * mask                  # Project onto sparsity constraint
-            U = U + (W - Z)                     # Update dual variable
+            Z = (W + U) * mask  # Project onto sparsity constraint
+            U = U + (W - Z)  # Update dual variable
             W = Hinv.matmul(G + rho * (Z - U))  # Update primal variable with Hessian info
-        
+
         # Final projection and denormalization
         Z = (W + U) * mask
         pruned_W = (Z.T / norm).reshape(final_shape).to(final_dtype)

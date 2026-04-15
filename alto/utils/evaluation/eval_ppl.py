@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
 # SPDX-License-Identifier: MIT
-
 """
 Perplexity evaluation on C4 (val), WikiText-2, and PTB (val).
 
@@ -25,16 +24,20 @@ from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 # ---------------------------------------------------------------------------
 # Dataset loaders – each returns a single 1-D LongTensor of concatenated
 # token ids ready for strided PPL evaluation.
 # ---------------------------------------------------------------------------
 
-def _load_c4(tokenizer, seqlen: int, n_samples: int = 1100, seed: int = 0,
+
+def _load_c4(tokenizer,
+             seqlen: int,
+             n_samples: int = 1100,
+             seed: int = 0,
              cache_dir: str | None = None) -> torch.Tensor:
     ds = load_dataset(
-        "allenai/c4", "en",
+        "allenai/c4",
+        "en",
         split="validation",
         streaming=True,
         trust_remote_code=True,
@@ -51,20 +54,15 @@ def _load_c4(tokenizer, seqlen: int, n_samples: int = 1100, seed: int = 0,
     return enc.input_ids[0]
 
 
-def _load_wikitext2(tokenizer, seqlen: int,
-                    cache_dir: str | None = None) -> torch.Tensor:
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1",
-                      split="test", cache_dir=cache_dir)
+def _load_wikitext2(tokenizer, seqlen: int, cache_dir: str | None = None) -> torch.Tensor:
+    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test", cache_dir=cache_dir)
     text = "\n\n".join(ds["text"])
     enc = tokenizer(text, return_tensors="pt")
     return enc.input_ids[0]
 
 
-def _load_ptb(tokenizer, seqlen: int,
-              cache_dir: str | None = None) -> torch.Tensor:
-    ds = load_dataset("ptb_text_only", "penn_treebank",
-                      split="validation", cache_dir=cache_dir,
-                      trust_remote_code=True)
+def _load_ptb(tokenizer, seqlen: int, cache_dir: str | None = None) -> torch.Tensor:
+    ds = load_dataset("ptb_text_only", "penn_treebank", split="validation", cache_dir=cache_dir, trust_remote_code=True)
     text = "\n\n".join(ds["sentence"])
     enc = tokenizer(text, return_tensors="pt")
     return enc.input_ids[0]
@@ -76,10 +74,10 @@ DATASET_LOADERS = {
     "ptb": _load_ptb,
 }
 
-
 # ---------------------------------------------------------------------------
 # Strided PPL evaluation (non-overlapping windows)
 # ---------------------------------------------------------------------------
+
 
 @torch.no_grad()
 def evaluate_ppl(
@@ -92,14 +90,14 @@ def evaluate_ppl(
     """Compute perplexity with non-overlapping stride equal to seqlen."""
     n_tokens = input_ids.numel()
     n_windows = n_tokens // seqlen
-    input_ids = input_ids[: n_windows * seqlen].view(n_windows, seqlen)
+    input_ids = input_ids[:n_windows * seqlen].view(n_windows, seqlen)
 
     loss_fn = CrossEntropyLoss(reduction="none")
     total_nll = 0.0
     total_count = 0
 
     for start in tqdm(range(0, n_windows, batch_size), desc="eval", leave=False):
-        batch = input_ids[start : start + batch_size].to(device)
+        batch = input_ids[start:start + batch_size].to(device)
         logits = model(batch).logits
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = batch[:, 1:].contiguous()
@@ -118,27 +116,26 @@ def evaluate_ppl(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="PPL evaluation (C4 / WikiText-2 / PTB)")
-    parser.add_argument("--model_path", type=str, required=True,
-                        help="Path to HuggingFace model directory")
-    parser.add_argument("--datasets", nargs="+", default=["c4", "wikitext2", "ptb"],
+    parser.add_argument("--model_path", type=str, required=True, help="Path to HuggingFace model directory")
+    parser.add_argument("--datasets",
+                        nargs="+",
+                        default=["c4", "wikitext2", "ptb"],
                         choices=list(DATASET_LOADERS.keys()),
                         help="Datasets to evaluate on")
-    parser.add_argument("--seqlen", type=int, default=2048,
-                        help="Sequence length for PPL evaluation")
-    parser.add_argument("--batch_size", type=int, default=1,
-                        help="Batch size (number of windows per forward pass)")
-    parser.add_argument("--dtype", type=str, default="bfloat16",
+    parser.add_argument("--seqlen", type=int, default=2048, help="Sequence length for PPL evaluation")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size (number of windows per forward pass)")
+    parser.add_argument("--dtype",
+                        type=str,
+                        default="bfloat16",
                         choices=["float16", "bfloat16", "float32", "auto"],
                         help="Model weight dtype")
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--num_gpus", type=int, default=1,
-                        help="Number of GPUs (>1 enables device_map=auto)")
-    parser.add_argument("--cache_dir", type=str, default=None,
-                        help="HuggingFace datasets cache directory")
-    parser.add_argument("--output_path", type=str, default=None,
-                        help="Optional JSON file to save results")
+    parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs (>1 enables device_map=auto)")
+    parser.add_argument("--cache_dir", type=str, default=None, help="HuggingFace datasets cache directory")
+    parser.add_argument("--output_path", type=str, default=None, help="Optional JSON file to save results")
     parser.add_argument("--trust_remote_code", action="store_true")
     args = parser.parse_args()
 
@@ -152,7 +149,8 @@ def main():
 
     print(f"Loading tokenizer from {args.model_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path, trust_remote_code=args.trust_remote_code,
+        args.model_path,
+        trust_remote_code=args.trust_remote_code,
     )
 
     print(f"Loading model from {args.model_path} (dtype={args.dtype}) ...")

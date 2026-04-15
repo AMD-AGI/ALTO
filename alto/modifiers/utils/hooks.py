@@ -95,8 +95,7 @@ class HooksMixin(BaseModel):
         def wrapped_hook(*args, **kwargs):
             nonlocal handle
 
-            if (HooksMixin._HOOKS_DISABLED and
-                    handle not in HooksMixin._HOOKS_KEEP_ENABLED):
+            if (HooksMixin._HOOKS_DISABLED and handle not in HooksMixin._HOOKS_KEEP_ENABLED):
                 return
 
             return hook(*args, **kwargs)
@@ -123,8 +122,7 @@ class HooksMixin(BaseModel):
 
         self._hooks -= handles
 
-    def _get_register_function(self, target: torch.nn.Module,
-                               hook_type: str) -> Callable:
+    def _get_register_function(self, target: torch.nn.Module, hook_type: str) -> Callable:
         if hook_type == "query":
             return partial(register_query_hook, target)
         elif hook_type == "key":

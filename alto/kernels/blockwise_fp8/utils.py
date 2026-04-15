@@ -6,7 +6,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 USE_FP8E5M2_BWD = False
 
 
@@ -15,8 +14,7 @@ def is_hip():
 
 
 def is_cdna():
-    return is_hip() and triton.runtime.driver.active.get_current_target(
-    ).arch in (
+    return is_hip() and triton.runtime.driver.active.get_current_target().arch in (
         "gfx950",
         "gfx940",
         "gfx941",

@@ -1,0 +1,10 @@
+# Runs on staged files only (pre-commit default). Yapf picks up repo-root .style.yapf.
+default_language_version:
+  python: python3
+
+repos:
+  - repo: https://github.com/google/yapf
+    rev: v0.43.0
+    hooks:
+      - id: yapf
+        exclude: ^3rdparty/

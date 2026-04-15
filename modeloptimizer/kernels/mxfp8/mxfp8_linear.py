@@ -315,6 +315,7 @@ def _to_mxfp8_then_scaled_mm(
     use_sr_grad: bool = False,
     use_accumulator_add: bool = False,
 ) -> torch.Tensor:
+    # Backward-compatible public wrapper around MXFP8LinearFunction.apply.
     return MXFP8LinearFunction.apply(
         a,
         b,

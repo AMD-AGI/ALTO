@@ -405,6 +405,8 @@ def _convert_to_mxfp8_kernel(
     stride_sn,
     philox_seed,
     philox_offset,
+    M,
+    N,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -450,8 +452,15 @@ def _convert_to_mxfp8_kernel(
     offs_x = offs_m[:, None] * stride_xm + offs_xn[None, :] * stride_xn
     offs_y = offs_m[:, None] * stride_ym + offs_xn[None, :] * stride_yn
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
+    mask_x = (offs_m[:, None] < M) & (offs_xn[None, :] < N)
+    if IS_2D_BLOCK:
+        mask_s = (offs_sm[:, None] < (M // QUANT_BLOCK_SIZE)) & (
+            offs_sn[None, :] < (N // QUANT_BLOCK_SIZE)
+        )
+    else:
+        mask_s = (offs_sm[:, None] < M) & (offs_sn[None, :] < (N // QUANT_BLOCK_SIZE))
 
-    x = tl.load(x_ptr + offs_x)
+    x = tl.load(x_ptr + offs_x, mask=mask_x, other=0.0)
     scales = _calculate_scales(
         x,
         BLOCK_M=BLOCK_M,
@@ -476,8 +485,8 @@ def _convert_to_mxfp8_kernel(
         USE_SR=USE_SR,
     )
 
-    tl.store(y_ptr + offs_y, y)
-    tl.store(s_ptr + offs_s, scales)
+    tl.store(y_ptr + offs_y, y, mask=mask_x)
+    tl.store(s_ptr + offs_s, scales, mask=mask_s)
 
 
 @triton_op("modeloptimizer::convert_to_mxfp8", mutates_args={})
@@ -576,6 +585,8 @@ def convert_to_mxfp8(
         stride_sn,
         philox_seed,
         philox_offset,
+        M,
+        N,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
@@ -654,6 +665,8 @@ def convert_from_mxfp8(
         stride_yn,
         stride_sm,
         stride_sn,
+        M,
+        N,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
@@ -675,6 +688,8 @@ def _convert_from_mxfp8_kernel(
     stride_yn,
     stride_sm,
     stride_sn,
+    M,
+    N,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -700,9 +715,16 @@ def _convert_from_mxfp8_kernel(
     offs_x = offs_m[:, None] * stride_xm + offs_n[None, :] * stride_xn
     offs_y = offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
+    mask_x = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    if IS_2D_BLOCK:
+        mask_s = (offs_sm[:, None] < (M // QUANT_BLOCK_SIZE)) & (
+            offs_sn[None, :] < (N // QUANT_BLOCK_SIZE)
+        )
+    else:
+        mask_s = (offs_sm[:, None] < M) & (offs_sn[None, :] < (N // QUANT_BLOCK_SIZE))
 
-    x = tl.load(x_ptr + offs_x)
-    scales = tl.load(s_ptr + offs_s)
+    x = tl.load(x_ptr + offs_x, mask=mask_x, other=0.0)
+    scales = tl.load(s_ptr + offs_s, mask=mask_s, other=1)
 
     y = _dequantize_fp8(
         x,
@@ -716,7 +738,7 @@ def _convert_from_mxfp8_kernel(
         USE_ASM=USE_ASM,
     )
 
-    tl.store(y_ptr + offs_y, y)
+    tl.store(y_ptr + offs_y, y, mask=mask_x)
 
 
 @triton.jit
@@ -727,6 +749,8 @@ def _calculate_scales_kernel(
     stride_xn,
     stride_sm,
     stride_sn,
+    M,
+    N,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -743,7 +767,8 @@ def _calculate_scales_kernel(
     offs_xn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
     offs_x = offs_m[:, None] * stride_xm + offs_xn[None, :] * stride_xn
-    x = tl.load(x_ptr + offs_x)
+    mask_x = (offs_m[:, None] < M) & (offs_xn[None, :] < N)
+    x = tl.load(x_ptr + offs_x, mask=mask_x, other=0)
 
     scales = _calculate_scales(
         x,
@@ -762,7 +787,13 @@ def _calculate_scales_kernel(
         offs_sm = offs_m
     offs_sn = pid_n * SCALE_BLOCK_N + tl.arange(0, SCALE_BLOCK_N)
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
-    tl.store(s_ptr + offs_s, scales)
+    if IS_2D_BLOCK:
+        mask_s = (offs_sm[:, None] < (M // QUANT_BLOCK_SIZE)) & (
+            offs_sn[None, :] < (N // QUANT_BLOCK_SIZE)
+        )
+    else:
+        mask_s = (offs_sm[:, None] < M) & (offs_sn[None, :] < (N // QUANT_BLOCK_SIZE))
+    tl.store(s_ptr + offs_s, scales, mask=mask_s)
 
 
 @triton_op("modeloptimizer::calculate_mxfp8_scales", mutates_args={})
@@ -831,6 +862,8 @@ def calculate_mxfp8_scales(
         stride_xn,
         stride_sm,
         stride_sn,
+        M,
+        N,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,

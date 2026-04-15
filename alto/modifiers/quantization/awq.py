@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 # AWQ: Activation-aware Weight Quantization (https://arxiv.org/abs/2306.00978)
 #
 # Extends QuantizationModifier with AWQ per-channel scale search.

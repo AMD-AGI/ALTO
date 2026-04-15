@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 from typing import Iterable, Any
 from contextlib import contextmanager
 import time

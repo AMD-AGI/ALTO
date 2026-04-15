@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 """Benchmark local vLLM or SGLang serving throughput via /v1/completions.
 
 The script can either launch the backend server itself or benchmark an already

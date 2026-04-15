@@ -1,8 +1,10 @@
-"""
-copied from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/pytorch/utils/sparsification.py
-licensed under the Apache License 2.0
-Helper functions for retrieving information related to model sparsification
-"""
+# copied from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/pytorch/utils/sparsification.py
+# licensed under the Apache License 2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Helper functions for retrieving information related to model sparsification."""
 
 import json
 from typing import Dict, Optional

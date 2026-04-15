@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 from torchtitan.trainer import Trainer
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.models.gpt_oss.config_registry import (

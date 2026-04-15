@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export PYTHONWARNINGS="ignore"

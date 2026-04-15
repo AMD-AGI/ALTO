@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 import torch
 
 from alto.kernels.dsgemm_utils import create_indices_from_offsets_nosync

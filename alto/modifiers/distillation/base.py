@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 from abc import abstractmethod
 from functools import partial
 from typing import Any, Literal

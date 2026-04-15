@@ -1,7 +1,10 @@
-"""
-copied from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/utils/pytorch/module.py
-Utility / helper functions
-"""
+# copied from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/utils/pytorch/module.py
+# licensed under the Apache License 2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Utility / helper functions."""
 
 import difflib
 import re

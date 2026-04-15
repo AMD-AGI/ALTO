@@ -1,9 +1,8 @@
 #!/usr/bin/bash
-# Copyright (c) Advanced Micro Devices, Inc.
-# All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
 
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
 
 set -ex
 

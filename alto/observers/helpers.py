@@ -1,7 +1,10 @@
-"""
-Copied from https://github.com/vllm-project/llm-compressor/blob/4ce1bdfc197ccd95e2be0297bfa4a7c8d7d9a614/src/llmcompressor/observers/helpers.py
+# Copied from https://github.com/vllm-project/llm-compressor/blob/4ce1bdfc197ccd95e2be0297bfa4a7c8d7d9a614/src/llmcompressor/observers/helpers.py
+# licensed under the Apache License 2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-Helper functions for observer token counting and analysis.
+"""Helper functions for observer token counting and analysis.
 
 Provides utility functions for analyzing observer statistics
 and token counts across model modules. Used for monitoring compression

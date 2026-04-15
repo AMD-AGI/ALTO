@@ -33,6 +33,18 @@ ALTO uses or references the following third-party projects:
    - License: Apache License 2.0
    - Repository: https://github.com/nvidia/megatron-lm
 
+3. vLLM
+   - License: Apache License 2.0
+   - Repository: https://github.com/vllm-project/vllm
+
+4. compressed-tensors
+   - License: Apache License 2.0
+   - Repository: https://github.com/vllm-project/compressed-tensors
+
+5. llm-compressor
+   - License: Apache License 2.0
+   - Repository: https://github.com/vllm-project/llm-compressor
+
 Please comply with the respective licenses of these third-party projects when using or distributing Primus.
 
 --------------------------------------------------------------------------------

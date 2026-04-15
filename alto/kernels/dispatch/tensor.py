@@ -1,9 +1,12 @@
 # modified from https://github.com/pytorch/ao/blob/5ebd10d003b1fe6c9330f802ab9741ffde0bb7a9/torchao/prototype/moe_training/tensor.py
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
+# (see LICENSE in the root of this repository).
 #
-# This source code is licensed under the BSD 3-Clause license found in the
-# LICENSE file in the root directory of this source tree.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Original portions are licensed under the BSD 3-Clause License (see upstream PyTorch licensing).
+#
+# SPDX-License-Identifier: BSD-3-Clause AND MIT
 
 from typing import Any, Optional, Tuple
 

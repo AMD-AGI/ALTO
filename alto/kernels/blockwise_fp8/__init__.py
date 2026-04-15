@@ -1,9 +1,6 @@
-# Copyright (c) Advanced Micro Devices, Inc.
-# All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
+# SPDX-License-Identifier: MIT
 
 from .grouped_gemm import ALIGN_SIZE_M, cg_grouped_gemm
 from .blockwise_linear import BlockwiseFP8Linear

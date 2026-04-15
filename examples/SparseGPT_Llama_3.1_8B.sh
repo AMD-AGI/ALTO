@@ -1,4 +1,8 @@
 #!/usr/bin/bash
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 # SparseGPT unstructured sparsification on Llama-3.1-8B
 #
 # Usage:

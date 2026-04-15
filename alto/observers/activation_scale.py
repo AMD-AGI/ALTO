@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 # AWQ activation scale observer.
 # Collects per-channel mean of |x|, matching awq/quantize/auto_scale.py:get_act_scale
 

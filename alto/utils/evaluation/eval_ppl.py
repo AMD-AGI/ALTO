@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 """
 Perplexity evaluation on C4 (val), WikiText-2, and PTB (val).
 

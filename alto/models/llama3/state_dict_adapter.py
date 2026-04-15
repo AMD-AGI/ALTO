@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 import torch
 from torchtitan.models.llama3 import (
     Llama3StateDictAdapter as OriginalLlama3StateDictAdapter,)

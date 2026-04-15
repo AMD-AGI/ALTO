@@ -1,9 +1,13 @@
 # modified from https://github.com/pytorch/ao/blob/f4b3c29f0dc1fe2f30d27340da0682b14b8fe187/torchao/prototype/moe_training/conversion_utils.py#L28
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
+# (see LICENSE in the root of this repository).
 #
-# This source code is licensed under the BSD 3-Clause license found in the
-# LICENSE file in the root directory of this source tree.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Original portions are licensed under the BSD 3-Clause License (see upstream PyTorch licensing).
+#
+# SPDX-License-Identifier: BSD-3-Clause AND MIT
+
 from typing import Callable, Optional, Type
 
 import torch

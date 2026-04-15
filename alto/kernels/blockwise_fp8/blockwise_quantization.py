@@ -1,11 +1,11 @@
-# Modifications Copyright(C) Advanced Micro Devices, Inc.
-# All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
+# (see LICENSE in the root of this repository).
 #
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# Original portions are licensed under the BSD 3-Clause License (see upstream PyTorch/torchtitan licensing).
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause AND MIT
 
 from typing import Tuple
 

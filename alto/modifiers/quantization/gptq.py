@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 # GPTQ (https://arxiv.org/abs/2210.17323)
 #
 # Extends QuantizationModifier with Hessian-guided block-wise re-quantization.

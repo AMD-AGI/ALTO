@@ -1,8 +1,11 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# Advanced Micro Devices contributions and modifications in this file are licensed under the MIT License
+# (see LICENSE in the root of this repository).
 #
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Original portions are licensed under the BSD 3-Clause License (see upstream PyTorch/torchtitan licensing).
+#
+# SPDX-License-Identifier: BSD-3-Clause AND MIT
 
 # This module contains code to support working with DeepGEMM:
 # DeepGEMM: clean and efficient FP8 GEMM kernels with fine-grained scaling

@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 """
 Shared utilities for mapping resolution between smooth layers and balance layers.
 Used by SmoothQuant and AWQ modifiers to identify which normalization layers

@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 # Quantization modifier base with optional sequential (layer-by-layer) processing.
 #
 # RTN:  sequential=False (default) — one full-model forward, then update_weight_zp_scale.

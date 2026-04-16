@@ -180,8 +180,7 @@ class Trainer(ForgeTrainer):
             # Non-PP forward / backward
             with self.train_context():
                 assert len(model_parts) == 1
-                with self.maybe_enable_amp:
-                    result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
         return result
 

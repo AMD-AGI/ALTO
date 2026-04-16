@@ -7,14 +7,13 @@ from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
 from pydantic import PrivateAttr, Field, field_validator
 from torchtitan.models.common.attention import BaseAttention
-from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 
 from alto.modifiers import Modifier
 from alto.kernels.dispatch import (
     swap_params,
     TrainingOpConfig,
-    LPScaledDotProductAttentionWrapper,
+    LPScaledDotProductAttention,
 )
 from alto.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 
@@ -34,18 +33,6 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-        set_token_group_alignment_size_m(ALIGN_SIZE_M)
-        # self._config = MXFP4TrainingOpConfig(
-        #     use_2dblock_x=self.use_2dblock_x,
-        #     use_2dblock_w=self.use_2dblock_w,
-        #     use_hadamard=self.use_hadamard,
-        #     use_sr_grad=self.use_sr_grad,
-        #     use_dge=self.use_dge,
-        # )
 
     @field_validator("targets", mode="before")
     def validate_targets(cls, value: str | list[str]) -> list[str]:
@@ -96,7 +83,7 @@ class LowPrecisionTrainingModifier(Modifier):
             for name, module in match_named_modules(model, targets, self.ignore):
                 if isinstance(module, BaseAttention):
                     assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
-                    module.inner_attention = LPScaledDotProductAttentionWrapper(config=scheme_obj)
+                    module.inner_attention = LPScaledDotProductAttention(config=scheme_obj)
                 elif isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
                     swap_params(module, config=scheme_obj, module_name=name)
                 else:

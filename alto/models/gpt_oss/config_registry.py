@@ -64,7 +64,6 @@ def gpt_oss_20b() -> Trainer.Config:
     config.validator.freq = 10
     config.validator.steps = 10
     config.activation_checkpoint.mode = "none"
-    config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 
@@ -103,7 +102,6 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.validator.freq = 768
     config.validator.steps = 64
     config.activation_checkpoint.mode = "selective"
-    config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 

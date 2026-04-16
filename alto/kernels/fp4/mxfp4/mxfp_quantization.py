@@ -8,7 +8,16 @@ from torch.library import triton_op, wrap_triton
 import triton
 import triton.language as tl
 
+from alto.kernels.fp4.fp4_common import (
+    make_dequantize_e2m1,
+    make_generate_philox_randval_2x,
+    make_quantize_e2m1,
+)
+
 BLOCK_SIZE_DEFAULT = 32
+_dequantize_e2m1 = make_dequantize_e2m1()
+_generate_philox_randval_2x = make_generate_philox_randval_2x()
+_quantize_e2m1 = make_quantize_e2m1()
 
 
 def is_cdna4():
@@ -66,162 +75,6 @@ def _calculate_scales(
 
 
 @triton.jit
-def _quantize_fp4(
-    x,
-    scales_fp32,
-    randval,
-    USE_SR: tl.constexpr,
-):
-    EXP_BIAS_FP32: tl.constexpr = 127
-    EXP_BIAS_FP4: tl.constexpr = 1
-    EBITS_F32: tl.constexpr = 8
-    EBITS_FP4: tl.constexpr = 2
-    MBITS_F32: tl.constexpr = 23
-    MBITS_FP4: tl.constexpr = 1
-
-    max_normal: tl.constexpr = 6
-    min_normal: tl.constexpr = 1
-
-    qx = x.to(tl.float32) / scales_fp32
-
-    # Convert quantized fp32 tensor to uint32 before converting to mxfp4 format
-    # Note: MXFP4  S:1-bit, E:2-bit, M:1-bit
-    #   Zeros: S000 -> +/-0
-    #   Denormal Numbers: S001 -> +/- 0.5
-    #   Normal Numbers:
-    #           S010 -> +/- 1.0
-    #           S011 -> +/- 1.5
-    #           S100 -> +/- 2.0
-    #           S101 -> +/- 3.0
-    #           S110 -> +/- 4.0
-    #           S111 -> +/- 6.0
-    qx = qx.to(tl.uint32, bitcast=True)
-
-    # Extract sign
-    s = qx & 0x80000000
-    # Set everything to positive, will add sign back at the end
-    qx = qx ^ s
-
-    qx_fp32 = qx.to(tl.float32, bitcast=True)
-    saturate_mask = qx_fp32 >= max_normal
-    denormal_mask = (not saturate_mask) & (qx_fp32 < min_normal)
-    normal_mask = not (saturate_mask | denormal_mask)
-
-    # Denormal numbers
-    if USE_SR:
-        denorm_mask_low = denormal_mask & (qx_fp32 < 0.5)
-        denorm_mask_high = denormal_mask & (not denorm_mask_low)
-        randval_uint = randval.to(tl.uint32, bitcast=True)
-        denormal_x = tl.zeros(qx.type.get_block_shapes(), dtype=tl.uint8)
-
-        threshold_low = (qx_fp32 * (2**33 - 2)).to(tl.uint32)
-        denormal_x = tl.where(randval_uint <= threshold_low, 1, denormal_x)
-
-        threshold_high = ((qx_fp32 * 2 - 1) * (2**32 - 1)).to(tl.uint32)
-        mask_high = randval_uint <= threshold_high
-        denormal_x = tl.where(denorm_mask_high & mask_high, 2, denormal_x)
-        denormal_x = tl.where(denorm_mask_high & (not mask_high), 1, denormal_x)
-    else:
-        denorm_exp: tl.constexpr = ((EXP_BIAS_FP32 - EXP_BIAS_FP4) + (MBITS_F32 - MBITS_FP4) + 1)
-        denorm_mask_int: tl.constexpr = denorm_exp << MBITS_F32
-        denorm_mask_float: tl.constexpr = tl.cast(denorm_mask_int, tl.float32, bitcast=True)
-
-        denormal_x = qx_fp32 + denorm_mask_float
-        denormal_x = denormal_x.to(tl.uint32, bitcast=True)
-        denormal_x -= denorm_mask_int
-        denormal_x = denormal_x.to(tl.uint8)
-
-    # Normal numbers
-    normal_x = qx
-    # resulting mantissa is odd
-    mant_odd = (normal_x >> (MBITS_F32 - MBITS_FP4)) & 1
-    # update exponent
-    val_to_add = ((EXP_BIAS_FP4 - EXP_BIAS_FP32) << MBITS_F32)
-    if USE_SR:
-        val_to_add += randval & ((1 << (MBITS_F32 - MBITS_FP4)) - 1)
-    else:
-        val_to_add += (1 << (MBITS_F32 - MBITS_FP4 - 1)) - 1 + mant_odd
-    normal_x += val_to_add
-    # take the bits!
-    normal_x = normal_x >> (MBITS_F32 - MBITS_FP4)
-    normal_x = normal_x.to(tl.uint8)
-
-    # Merge results
-    e2m1_value = tl.full(qx.type.get_block_shapes(), 0x7, dtype=tl.uint8)
-    e2m1_value = tl.where(normal_mask, normal_x, e2m1_value)
-    e2m1_value = tl.where(denormal_mask, denormal_x, e2m1_value)
-    # add sign back
-    sign_lp = s >> (MBITS_F32 + EBITS_F32 - MBITS_FP4 - EBITS_FP4)
-    sign_lp = sign_lp.to(tl.uint8)
-    e2m1_value = e2m1_value | sign_lp
-
-    return e2m1_value
-
-
-@triton.jit
-def _dequantize_fp4(qx, scales_fp32):
-    EXP_BIAS_FP32: tl.constexpr = 127
-    EXP_BIAS_FP4: tl.constexpr = 1
-    EBITS_F32: tl.constexpr = 8
-    EBITS_FP4: tl.constexpr = 2
-    MBITS_F32: tl.constexpr = 23
-    MBITS_FP4: tl.constexpr = 1
-
-    # assume qx is already unpacked
-    tl.static_assert(qx.dtype == tl.uint8)
-
-    # Convert quantized fp32 tensor to uint32 before converting to mxfp4 format
-    # Note: MXFP4  S:1-bit, E:2-bit, M:1-bit
-    #   Zeros: S000 -> +/-0
-    #   Denormal Numbers: S001 -> +/- 0.5
-    #   Normal Numbers:
-    #           S010 -> +/- 1.0
-    #           S011 -> +/- 1.5
-    #           S100 -> +/- 2.0
-    #           S101 -> +/- 3.0
-    #           S110 -> +/- 4.0
-    #           S111 -> +/- 6.0
-
-    # Extract sign
-    s = qx & 0x8
-    # Set everything to positive, will add sign back at the end
-    qx = qx ^ s
-
-    zero_mask = qx == 0x0
-    denormal_mask = qx == 0x1
-
-    # Normal numbers
-    exp_biased_lp = qx >> MBITS_FP4
-    exp_biased_f32 = exp_biased_lp - EXP_BIAS_FP4 + EXP_BIAS_FP32
-    exp_biased_f32 = exp_biased_f32.to(tl.uint32) << MBITS_F32
-    # shift the mantissa to bits 10:32 of the result
-    mantissa_lp_int32 = (qx & 0x1).to(tl.int32)
-    mantissa_f32 = mantissa_lp_int32 << (MBITS_F32 - MBITS_FP4)
-    x_int = exp_biased_f32 | mantissa_f32
-
-    # Zeros
-    x_int = tl.where(zero_mask, 0, x_int)
-    # Denormal numbers
-    x_int = tl.where(denormal_mask, 0x3F000000, x_int)
-
-    # add sign back
-    sign_lp = s.to(tl.uint32) << (MBITS_F32 + EBITS_F32 - MBITS_FP4 - EBITS_FP4)
-    x_int = x_int | sign_lp
-
-    x_fp = x_int.to(tl.float32, bitcast=True)
-    return x_fp * scales_fp32
-
-
-@triton.jit
-def _generate_randval_2x(m, n, philox_seed, philox_offset):
-    ms = tl.arange(0, m)
-    ns = tl.arange(0, n)
-    rng_offsets = philox_offset + ms[:, None] * n + ns[None, :]
-    r1, r2, _, _ = tl.randint4x(philox_seed, rng_offsets)
-    return r1, r2
-
-
-@triton.jit
 def _pack_fp4(
     x,
     scales,
@@ -252,7 +105,7 @@ def _pack_fp4(
                                                                    HALF_QUANT_BLOCK_SIZE).reshape(
                                                                        BLOCK_M, HALF_BLOCK_N)
     if USE_SR:
-        randval0, randval1 = _generate_randval_2x(BLOCK_M, HALF_BLOCK_N, philox_seed, philox_offset)
+        randval0, randval1 = _generate_philox_randval_2x(BLOCK_M, HALF_BLOCK_N, philox_seed, philox_offset)
     else:
         randval0 = 0
         randval1 = 0
@@ -307,8 +160,8 @@ def _pack_fp4(
                 )
         y = y & 0x00FF
     else:
-        y0 = _quantize_fp4(x0, scales_fp32, randval0, USE_SR=USE_SR)
-        y1 = _quantize_fp4(x1, scales_fp32, randval1, USE_SR=USE_SR)
+        y0 = _quantize_e2m1(x0, scales_fp32, randval0, USE_SR=USE_SR)
+        y1 = _quantize_e2m1(x1, scales_fp32, randval1, USE_SR=USE_SR)
         y = y0 | (y1 << 4)
 
     return y.to(tl.uint8)
@@ -373,8 +226,8 @@ def _unpack_fp4(
     else:
         x0 = x & 0xF
         x1 = (x & 0xF0) >> 4
-        y0 = _dequantize_fp4(x0, scales_fp32)
-        y1 = _dequantize_fp4(x1, scales_fp32)
+        y0 = _dequantize_e2m1(x0, scales_fp32)
+        y1 = _dequantize_e2m1(x1, scales_fp32)
 
     y = tl.join(y0, y1).reshape(BLOCK_M, BLOCK_N)
     return y

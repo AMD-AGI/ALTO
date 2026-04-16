@@ -4,7 +4,7 @@
 
 import torch
 from torch import Tensor
-from alto.kernels.mxfp4.mxfp_quantization import (BLOCK_SIZE_DEFAULT)
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (BLOCK_SIZE_DEFAULT)
 
 
 def prepare_data(tensor_shape, data_type):

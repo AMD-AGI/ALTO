@@ -99,6 +99,19 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_sr_grad: bool,
         use_per_tensor_scale: bool,
     ):
+        # Explicitly unwrap any tensor-subclass weight (e.g.
+        # ``NVFP4TrainingWeightWrapperTensor`` from the dispatch layer, or a
+        # DTensor under FSDP2) down to a plain ``torch.Tensor`` at the
+        # autograd-function boundary.  Downstream aten ops would also
+        # unwrap on their own via ``__torch_dispatch__``, but doing it here
+        # once keeps the autograd tape + ``ctx.save_for_backward`` on
+        # plain tensors and avoids paying a pytree walk on every op call.
+        if type(weight) is not torch.Tensor:
+            if hasattr(weight, "_data"):
+                weight = weight._data
+            else:
+                weight = weight.as_subclass(torch.Tensor)
+
         original_shape = x.shape
         x_2d = x.reshape(-1, original_shape[-1])
 

@@ -1,4 +1,8 @@
 #!/usr/bin/bash
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 # AWQ W4A8 quantization on Llama-3.1-8B
 # Uses activation-weighted scaling with grid search (4-bit per-group)
 # with dynamic 8-bit activation quantization
@@ -13,7 +17,7 @@ set -ex
 NGPU=${NGPU:-"1"}
 export CUDA_VISIBLE_DEVICES=0
 export LOG_RANK=${LOG_RANK:-0}
-TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
+TRAIN_FILE=${TRAIN_FILE:-"alto.train"}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_8b_awq"}
 COMM_MODE=${COMM_MODE:-""}

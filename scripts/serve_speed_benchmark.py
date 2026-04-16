@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
 """Benchmark local vLLM or SGLang serving throughput via /v1/completions.
 
 The script can either launch the backend server itself or benchmark an already
@@ -28,7 +31,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
-
 
 DEFAULT_CONCURRENCY_CANDIDATES = [1, 2, 4, 8, 16, 32, 64, 128, 256]
 
@@ -285,8 +287,7 @@ def parse_candidate_list(raw: str, limit: int) -> List[int]:
                 value = int(item)
             except ValueError as exc:
                 raise BenchmarkError(
-                    f"--auto-concurrency-candidates must be a comma separated integer list, got {raw!r}."
-                ) from exc
+                    f"--auto-concurrency-candidates must be a comma separated integer list, got {raw!r}.") from exc
             if value < 1:
                 raise BenchmarkError("--auto-concurrency-candidates values must be >= 1.")
             candidates.append(value)
@@ -539,30 +540,24 @@ def build_mixed_prompts(total: int, approx_prompt_tokens: int, seed: int) -> Lis
     for idx in range(total):
         task = PROMPT_TASKS[idx % len(PROMPT_TASKS)]
         question = PROMPT_QUESTIONS[idx % len(PROMPT_QUESTIONS)]
-        prefix = (
-            "You are participating in an inference throughput benchmark. "
-            "Follow the instruction carefully and answer in plain text.\n\n"
-            f"Task: {task}\n\n"
-        )
+        prefix = ("You are participating in an inference throughput benchmark. "
+                  "Follow the instruction carefully and answer in plain text.\n\n"
+                  f"Task: {task}\n\n")
         fixed_words = len(prefix.split()) + len(question.split()) + 12
         context_budget = max(48, approx_prompt_tokens - fixed_words)
         context = build_repeated_context(context_budget, rng, CORPUS_SENTENCES)
-        prompt = (
-            f"{prefix}"
-            f"Document:\n{context}\n\n"
-            f"Question: {question}\n"
-            "Response:"
-        )
+        prompt = (f"{prefix}"
+                  f"Document:\n{context}\n\n"
+                  f"Question: {question}\n"
+                  "Response:")
         prompts.append(prompt)
     return prompts
 
 
 def build_shared_prefix_prompts(total: int, approx_prompt_tokens: int, seed: int) -> List[str]:
     rng = random.Random(seed)
-    base_prefix = (
-        "You are participating in an inference throughput benchmark. "
-        "Use only the shared context to answer the question.\n\n"
-    )
+    base_prefix = ("You are participating in an inference throughput benchmark. "
+                   "Use only the shared context to answer the question.\n\n")
     fixed_words = len(base_prefix.split()) + 18
     shared_budget = max(64, approx_prompt_tokens - fixed_words)
     shared_context = build_repeated_context(shared_budget, rng, SHARED_PREFIX_SENTENCES + CORPUS_SENTENCES)
@@ -570,12 +565,10 @@ def build_shared_prefix_prompts(total: int, approx_prompt_tokens: int, seed: int
     prompts: List[str] = []
     for idx in range(total):
         question = PROMPT_QUESTIONS[idx % len(PROMPT_QUESTIONS)]
-        prompts.append(
-            f"{base_prefix}"
-            f"Shared context:\n{shared_context}\n\n"
-            f"Request {idx + 1}: {question}\n"
-            "Response:"
-        )
+        prompts.append(f"{base_prefix}"
+                       f"Shared context:\n{shared_context}\n\n"
+                       f"Request {idx + 1}: {question}\n"
+                       "Response:")
     return prompts
 
 
@@ -742,16 +735,14 @@ def send_completion_request(
     extra_request_body: Dict[str, Any],
 ) -> RequestResult:
     payload = dict(extra_request_body)
-    payload.update(
-        {
-            "model": model_name,
-            "prompt": prompt,
-            "max_tokens": output_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stream": False,
-        }
-    )
+    payload.update({
+        "model": model_name,
+        "prompt": prompt,
+        "max_tokens": output_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "stream": False,
+    })
 
     started = time.perf_counter()
     try:
@@ -876,8 +867,7 @@ def run_round(
                 args.request_timeout,
                 headers,
                 extra_request_body,
-            )
-            for prompt in prompts
+            ) for prompt in prompts
         ]
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
@@ -907,7 +897,7 @@ def auto_tune_concurrency(
     headers: Dict[str, str],
     extra_request_body: Dict[str, Any],
 ) -> Dict[str, Any]:
-    tune_prompts = list(prompts[: max(1, args.auto_tune_requests)])
+    tune_prompts = list(prompts[:max(1, args.auto_tune_requests)])
     candidates = parse_candidate_list(args.auto_concurrency_candidates, limit=len(tune_prompts))
     rounds: List[Dict[str, Any]] = []
 
@@ -929,7 +919,8 @@ def auto_tune_concurrency(
 
     successful = [round_info for round_info in rounds if round_info["completed_requests"] > 0]
     if not successful:
-        raise BenchmarkError("Auto concurrency tuning failed because every candidate produced zero successful requests.")
+        raise BenchmarkError(
+            "Auto concurrency tuning failed because every candidate produced zero successful requests.")
 
     best = max(
         successful,
@@ -982,9 +973,9 @@ def main() -> int:
     base_url = f"http://{args.host}:{args.port}"
     headers = build_headers(args.api_key)
     prompts = prepare_prompts(args)
-    warmup_prompts = prompts[: args.warmup_requests]
-    benchmark_prompts = prompts[args.warmup_requests : args.warmup_requests + args.num_requests]
-    auto_prompts = prompts[args.warmup_requests :]
+    warmup_prompts = prompts[:args.warmup_requests]
+    benchmark_prompts = prompts[args.warmup_requests:args.warmup_requests + args.num_requests]
+    auto_prompts = prompts[args.warmup_requests:]
 
     process: Optional[subprocess.Popen[str]] = None
     server_log_path: Optional[pathlib.Path] = None

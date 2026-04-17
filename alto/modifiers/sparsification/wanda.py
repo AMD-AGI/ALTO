@@ -11,6 +11,7 @@
 
 import torch
 from torch.nn import Module
+from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.tools.logging import logger
 
 from alto.modifiers.sparsification.base import SparsityModifierBase
@@ -79,6 +80,11 @@ class WandaModifier(SparsityModifierBase):
                 prune_n=self._prune_n,
                 prune_m=self._prune_m,
             )
+            if isinstance(module.weight, DTensor):
+                sparsified_weight = sparsified_weight.redistribute(
+                    module.weight.device_mesh,
+                    placements=module.weight.placements,
+                )
             module.weight.data.copy_(sparsified_weight)
 
     def _sparsify_weight(
@@ -112,6 +118,12 @@ class WandaModifier(SparsityModifierBase):
         W = W.to(dtype=PRECISION)
         S = row_scalar
 
+        device_mesh = None
+        if isinstance(W, DTensor):
+            device_mesh = W.device_mesh
+            W = W.redistribute(device_mesh, placements=(Replicate(),)).to_local()
+            S = S.redistribute(device_mesh, placements=(Replicate(),)).to_local()
+
         W_metric = torch.abs(W) * torch.sqrt(S.reshape((1, -1)))
 
         # initialize a mask to be all False
@@ -137,5 +149,9 @@ class WandaModifier(SparsityModifierBase):
             W = W.t()
 
         W = W.reshape(final_shape).to(final_dtype)
+
+        if device_mesh is not None:
+            W = DTensor.from_local(W, device_mesh=device_mesh, placements=(Replicate(),))
+            W_mask = DTensor.from_local(W_mask, device_mesh=device_mesh, placements=(Replicate(),))
 
         return W, W_mask.reshape(final_shape)

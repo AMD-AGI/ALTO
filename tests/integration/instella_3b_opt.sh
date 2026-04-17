@@ -3,7 +3,7 @@
 SCRIPT_DIR=$(dirname "$0")
 cd $SCRIPT_DIR/../..
 
-NGPU=1 \
+NGPU=2 \
 MODULE=llama3 \
 CONFIG=instella_3b_opt \
 ./examples/run.sh \

@@ -194,7 +194,6 @@ class Trainer(ForgeTrainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-        assert not parallel_dims.dp_cp_enabled, "DP_CP is not supported in post-training"
 
         # Collect all microbatches on CPU and count total valid tokens
         microbatches = []

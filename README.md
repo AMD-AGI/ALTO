@@ -1,8 +1,7 @@
-# ALTO: Advanced Lightweight Training and Optimization
+# ALTO: Advanced Low-Precision Training and Optimization
 
 ALTO is a Python library for large language model (LLM) training and optimization, built on top of the [TorchTitan fork](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto). It ships Triton-backed low-precision kernels (MXFP4, block-scaled FP8, and related utilities) and a configurable stack of **modifiers**—low-precision training (LPT)—wired into TorchTitan through a model-converter pipeline.
 
-*This repository is not an official AMD product.*
 
 ## Contents
 

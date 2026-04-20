@@ -4,7 +4,7 @@
 
 import pytest
 import torch
-from alto.kernels.mxfp4.mxfp_quantization import (
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (
     convert_to_mxfp4,
     convert_from_mxfp4,
     is_cdna4,

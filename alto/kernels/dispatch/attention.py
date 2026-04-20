@@ -5,7 +5,7 @@
 import torch
 from torchtitan.models.common.attention import ScaledDotProductAttention
 
-from alto.kernels.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
+from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
 from .config import TrainingOpConfig
 
 __all__ = ["LPScaledDotProductAttention"]

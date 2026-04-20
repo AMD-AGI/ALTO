@@ -5,13 +5,13 @@
 import pytest
 from tabulate import tabulate
 import torch
-from alto.kernels.mxfp4.mxfp_quantization import (
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     convert_to_mxfp4,
     convert_from_mxfp4,
     is_cdna4,
 )
-from alto.kernels.mxfp4.mxfp_linear import (
+from alto.kernels.fp4.mxfp4.mxfp_linear import (
     blockwise_mxfp4_gemm,
     MXFP4LinearFunction,
 )

@@ -15,7 +15,7 @@ from alto.kernels.dispatch import (
     TrainingOpConfig,
     LPScaledDotProductAttention,
 )
-from alto.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 
 __all__ = ["LowPrecisionTrainingModifier"]
 

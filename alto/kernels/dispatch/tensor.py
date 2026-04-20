@@ -1,12 +1,7 @@
 # modified from https://github.com/pytorch/ao/blob/5ebd10d003b1fe6c9330f802ab9741ffde0bb7a9/torchao/prototype/moe_training/tensor.py
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
-# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
-# (see LICENSE in the root of this repository).
 #
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# Original portions are licensed under the BSD 3-Clause License (see upstream PyTorch licensing).
-#
-# SPDX-License-Identifier: BSD-3-Clause AND MIT
+# SPDX-License-Identifier: MIT
 
 from typing import Any, Optional, Tuple
 
@@ -20,8 +15,8 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 from torchao.utils import TorchAOBaseTensor
 from torchtitan.tools.logging import logger
 
-from alto.kernels.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
-from alto.kernels.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
+from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten

@@ -22,12 +22,12 @@ from alto.kernels.blockwise_fp8.grouped_gemm.cg_backward import (
     cg_grouped_gemm_backward_inputs,
     cg_grouped_gemm_backward_weights,
 )
-from alto.kernels.mxfp4.mxfp_grouped_gemm.cg_forward import mxfp4_grouped_gemm_forward
-from alto.kernels.mxfp4.mxfp_grouped_gemm.autotune import (
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.cg_forward import mxfp4_grouped_gemm_forward
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import (
     STANDARD_CONFIGS,
     ALIGN_SIZE_M,
 )
-from alto.kernels.mxfp4.mxfp_quantization import (
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
 )

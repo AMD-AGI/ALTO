@@ -12,8 +12,8 @@ from torch.library import triton_op, wrap_triton
 import triton
 import triton.language as tl
 
-from alto.kernels.mxfp4.mxfp_quantization import BLOCK_SIZE_DEFAULT
-from alto.kernels.mxfp4.mxfp_grouped_gemm.autotune import (
+from alto.kernels.fp4.mxfp4.mxfp_quantization import BLOCK_SIZE_DEFAULT
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import (
     STANDARD_CONFIGS,
     ALIGN_SIZE_M,
 )

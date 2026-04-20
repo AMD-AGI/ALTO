@@ -50,7 +50,7 @@ def make_quantize_e2m1():
             denorm_mask_low = denormal_mask & (qx_fp32 < 0.5)
             denorm_mask_high = denormal_mask & (~denorm_mask_low)
             randval_uint = randval.to(tl.uint32, bitcast=True)
-            denormal_x = tl.zeros(qx.type.get_block_shapes(), dtype=tl.uint8)
+            denormal_x = (qx * 0).to(tl.uint8)
 
             threshold_low = (qx_fp32 * (2**33 - 2)).to(tl.uint32)
             denormal_x = tl.where(randval_uint <= threshold_low, 1, denormal_x)
@@ -84,7 +84,7 @@ def make_quantize_e2m1():
         normal_x = normal_x >> (MBITS_F32 - MBITS_FP4)
         normal_x = normal_x.to(tl.uint8)
 
-        e2m1_value = tl.full(qx.type.get_block_shapes(), 0x7, dtype=tl.uint8)
+        e2m1_value = ((qx * 0) + 0x7).to(tl.uint8)
         e2m1_value = tl.where(normal_mask, normal_x, e2m1_value)
         e2m1_value = tl.where(denormal_mask, denormal_x, e2m1_value)
         sign_lp = s >> (MBITS_F32 + EBITS_F32 - MBITS_FP4 - EBITS_FP4)

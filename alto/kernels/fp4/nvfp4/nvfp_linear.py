@@ -281,13 +281,13 @@ class NVFP4LinearFunction(torch.autograd.Function):
             grad_weights = grad_weights * dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
         return (
-            grad_inputs.view(*original_shape[:-1], -1),
+            grad_inputs.view(*original_shape[:-1], w_dq.shape[-1]),
             grad_weights,
             None, None, None, None, None, None,
         )
 
 
-def _to_nvfp4_then_linear(
+def _to_nvfp4_then_scaled_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     use_2dblock_x: bool,
@@ -297,11 +297,14 @@ def _to_nvfp4_then_linear(
     use_hadamard: bool = False,
     use_dge: bool = False,
 ) -> torch.Tensor:
-    """Public entry-point: NVFP4 QDQ + BF16 linear.
+    """Build the optional Hadamard transform and apply ``NVFP4LinearFunction``.
 
-    Mirrors ``_to_mxfp4_then_scaled_mm``: ``HadamardTransform`` is built lazily
-    here (outside the autograd function) so the opaque transform object flows
-    through ``apply`` as a non-Tensor argument, matching what MXFP4 does.
+    Name mirrors ``_to_mxfp4_then_scaled_mm``.  The bias term (if any) is
+    applied by the dispatch layer outside this function; this function is
+    responsible only for the QDQ + matmul pipeline.
+    ``HadamardTransform`` is built lazily here (outside the autograd
+    function) so the opaque transform object flows through ``apply`` as a
+    non-Tensor argument, matching what MXFP4 does.
     """
     hadamard_transform: Optional[HadamardTransform] = None
     if use_hadamard:

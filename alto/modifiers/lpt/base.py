@@ -32,6 +32,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
+    use_per_tensor_scale: bool = False
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
 
@@ -87,6 +88,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_hadamard=self.use_hadamard,
                     use_sr_grad=self.use_sr_grad,
                     use_dge=self.use_dge,
+                    use_per_tensor_scale=self.use_per_tensor_scale,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

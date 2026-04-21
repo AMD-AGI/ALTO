@@ -6,24 +6,15 @@ import torch
 from torch import Tensor
 from alto.kernels.fp4.nvfp4.nvfp_quantization import BLOCK_SIZE_DEFAULT
 
+# Re-exported so existing ``from .utils import calc_snr, calc_cossim``
+# call-sites keep working; the single source of truth lives in
+# ``alto.kernels.fp4.testing_utils``.
+from alto.kernels.fp4.testing_utils import calc_snr, calc_cossim  # noqa: F401
+
 
 F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
-
-
-def calc_snr(x: torch.Tensor, y: torch.Tensor) -> float:
-    signal = torch.sum(x.float() ** 2)
-    noise = torch.sum((x.float() - y.float()) ** 2)
-    if noise == 0:
-        return float("inf")
-    return (10 * torch.log10(signal / noise)).item()
-
-
-def calc_cossim(x: torch.Tensor, y: torch.Tensor) -> float:
-    x_flat = x.reshape(-1).float()
-    y_flat = y.reshape(-1).float()
-    return (torch.dot(x_flat, y_flat) / (x_flat.norm() * y_flat.norm())).item()
 
 
 def prepare_data(tensor_shape, data_type, pattern="random"):

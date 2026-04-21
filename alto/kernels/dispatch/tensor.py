@@ -17,7 +17,7 @@ from torchtitan.tools.logging import logger
 
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
-from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_linear
+from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten
@@ -298,7 +298,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
         use_sr_grad    – stochastic rounding on gradient quantization
         use_hadamard   – wgrad-path Hadamard rotation (mirrors MXFP4 behaviour)
         use_dge        – differentiable gradient estimator on wgrad (mirrors MXFP4)
-        use_per_tensor_scale (derived: always False, not yet exposed in TrainingOpConfig)
+        use_per_tensor_scale – two-level NVFP4 scaling (global × per-block)
 
     Unsupported ops (hard-fail rather than silently fall back to BF16):
         _grouped_mm    – NVFP4 grouped GEMM is tracked in a separate branch; until
@@ -351,13 +351,13 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # entry, so the autograd tape and downstream QDQ ops still see
             # plain tensors.
             W = B if trans_b else B.T
-            Y = _to_nvfp4_then_linear(
+            Y = _to_nvfp4_then_scaled_mm(
                 A,
                 W,
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
-                use_per_tensor_scale=False,  # not yet exposed in TrainingOpConfig
+                use_per_tensor_scale=config.use_per_tensor_scale,
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )

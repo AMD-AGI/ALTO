@@ -19,7 +19,7 @@ ALTO is a Python library for low-precision model training and optimization, buil
 Training-oriented kernels and schemes include:
 
 - **[Blockwise FP8](alto/kernels/blockwise_fp8)** — linear, grouped GEMM, and FlashAttention.
-- **[MXFP4](alto/kernels/mxfp4)** — linear, grouped GEMM, and FlashAttention.
+- **[MXFP4](alto/kernels/fp4/mxfp4)** — linear, grouped GEMM, and FlashAttention.
 
 Techniques used to narrow the gap versus BF16 include:
 

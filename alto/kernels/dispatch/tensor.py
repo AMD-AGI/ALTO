@@ -278,9 +278,6 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 return func(*args, **kwargs)
 
 
-torch.serialization.add_safe_globals([MXFP4TrainingWeightWrapperTensor])
-
-
 class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
     """Weight tensor subclass that routes F.linear calls through NVFP4LinearFunction.
 
@@ -368,6 +365,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # All other ops (copy_, view, ...) fall through without wrapping
             with torch._C.DisableTorchFunctionSubclass():
                 return func(*args, **kwargs)
-
-
-torch.serialization.add_safe_globals([NVFP4TrainingWeightWrapperTensor])
+torch.serialization.add_safe_globals([
+    MXFP4TrainingWeightWrapperTensor,
+    NVFP4TrainingWeightWrapperTensor,
+])

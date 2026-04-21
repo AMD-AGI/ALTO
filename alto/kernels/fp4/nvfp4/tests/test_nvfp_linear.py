@@ -120,9 +120,13 @@ def test_nvfp4_linear_autograd_function(
     grad_weights_ref = weights.grad.clone()
     inputs.grad.zero_(); weights.grad.zero_()
 
-    # NVFP4 QDQ path.  ``use_per_tensor_scale=False`` keeps this test
-    # format-agnostic; the PTS path is exercised in the QDQ round-trip
-    # test above.
+    # NVFP4 QDQ path.  This is NOT a shared MXFP4/NVFP4 test; it is specific
+    # to NVFP4's autograd function.  We still keep
+    # ``use_per_tensor_scale=False`` here on purpose so the parity check stays
+    # focused on the shared 6-QDQ linear math (forward + dX + dW).  The
+    # tensor-wise scale path is exercised separately in the QDQ round-trip and
+    # quantization tests, where it can be isolated without broadening this
+    # matrix or coupling the SNR thresholds to an NVFP4-only knob.
     outputs = NVFP4LinearFunction.apply(
         inputs, weights,
         use_2dblock_x, use_2dblock_w, use_sr_grad,

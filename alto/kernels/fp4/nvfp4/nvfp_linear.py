@@ -14,6 +14,27 @@ from .nvfp_quantization import (
 )
 
 
+def unwrap_weight_wrapper(weight: torch.Tensor) -> torch.Tensor:
+    """Normalize wrapper-tensor inputs to a plain ``torch.Tensor``.
+
+    At the autograd-function boundary we want to save / manipulate plain local
+    tensors.  The production dispatch path may pass a wrapper tensor (e.g.
+    ``NVFP4TrainingWeightWrapperTensor``); in that case prefer its ``._data``.
+
+    We intentionally keep the helper generic instead of hard-coding DTensor:
+    by the time ``NVFP4LinearFunction.forward`` is invoked, DTensor inputs have
+    already been unwrapped by PyTorch's DTensor dispatcher, so the only wrapper
+    we expect to see here is one that still carries a ``._data`` payload.  For
+    any other tensor subclass, ``as_subclass(torch.Tensor)`` preserves the local
+    tensor storage while stripping the subclass type.
+    """
+    if type(weight) is torch.Tensor:
+        return weight
+    if hasattr(weight, "_data"):
+        return weight._data  # type: ignore[return-value]
+    return weight.as_subclass(torch.Tensor)
+
+
 def _qdq(
     tensor: torch.Tensor,
     *,
@@ -113,18 +134,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
     ):
-        # Explicitly unwrap any tensor-subclass weight (e.g.
-        # ``NVFP4TrainingWeightWrapperTensor`` from the dispatch layer, or a
-        # DTensor under FSDP2) down to a plain ``torch.Tensor`` at the
-        # autograd-function boundary.  Downstream aten ops would also
-        # unwrap on their own via ``__torch_dispatch__``, but doing it here
-        # once keeps the autograd tape + ``ctx.save_for_backward`` on
-        # plain tensors and avoids paying a pytree walk on every op call.
-        if type(weight) is not torch.Tensor:
-            if hasattr(weight, "_data"):
-                weight = weight._data
-            else:
-                weight = weight.as_subclass(torch.Tensor)
+        weight = unwrap_weight_wrapper(weight)
 
         original_shape = x.shape
         x_2d = x.reshape(-1, original_shape[-1])

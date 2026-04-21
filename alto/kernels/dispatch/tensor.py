@@ -17,7 +17,7 @@ from torchtitan.tools.logging import logger
 
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
-from alto.kernels.fp4.nvfp4.nvfp_linear import NVFP4LinearFunction
+from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_linear
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten
@@ -296,11 +296,9 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
         use_2dblock_x  – 2D block scaling on activations
         use_2dblock_w  – 2D block scaling on weights (mirrors the axis-invariant view)
         use_sr_grad    – stochastic rounding on gradient quantization
+        use_hadamard   – wgrad-path Hadamard rotation (mirrors MXFP4 behaviour)
+        use_dge        – differentiable gradient estimator on wgrad (mirrors MXFP4)
         use_per_tensor_scale (derived: always False, not yet exposed in TrainingOpConfig)
-
-    Unsupported config fields (hard-fail rather than silently fall back to BF16):
-        use_hadamard   – not yet supported on NVFP4 linear
-        use_dge        – not yet supported on NVFP4 linear
 
     Unsupported ops (hard-fail rather than silently fall back to BF16):
         _grouped_mm    – NVFP4 grouped GEMM is tracked in a separate branch; until
@@ -343,17 +341,6 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert config.precision == "nvfp4", (
                 f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}"
             )
-            # Hard-fail on unsupported recipe knobs so the user sees the gap
-            # immediately, rather than running a BF16-only kernel under the
-            # 'nvfp4' scheme label.
-            assert not config.use_hadamard, (
-                "NVFP4 linear does not support use_hadamard=True yet; drop the "
-                "flag or switch to a scheme that implements Hadamard."
-            )
-            assert not config.use_dge, (
-                "NVFP4 linear does not support use_dge=True yet; drop the "
-                "flag or switch to a scheme that implements DGE."
-            )
 
             # Pass the wrapper tensor itself into the autograd function —
             # matching the MXFP4 path — so that any upstream subclass
@@ -364,13 +351,15 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # entry, so the autograd tape and downstream QDQ ops still see
             # plain tensors.
             W = B if trans_b else B.T
-            Y = NVFP4LinearFunction.apply(
+            Y = _to_nvfp4_then_linear(
                 A,
                 W,
-                config.use_2dblock_x,
-                config.use_2dblock_w,
-                config.use_sr_grad,
-                False,  # use_per_tensor_scale not yet exposed in TrainingOpConfig
+                use_2dblock_x=config.use_2dblock_x,
+                use_2dblock_w=config.use_2dblock_w,
+                use_sr_grad=config.use_sr_grad,
+                use_per_tensor_scale=False,  # not yet exposed in TrainingOpConfig
+                use_hadamard=config.use_hadamard,
+                use_dge=config.use_dge,
             )
             if bias is not None:
                 Y = Y + bias

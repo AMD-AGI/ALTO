@@ -67,41 +67,34 @@ def test_grouped_mm_raises_not_implemented(device):
 
 
 # ---------------------------------------------------------------------------
-# B2 — unsupported recipe knobs must hard-fail rather than be silently dropped
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("flag", ["use_hadamard", "use_dge"])
-def test_linear_rejects_unsupported_flag(device, flag):
-    """B2: setting use_hadamard=True or use_dge=True on the NVFP4 scheme must
-    raise at call time — otherwise the flag is silently no-op'd, meaning the
-    user gets a plain NVFP4 path despite requesting Hadamard/DGE."""
-    cfg = _make_config(**{flag: True})
-    W_wrapped = _make_wrapper(cfg, device=device)
-    x = torch.randn(16, 32, dtype=torch.bfloat16, device=device)
-
-    with pytest.raises(AssertionError, match=flag):
-        torch.nn.functional.linear(x, W_wrapped)
-
-
-# ---------------------------------------------------------------------------
-# Baseline sanity — valid configs still work after the new guards
+# Baseline sanity — every supported recipe knob combination must produce a
+# valid BF16 output of the right shape.  ``use_hadamard`` and ``use_dge`` used
+# to hard-fail here (B2 guard) before Hadamard/DGE were implemented on the
+# NVFP4 linear path — that guard is now replaced by functional coverage.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("use_2dblock_x", [False, True])
 @pytest.mark.parametrize("use_2dblock_w", [False, True])
 @pytest.mark.parametrize("use_sr_grad",   [False, True])
-def test_linear_supported_knobs_still_work(device, use_2dblock_x, use_2dblock_w, use_sr_grad):
-    """Make sure the B1/B2 guards did not regress the legitimately supported
-    knobs (2D block scaling on x/w and SR on grads)."""
+@pytest.mark.parametrize("use_hadamard",  [False, True])
+@pytest.mark.parametrize("use_dge",       [False, True])
+def test_linear_supported_knobs_still_work(
+    device, use_2dblock_x, use_2dblock_w, use_sr_grad, use_hadamard, use_dge,
+):
+    """Functional smoke: every (2D×/2Dw/SR/Hadamard/DGE) combination must
+    return a BF16 output with the expected shape.  M is picked large enough
+    (64) to satisfy the Hadamard block size (32 by default)."""
     cfg = _make_config(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=use_sr_grad,
+        use_hadamard=use_hadamard,
+        use_dge=use_dge,
     )
-    W_wrapped = _make_wrapper(cfg, device=device)
-    x = torch.randn(16, 32, dtype=torch.bfloat16, device=device)
+    W_wrapped = _make_wrapper(cfg, device=device, shape=(32, 32))
+    x = torch.randn(64, 32, dtype=torch.bfloat16, device=device)
     y = torch.nn.functional.linear(x, W_wrapped)
-    assert y.shape == (16, 32)
+    assert y.shape == (64, 32)
     assert y.dtype == torch.bfloat16
 
 
@@ -164,6 +157,40 @@ def test_linear_passes_wrapper_through_to_autograd_function(device):
     torch.optim.AdamW(lin.parameters(), lr=1e-1).step()
     w_after = lin.weight._data.detach()
     diff = (w_after.float() - w_before.float()).norm().item()
+    assert diff > 1e-6, f"weight did not update (L2 diff = {diff})"
+
+
+@pytest.mark.parametrize("use_hadamard,use_dge", [
+    (True,  False),
+    (False, True),
+    (True,  True),
+])
+def test_hadamard_and_dge_flow_grads_through_wrapper(device, use_hadamard, use_dge):
+    """Protocol guard: when Hadamard / DGE are enabled, the autograd tape must
+    still put ``param.grad`` on the wrapper (not on ``param._data.grad``), and
+    one optimizer step must actually move the weight.
+
+    This is the same pattern as
+    ``test_linear_passes_wrapper_through_to_autograd_function`` but parameterised
+    over the two newly-enabled recipe knobs; the intent is to catch any future
+    refactor that re-introduces pre-unwrapping specifically along the Hadamard
+    / DGE paths."""
+    cfg = _make_config(use_hadamard=use_hadamard, use_dge=use_dge)
+    # M >= 32 for HadamardFactory's default block_size=32.
+    lin = torch.nn.Linear(32, 32, bias=False, dtype=torch.bfloat16, device=device)
+    orig = lin.weight.data
+    lin.weight = torch.nn.Parameter(
+        NVFP4TrainingWeightWrapperTensor(orig, cfg), requires_grad=True,
+    )
+    x = torch.randn(64, 32, dtype=torch.bfloat16, device=device, requires_grad=True)
+    y = lin(x); y.sum().backward()
+    assert lin.weight.grad       is not None, "param.grad is None with Hadamard/DGE"
+    assert lin.weight._data.grad is None,     "_data.grad must be None"
+    assert x.grad                is not None
+
+    w_before = lin.weight._data.detach().clone()
+    torch.optim.AdamW(lin.parameters(), lr=1e-1).step()
+    diff = (lin.weight._data.float() - w_before.float()).norm().item()
     assert diff > 1e-6, f"weight did not update (L2 diff = {diff})"
 
 

@@ -3,15 +3,15 @@
 # SPDX-License-Identifier: MIT
 
 import torch
-from torchtitan.models.common.attention import (ScaledDotProductAttentionWrapper)
+from torchtitan.models.common.attention import ScaledDotProductAttention
 
 from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
 from .config import TrainingOpConfig
 
-__all__ = ["LPScaledDotProductAttentionWrapper"]
+__all__ = ["LPScaledDotProductAttention"]
 
 
-class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
+class LPScaledDotProductAttention(ScaledDotProductAttention):
 
     def __init__(self, config: TrainingOpConfig):
         super().__init__()

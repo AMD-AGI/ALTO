@@ -180,8 +180,7 @@ class Trainer(ForgeTrainer):
             # Non-PP forward / backward
             with self.train_context():
                 assert len(model_parts) == 1
-                with self.maybe_enable_amp:
-                    result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
 
         return result
 
@@ -195,7 +194,6 @@ class Trainer(ForgeTrainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-        assert not parallel_dims.dp_cp_enabled, "DP_CP is not supported in post-training"
 
         # Collect all microbatches on CPU and count total valid tokens
         microbatches = []

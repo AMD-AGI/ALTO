@@ -21,7 +21,7 @@ __all__ = [
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
     config = deepseek_v3_debugmodel_orig()
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 10
     config.training.local_batch_size = 4
     config.training.global_batch_size = 16
@@ -43,7 +43,7 @@ def deepseek_v3_16b() -> Trainer.Config:
     config = deepseek_v3_16b_orig()
     config.hf_assets_path = "/huggingface/hub/models--deepseek-ai--deepseek-moe-16b-base/snapshots/521d2bc4fb69a3f3ae565310fcc3b65f97af2580"
     config.dump_folder = "deepseek_v3_16b-outputs"
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.seq_len = 4096
@@ -62,7 +62,6 @@ def deepseek_v3_16b() -> Trainer.Config:
     config.validator.freq = 10
     config.validator.steps = 10
     config.activation_checkpoint.mode = "none"
-    config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 

@@ -6,6 +6,11 @@ import torch
 from torch import Tensor
 from alto.kernels.fp4.mxfp4.mxfp_quantization import (BLOCK_SIZE_DEFAULT)
 
+# Re-exported so existing ``from .utils import calc_snr, calc_cossim``
+# call-sites keep working; the single source of truth lives in
+# ``alto.kernels.fp4.testing_utils``.
+from alto.kernels.fp4.testing_utils import calc_snr, calc_cossim  # noqa: F401
+
 
 def prepare_data(tensor_shape, data_type):
     torch.manual_seed(1234)
@@ -14,35 +19,6 @@ def prepare_data(tensor_shape, data_type):
     p_mask = torch.bernoulli(torch.ones_like(x) * 0.005)
     x += 100 * torch.randn_like(x) * p_mask
     return x
-
-
-def calc_snr(
-    x: torch.Tensor,
-    y: torch.Tensor,
-) -> float:
-    """
-    Calculate the Signal-to-Noise Ratio (SNR) between two tensors.
-    SNR = 10 * log10(sum(x^2) / (sum((x - y)^2)))
-    """
-    signal = torch.sum(x**2)
-    noise = torch.sum((x - y)**2)
-    return 10 * torch.log10(signal / noise)
-
-
-def calc_cossim(
-    x: torch.Tensor,
-    y: torch.Tensor,
-) -> float:
-    """
-    Calculate the cosine similarity between two tensors.
-    Cosine similarity = dot(x, y) / (norm(x) * norm(y))
-    """
-    x = x.reshape(-1)
-    y = y.reshape(-1)
-    dot_product = torch.sum(x * y)
-    norm_x = torch.norm(x)
-    norm_y = torch.norm(y)
-    return dot_product / (norm_x * norm_y)
 
 
 def _n_ones(n: int) -> int:

@@ -10,6 +10,7 @@ available as compatibility aliases but are intentionally omitted from
 ``__all__``.
 """
 
+from .nvfp_linear import NVFP4LinearFunction
 from .nvfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     SUPPORTED_SCALE_FORMATS,
@@ -24,6 +25,7 @@ from .nvfp_quantization import (
 
 __all__ = (
     "BLOCK_SIZE_DEFAULT",
+    "NVFP4LinearFunction",
     "SUPPORTED_SCALE_FORMATS",
     "compute_dynamic_per_tensor_scale",
     "convert_from_nvfp4",

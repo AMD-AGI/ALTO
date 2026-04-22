@@ -5,11 +5,11 @@
 import pytest
 from tabulate import tabulate
 import torch
-from alto.kernels.mxfp4.mxfp_quantization import (
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
 )
-from alto.kernels.mxfp4.mxfp_grouped_gemm import (
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm import (
     ALIGN_SIZE_M,
     mxfp4_grouped_gemm,
 )

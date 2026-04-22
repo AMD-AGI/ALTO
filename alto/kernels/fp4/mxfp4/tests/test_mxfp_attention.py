@@ -6,7 +6,7 @@ import pytest
 from tabulate import tabulate
 import torch
 
-from alto.kernels.mxfp4.triton_flash_attention_mxfp4 import (
+from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import (
     triton_attention_mxfp4,)
 from .utils import calc_snr, calc_cossim
 

@@ -1,7 +1,6 @@
-# ALTO: Advanced Low-Precision Training and Optimization
+# ALTO: Advanced Low-precision Training and Optimization
 
-ALTO is a Python library for large language model (LLM) training and optimization, built on top of the [TorchTitan fork](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto). It ships Triton-backed low-precision kernels (MXFP4, block-scaled FP8, and related utilities) and a configurable stack of **modifiers**—low-precision training (LPT)—wired into TorchTitan through a model-converter pipeline.
-
+ALTO is a Python library for low-precision model training and optimization, built on top of the [TorchTitan fork](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto). It ships Triton-backed low-precision kernels (MXFP4, block-scaled FP8, and related utilities) and a configurable stack of **modifiers**—low-precision training (LPT)—wired into TorchTitan through a model-converter pipeline.
 
 ## Contents
 
@@ -20,7 +19,7 @@ ALTO is a Python library for large language model (LLM) training and optimizatio
 Training-oriented kernels and schemes include:
 
 - **[Blockwise FP8](alto/kernels/blockwise_fp8)** — linear, grouped GEMM, and FlashAttention.
-- **[MXFP4](alto/kernels/mxfp4)** — linear, grouped GEMM, and FlashAttention.
+- **[MXFP4](alto/kernels/fp4/mxfp4)** — linear, grouped GEMM, and FlashAttention.
 
 Techniques used to narrow the gap versus BF16 include:
 

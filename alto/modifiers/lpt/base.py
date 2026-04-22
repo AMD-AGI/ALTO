@@ -16,7 +16,7 @@ from alto.kernels.dispatch import (
     TrainingOpConfig,
     LPScaledDotProductAttentionWrapper,
 )
-from alto.kernels.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 
 __all__ = ["LowPrecisionTrainingModifier"]
 
@@ -32,6 +32,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
+    use_per_tensor_scale: bool = False
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
 
@@ -55,7 +56,7 @@ class LowPrecisionTrainingModifier(Modifier):
 
     @field_validator("scheme", mode="before")
     def validate_scheme(cls, value: str | dict[str, str | list[str]]) -> str | dict[str, list[str]]:
-        if isinstance(value, str) and value not in ["mxfp4", "mxfp8"]:
+        if isinstance(value, str) and value not in ["mxfp4", "mxfp8", "nvfp4"]:
             raise ValueError(f"Unsupported training op scheme: {value}")
 
         if isinstance(value, dict):
@@ -87,6 +88,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_hadamard=self.use_hadamard,
                     use_sr_grad=self.use_sr_grad,
                     use_dge=self.use_dge,
+                    use_per_tensor_scale=self.use_per_tensor_scale,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

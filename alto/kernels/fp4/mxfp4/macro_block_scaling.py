@@ -9,7 +9,8 @@ def macro_block_scaling(x: torch.Tensor, axis: int = -1, use_2d_block: bool = Fa
     x = x.transpose(axis, -1)
     ori_shape = x.shape
     if use_2d_block:
-        assert ori_shape[-1] % MACRO_BLOCK_SIZE == 0 and ori_shape[-2] % MACRO_BLOCK_SIZE == 0
+        assert ori_shape[-1] % MACRO_BLOCK_SIZE == 0 and ori_shape[
+            -2] % MACRO_BLOCK_SIZE == 0, f"Tensor shape={ori_shape} can not be divided by {MACRO_BLOCK_SIZE}"
         x = x.reshape(
             *ori_shape[:-2],
             ori_shape[-2] // MACRO_BLOCK_SIZE,
@@ -22,15 +23,14 @@ def macro_block_scaling(x: torch.Tensor, axis: int = -1, use_2d_block: bool = Fa
             ori_shape[-1] // MACRO_BLOCK_SIZE,
             MACRO_BLOCK_SIZE * MACRO_BLOCK_SIZE,
         )
-        #raise NotImplementedError(f"x shape: {x.shape}")
     else:
-        assert ori_shape[-1] % MACRO_BLOCK_SIZE == 0
+        assert ori_shape[
+            -1] % MACRO_BLOCK_SIZE == 0, f"Tensor shape={ori_shape} can not be divided by {MACRO_BLOCK_SIZE}"
         x = x.reshape(
             *ori_shape[:-1],
             ori_shape[-1] // MACRO_BLOCK_SIZE,
             MACRO_BLOCK_SIZE,
         )
-        #raise NotImplementedError(f"x shape: {x.shape}")
 
     amax = torch.amax(x.abs(), dim=-1, keepdim=True)
     amax = torch.clamp(amax, min=1e-12)

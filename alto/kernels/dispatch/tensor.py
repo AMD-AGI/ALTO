@@ -239,6 +239,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_dge=config.use_dge,
                 use_hadamard=config.use_hadamard,
                 use_static_clip=config.use_static_clip,
+                use_macro_block_scaling=config.two_level_scaling == "blockwise",
             )
 
         # linear op override

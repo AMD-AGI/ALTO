@@ -18,6 +18,7 @@ from torch.distributed.tensor.placement_types import (
 import triton
 import triton.language as tl
 
+from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
 from alto.kernels.hadamard_transform import (HadamardTransform, HadamardFactory)
 from alto.kernels.dge import dge_bwd
 from .mxfp_quantization import (
@@ -283,6 +284,12 @@ class MXFP4LinearFunction(torch.autograd.Function):
         Returns:
             torch.Tensor: Output tensor after linear transformation.
         """
+        # Normalize any training-time weight wrapper to its underlying local
+        # tensor before saving / quantizing it.  As with NVFP4, DTensor inputs
+        # are normally already unwrapped to local tensors before this function
+        # is entered.
+        weight = unwrap_weight_wrapper(weight)
+
         original_shape = x.shape
         original_dtype = x.dtype
         x = x.reshape(-1, original_shape[-1])  # Ensure x is 2D

@@ -6,33 +6,13 @@ from typing import Optional, Tuple, Union
 
 import torch
 
+from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
 from alto.kernels.hadamard_transform import HadamardFactory, HadamardTransform
 from alto.kernels.dge import dge_bwd
 from .nvfp_quantization import (
     convert_to_nvfp4,
     convert_from_nvfp4,
 )
-
-
-def unwrap_weight_wrapper(weight: torch.Tensor) -> torch.Tensor:
-    """Normalize wrapper-tensor inputs to a plain ``torch.Tensor``.
-
-    At the autograd-function boundary we want to save / manipulate plain local
-    tensors.  The production dispatch path may pass a wrapper tensor (e.g.
-    ``NVFP4TrainingWeightWrapperTensor``); in that case prefer its ``._data``.
-
-    We intentionally keep the helper generic instead of hard-coding DTensor:
-    by the time ``NVFP4LinearFunction.forward`` is invoked, DTensor inputs have
-    already been unwrapped by PyTorch's DTensor dispatcher, so the only wrapper
-    we expect to see here is one that still carries a ``._data`` payload.  For
-    any other tensor subclass, ``as_subclass(torch.Tensor)`` preserves the local
-    tensor storage while stripping the subclass type.
-    """
-    if type(weight) is torch.Tensor:
-        return weight
-    if hasattr(weight, "_data"):
-        return weight._data  # type: ignore[return-value]
-    return weight.as_subclass(torch.Tensor)
 
 
 def _qdq(

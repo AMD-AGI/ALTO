@@ -29,19 +29,15 @@ ALTO uses or references the following third-party projects:
    - License: BSD License
    - Repository: https://github.com/pytorch/torchtitan
 
-2. Megatron-LM
-   - License: Apache License 2.0
-   - Repository: https://github.com/nvidia/megatron-lm
-
-3. vLLM
+2. vLLM
    - License: Apache License 2.0
    - Repository: https://github.com/vllm-project/vllm
 
-4. compressed-tensors
+3. compressed-tensors
    - License: Apache License 2.0
    - Repository: https://github.com/vllm-project/compressed-tensors
 
-5. llm-compressor
+4. llm-compressor
    - License: Apache License 2.0
    - Repository: https://github.com/vllm-project/llm-compressor
 

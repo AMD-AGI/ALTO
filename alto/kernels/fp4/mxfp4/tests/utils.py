@@ -286,6 +286,7 @@ def convert_to_mxfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
+    use_static_clip: bool = False,
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if data_hp.dtype == torch.float32:
@@ -335,7 +336,12 @@ def convert_to_mxfp4_pytorch(
     scales_fp = (scales.to(hp_int_dtype) << hp_mbits).view(data_hp.dtype).unsqueeze(-1)
     if is_2d_block:
         scales_fp = scales_fp.unsqueeze(-3)
-    data_lp = data_hp / scales_fp
+    if use_static_clip:
+        # Note: in-place multiplication leads to incorrect results
+        data_clipped = data_hp * (3.0 / 4.0)
+    else:
+        data_clipped = data_hp
+    data_lp = data_clipped / scales_fp
 
     data_lp = data_lp.reshape(orig_shape)
     data_lp = f32_to_f4_unpacked(data_lp.float())
@@ -351,6 +357,7 @@ def convert_from_mxfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
+    use_static_clip: bool = False,
 ) -> torch.Tensor:
     data_lp = data_lp.transpose(axis, -1)
     scales = scales.transpose(axis, -1)
@@ -359,6 +366,8 @@ def convert_from_mxfp4_pytorch(
     f4_unpacked = unpack_uint4(data_lp)
     f32 = f4_unpacked_to_f32(f4_unpacked)
     data_hp = f32.to(output_dtype)
+    if use_static_clip:
+        data_hp *= 4.0 / 3.0
     orig_shape = (*orig_shape[:-1], orig_shape[-1] * 2)
 
     if is_2d_block:

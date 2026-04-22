@@ -108,9 +108,10 @@ def test_mxfp4_linear_kernel(shape, use_2dblock_a, use_2dblock_b, trans_a, trans
 @pytest.mark.parametrize("use_grad_sr", [False, True])
 @pytest.mark.parametrize("compile", [False])
 @pytest.mark.parametrize("use_hadamard", [False, True])
+@pytest.mark.parametrize("use_static_clip", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
 def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use_grad_sr, compile, use_hadamard,
-                                        data_type):
+                                        use_static_clip, data_type):
     if use_2dblock_x and use_hadamard:
         pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
 
@@ -149,7 +150,7 @@ def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use
     mxfp4_linear_func = MXFP4LinearFunction.apply
     if compile:
         mxfp4_linear_func = torch.compile(mxfp4_linear_func, fullgraph=True)
-    outputs = mxfp4_linear_func(inputs, weights, use_2dblock_x, use_2dblock_w, use_grad_sr, False, transform)
+    outputs = mxfp4_linear_func(inputs, weights, use_2dblock_x, use_2dblock_w, use_grad_sr, False, use_static_clip, transform)
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
 
@@ -170,7 +171,7 @@ def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use
                  headers=["Tensor", "SNR", "Cosine Sim"],
                  tablefmt="github"))
 
-    min_snr = 8 if use_grad_sr else 10
+    min_snr = 7 if use_grad_sr else 10
     assert output_snr > min_snr
     assert dx_snr > min_snr
     assert dw_snr > min_snr

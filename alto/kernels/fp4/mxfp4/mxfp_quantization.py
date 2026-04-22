@@ -252,6 +252,7 @@ def _convert_to_mxfp4_kernel(
     IS_2D_BLOCK: tl.constexpr,
     USE_SR: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_STATIC_CLIP: tl.constexpr,
 ):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
@@ -291,6 +292,10 @@ def _convert_to_mxfp4_kernel(
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
     )
+
+    if USE_STATIC_CLIP:
+        x *= (3.0 / 4.0)
+
     y = _pack_fp4(
         x,
         scales,
@@ -325,6 +330,7 @@ def _convert_from_mxfp4_kernel(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_STATIC_CLIP: tl.constexpr = False,
 ):
     """
     Dequantizes the input tensor `x_ptr` with scaling factors in `s_ptr`, and stores the result in `y_ptr`.
@@ -370,6 +376,8 @@ def _convert_from_mxfp4_kernel(
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_ASM=USE_ASM,
     )
+    if USE_STATIC_CLIP:
+        y *= (4.0 / 3.0)
     offs_y = offs_m[:, None] * stride_ym + offs_yn[None, :] * stride_yn
     tl.store(y_ptr + offs_y, y)
 
@@ -384,6 +392,7 @@ def convert_to_mxfp4(
     use_asm: Optional[bool] = None,
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
+    use_static_clip: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
@@ -430,6 +439,7 @@ def convert_to_mxfp4(
         IS_2D_BLOCK=is_2d_block,
         USE_SR=use_sr,
         USE_ASM=use_asm,
+        USE_STATIC_CLIP=use_static_clip,
     )
 
     return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
@@ -444,6 +454,7 @@ def convert_from_mxfp4(
     axis: int = -1,
     is_2d_block: bool = False,
     use_asm: Optional[bool] = None,
+    use_static_clip: bool = False,
 ) -> torch.Tensor:
     assert output_dtype in [torch.float32, torch.bfloat16]
     if use_asm is None:
@@ -480,6 +491,7 @@ def convert_from_mxfp4(
         QUANT_BLOCK_SIZE=block_size,
         IS_2D_BLOCK=is_2d_block,
         USE_ASM=use_asm,
+        USE_STATIC_CLIP=use_static_clip,
     )
     return data_hp.reshape(orig_shape).transpose(axis, -1)
 
@@ -492,6 +504,7 @@ def _fake_convert_to_mxfp4(
     is_2d_block: bool = False,
     use_sr: bool = False,
     use_asm: Optional[bool] = None,
+    use_static_clip: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     data_hp = data_hp.transpose(axis, -1)
     orig_shape = data_hp.shape
@@ -516,6 +529,7 @@ def _fake_convert_from_mxfp4(
     axis: int = -1,
     is_2d_block: bool = False,
     use_asm: Optional[bool] = None,
+    use_static_clip: bool = False,
 ) -> torch.Tensor:
     data_hp = data_lp.new_empty(data_lp.shape, dtype=output_dtype)
     return torch.cat((data_hp, data_hp), dim=axis)

@@ -238,6 +238,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_sr_grad=config.use_sr_grad,
                 use_dge=config.use_dge,
                 use_hadamard=config.use_hadamard,
+                use_static_clip=config.use_static_clip,
             )
 
         # linear op override
@@ -266,6 +267,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
                 use_dge=config.use_dge,
+                use_static_clip=config.use_static_clip,
                 use_hadamard=config.use_hadamard,
             )
             if bias is not None:

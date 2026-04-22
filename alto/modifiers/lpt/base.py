@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import Literal
 import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
@@ -32,7 +33,8 @@ class LowPrecisionTrainingModifier(Modifier):
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
-    use_per_tensor_scale: bool = False
+    two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
+    use_static_clip: bool = False
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
 
@@ -40,13 +42,6 @@ class LowPrecisionTrainingModifier(Modifier):
         super().__init__(**kwargs)
 
         set_token_group_alignment_size_m(ALIGN_SIZE_M)
-        # self._config = MXFP4TrainingOpConfig(
-        #     use_2dblock_x=self.use_2dblock_x,
-        #     use_2dblock_w=self.use_2dblock_w,
-        #     use_hadamard=self.use_hadamard,
-        #     use_sr_grad=self.use_sr_grad,
-        #     use_dge=self.use_dge,
-        # )
 
     @field_validator("targets", mode="before")
     def validate_targets(cls, value: str | list[str]) -> list[str]:
@@ -88,7 +83,8 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_hadamard=self.use_hadamard,
                     use_sr_grad=self.use_sr_grad,
                     use_dge=self.use_dge,
-                    use_per_tensor_scale=self.use_per_tensor_scale,
+                    two_level_scaling=self.two_level_scaling,
+                    use_static_clip=self.use_static_clip,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

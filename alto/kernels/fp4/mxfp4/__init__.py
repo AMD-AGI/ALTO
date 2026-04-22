@@ -11,6 +11,7 @@ from .mxfp_quantization import (
     convert_to_mxfp4,
 )
 from .triton_flash_attention_mxfp4 import triton_attention_mxfp4
+from .macro_block_scaling import macro_block_scaling, macro_block_descaling
 
 __all__ = (
     "_quantize_then_scaled_grouped_mm",
@@ -20,4 +21,6 @@ __all__ = (
     "convert_from_mxfp4",
     "convert_to_mxfp4",
     "triton_attention_mxfp4",
+    "macro_block_scaling",
+    "macro_block_descaling",
 )

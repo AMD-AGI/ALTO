@@ -12,8 +12,12 @@ import torch
 
 from alto.kernels.blockwise_fp8.grouped_gemm.cg_forward import cg_grouped_gemm_forward
 
+from alto.kernels.fp4.fp4_common import (
+    check_grouped_loop_contract,
+    group_ids_from_expert_indices,
+    use_cdna4_grouped_backend,
+)
 from .autotune import ALIGN_SIZE_M
-from .utils import _check_grouped_loop_contract, _group_ids_from_expert_indices, _use_cdna4_grouped_backend
 
 
 def _nvfp4_grouped_fprop(
@@ -42,7 +46,7 @@ def _nvfp4_grouped_fprop(
     otherwise a Python-loop fallback computes one ALIGN_SIZE_M-sized expert
     group at a time without per-group host syncs.
     """
-    if _use_cdna4_grouped_backend():
+    if use_cdna4_grouped_backend():
         # The CDNA4 kernels assert ``is_contiguous`` on every buffer; keep a
         # defensive ``.contiguous()`` here because non-last-axis QDQ outputs
         # can otherwise arrive as strided views.  These are O(1) no-ops when
@@ -55,10 +59,10 @@ def _nvfp4_grouped_fprop(
 
     assert num_groups is not None, "_nvfp4_grouped_fprop: loop fallback requires num_groups"
     M_total = inputs.shape[0]
-    _check_grouped_loop_contract(M_total, where="_nvfp4_grouped_fprop")
+    check_grouped_loop_contract(M_total, where="_nvfp4_grouped_fprop", align_size_m=ALIGN_SIZE_M)
     K = inputs.shape[1]
     N = expert_weights.shape[1]
-    group_ids = _group_ids_from_expert_indices(expert_indices, num_groups)
+    group_ids = group_ids_from_expert_indices(expert_indices, num_groups, align_size_m=ALIGN_SIZE_M)
     x_groups = inputs.view(num_groups, ALIGN_SIZE_M, K)
     y_groups = torch.zeros((num_groups, ALIGN_SIZE_M, N), dtype=output_dtype, device=inputs.device)
     for eid in range(expert_weights.shape[0]):

@@ -36,8 +36,8 @@ from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import (
     nvfp4_grouped_gemm,
     _quantize_then_nvfp4_scaled_grouped_mm,
 )
+from alto.kernels.fp4.fp4_common import use_cdna4_grouped_backend
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.cg_backward import _nvfp4_grouped_wgrad
-from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.utils import _use_cdna4_grouped_backend
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from .utils import prepare_data, calc_snr, calc_cossim
 
@@ -423,10 +423,10 @@ def test_nvfp4_grouped_wgrad_isolation(shape, use_sr_grad):
 # ---------------------------------------------------------------------------
 
 def test_grouped_mm_platform_detection():
-    """_use_cdna4_grouped_backend should return a bool and be deterministic."""
-    result = _use_cdna4_grouped_backend()
+    """use_cdna4_grouped_backend should return a bool and be deterministic."""
+    result = use_cdna4_grouped_backend()
     assert isinstance(result, bool)
-    assert _use_cdna4_grouped_backend() == result, "Detection must be deterministic"
+    assert use_cdna4_grouped_backend() == result, "Detection must be deterministic"
     print(f"\nCDNA4 grouped backend available: {result}")
 
 

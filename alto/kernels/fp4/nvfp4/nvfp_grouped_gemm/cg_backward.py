@@ -16,8 +16,12 @@ from alto.kernels.blockwise_fp8.grouped_gemm.cg_backward import (
 )
 from alto.kernels.fp4.nvfp4.nvfp_quantization import _qdq
 
+from alto.kernels.fp4.fp4_common import (
+    check_grouped_loop_contract,
+    group_ids_from_expert_indices,
+    use_cdna4_grouped_backend,
+)
 from .autotune import ALIGN_SIZE_M
-from .utils import _check_grouped_loop_contract, _group_ids_from_expert_indices, _use_cdna4_grouped_backend
 
 
 def _nvfp4_grouped_dgrad(
@@ -43,7 +47,7 @@ def _nvfp4_grouped_dgrad(
     The CDNA4 backend calls ``cg_grouped_gemm_backward_inputs`` directly, so
     there is no transpose on the hot path.
     """
-    if _use_cdna4_grouped_backend():
+    if use_cdna4_grouped_backend():
         # Defensive ``.contiguous()`` at the CDNA4 kernel boundary (see
         # cg_forward for rationale).
         return cg_grouped_gemm_backward_inputs(
@@ -54,10 +58,10 @@ def _nvfp4_grouped_dgrad(
 
     assert num_groups is not None, "_nvfp4_grouped_dgrad: loop fallback requires num_groups"
     M_total = grad_output.shape[0]
-    _check_grouped_loop_contract(M_total, where="_nvfp4_grouped_dgrad")
+    check_grouped_loop_contract(M_total, where="_nvfp4_grouped_dgrad", align_size_m=ALIGN_SIZE_M)
     N = grad_output.shape[1]
     K = expert_weights.shape[2]
-    group_ids = _group_ids_from_expert_indices(expert_indices, num_groups)
+    group_ids = group_ids_from_expert_indices(expert_indices, num_groups, align_size_m=ALIGN_SIZE_M)
     g_groups = grad_output.view(num_groups, ALIGN_SIZE_M, N)
     dx_groups = torch.zeros((num_groups, ALIGN_SIZE_M, K), dtype=output_dtype, device=grad_output.device)
     for eid in range(expert_weights.shape[0]):
@@ -97,7 +101,7 @@ def _nvfp4_grouped_wgrad(
             use_per_tensor_scale=use_per_tensor_scale, use_sr=use_sr_grad,
         )
 
-    if _use_cdna4_grouped_backend():
+    if use_cdna4_grouped_backend():
         # Defensive ``.contiguous()`` at the CDNA4 kernel boundary.
         return cg_grouped_gemm_backward_weights(
             g_m_dq.contiguous(),
@@ -109,8 +113,8 @@ def _nvfp4_grouped_wgrad(
     assert num_groups is not None, "_nvfp4_grouped_wgrad: loop fallback requires num_groups"
     N = g_m_dq.shape[1]
     K = x_bwd.shape[1]
-    _check_grouped_loop_contract(grad_output.shape[0], where="_nvfp4_grouped_wgrad")
-    group_ids = _group_ids_from_expert_indices(expert_indices, num_groups)
+    check_grouped_loop_contract(grad_output.shape[0], where="_nvfp4_grouped_wgrad", align_size_m=ALIGN_SIZE_M)
+    group_ids = group_ids_from_expert_indices(expert_indices, num_groups, align_size_m=ALIGN_SIZE_M)
     go_groups = g_m_dq.view(num_groups, ALIGN_SIZE_M, N)
     x_groups = x_bwd.view(num_groups, ALIGN_SIZE_M, K)
     dw = torch.zeros((num_experts, N, K), dtype=output_dtype, device=g_m_dq.device)

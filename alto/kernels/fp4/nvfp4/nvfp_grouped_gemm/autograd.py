@@ -35,12 +35,12 @@ from alto.kernels.hadamard_transform import HadamardTransform
 from .autotune import ALIGN_SIZE_M
 from .cg_backward import _nvfp4_grouped_dgrad, _nvfp4_grouped_wgrad
 from .cg_forward import _nvfp4_grouped_fprop
-from .utils import (
-    _check_grouped_axis0_qdq_contract,
-    _check_grouped_loop_contract,
-    _resolve_expert_indices,
-    _use_cdna4_grouped_backend,
+from alto.kernels.fp4.fp4_common import (
+    check_grouped_loop_contract,
+    resolve_expert_indices,
+    use_cdna4_grouped_backend,
 )
+from .utils import check_grouped_axis0_qdq_contract
 
 
 # Canonical reduction-axis indices for expert_weights in ``[E, N, K]``.
@@ -79,14 +79,14 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         M_total = inputs.shape[0]
         original_dtype = inputs.dtype
         expert_weights = unwrap_weight_wrapper(expert_weights)
-        expert_indices = _resolve_expert_indices(
+        expert_indices = resolve_expert_indices(
             expert_indices=expert_indices, offs=offs, M_total=M_total,
         )
         num_experts = expert_weights.shape[0]
-        _check_grouped_axis0_qdq_contract(M_total, where="NVFP4GroupedGEMM.forward")
+        check_grouped_axis0_qdq_contract(M_total, where="NVFP4GroupedGEMM.forward")
         num_groups: Optional[int] = None
-        if not _use_cdna4_grouped_backend():
-            _check_grouped_loop_contract(M_total, where="NVFP4GroupedGEMM.forward")
+        if not use_cdna4_grouped_backend():
+            check_grouped_loop_contract(M_total, where="NVFP4GroupedGEMM.forward")
             num_groups = M_total // ALIGN_SIZE_M
 
         x_dq = _qdq(

@@ -27,24 +27,8 @@ from __future__ import annotations
 
 import torch
 
-from alto.kernels.hadamard_transform import HadamardFactory
+from alto.kernels.fp4.fp4_common import build_hadamard_transform_if_needed
 from .autograd import NVFP4GroupedGEMM
-
-
-def _build_hadamard_transform_if_needed(
-    *,
-    use_hadamard: bool,
-    use_2dblock_x: bool,
-    device: torch.device,
-):
-    """Create the grouped-path Hadamard transform if the recipe requests it."""
-    if not use_hadamard:
-        return None
-    assert not use_2dblock_x, (
-        "Hadamard transform can only be applied when use_2dblock_x=False."
-    )
-    with torch.no_grad():
-        return HadamardFactory.create_transform(device=device)
 
 
 def _nvfp4_grouped_gemm_impl(
@@ -70,7 +54,7 @@ def _nvfp4_grouped_gemm_impl(
     """
     if expert_indices is not None and expert_indices.dtype != torch.int32:
         expert_indices = expert_indices.to(torch.int32)
-    hadamard_transform = _build_hadamard_transform_if_needed(
+    hadamard_transform = build_hadamard_transform_if_needed(
         use_hadamard=use_hadamard,
         use_2dblock_x=use_2dblock_x,
         device=expert_weights.device,
@@ -154,7 +138,7 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
     use_dge: bool = False,
 ) -> torch.Tensor:
     """Drop-in for the dispatch layer, mirroring mxfp4's
-    ``_quantize_then_mxfp_scaled_grouped_mm``.
+    ``_quantize_then_mxfp4_scaled_grouped_mm``.
 
     Tokens in ``A`` are already sorted by expert.  ``offs`` is the cumulative
     per-expert token count tensor from the MoE routing layer.  ``B`` arrives

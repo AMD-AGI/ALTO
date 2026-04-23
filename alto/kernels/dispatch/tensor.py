@@ -16,7 +16,7 @@ from torchao.utils import TorchAOBaseTensor
 from torchtitan.tools.logging import logger
 
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
-from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_mxfp_scaled_grouped_mm
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_mxfp4_scaled_grouped_mm
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,
@@ -232,15 +232,15 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # logger.info(
             #     f"[MXFP4GroupedMM]config: {config} A.shape: {A.shape} B.shape: {B.shape} offs.shape: {offs.shape}")
 
-            return _quantize_then_mxfp_scaled_grouped_mm(
+            return _quantize_then_mxfp4_scaled_grouped_mm(
                 A,
                 B,
                 offs=offs,
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
-                use_dge=config.use_dge,
                 use_hadamard=config.use_hadamard,
+                use_dge=config.use_dge,
             )
 
         # linear op override

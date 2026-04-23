@@ -10,6 +10,7 @@ from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
 from alto.kernels.hadamard_transform import HadamardFactory, HadamardTransform
 from alto.kernels.dge import dge_bwd
 from .nvfp_quantization import (
+    BLOCK_SIZE_DEFAULT,
     convert_to_nvfp4,
     convert_from_nvfp4,
 )
@@ -142,9 +143,24 @@ class NVFP4LinearFunction(torch.autograd.Function):
         # For DGE we additionally retain the packed FP4 view + scales of the
         # weight's wgrad-axis quantization so the backward pass can recover the
         # exact FP4 bin each weight fell into, without a second quantize pass.
+        #
+        # The wgrad reduction-axis view is mathematically different from the
+        # fprop view whenever 1D block scaling is used.  Do not silently reuse
+        # the fprop view for misaligned shapes: fail fast so callers learn that
+        # the current QDQ kernel requires axis-0 dimensions to be block-aligned.
         w_raw_fp4 = None
         w_raw_scales = None
         if not use_2dblock_w:
+            torch._check(
+                weight.shape[0] % BLOCK_SIZE_DEFAULT == 0,
+                lambda: (
+                    "NVFP4LinearFunction wgrad-axis weight QDQ requires "
+                    f"weight.shape[0] ({weight.shape[0]}) divisible by "
+                    f"BLOCK_SIZE_DEFAULT ({BLOCK_SIZE_DEFAULT}) when "
+                    "use_2dblock_w=False.  Silent fallback to the fprop "
+                    "axis=-1 view is not mathematically valid for 1D blocks."
+                ),
+            )
             if use_dge:
                 w_dq_axis0, w_raw_fp4, w_raw_scales = _qdq(
                     weight, axis=0,
@@ -159,26 +175,39 @@ class NVFP4LinearFunction(torch.autograd.Function):
                     use_per_tensor_scale=use_per_tensor_scale,
                 )
         else:
-            # 2D scaling: fprop quantization already matches wgrad axis layout.
+            # 2D block scaling is axis-invariant, so the fprop quantized view is
+            # also the correct wgrad-axis view.
             if use_dge:
                 # Re-run the fprop-axis QDQ with return_raw to grab the raw FP4
                 # view. The dequantized output is identical to w_dq by
                 # construction, so we discard it and reuse w_dq for the matmul.
                 _, w_raw_fp4, w_raw_scales = _qdq(
                     weight, axis=-1,
-                    is_2d_block=True,
+                    is_2d_block=use_2dblock_w,
                     use_per_tensor_scale=use_per_tensor_scale,
                     return_raw=True,
                 )
             w_dq_axis0 = w_dq
 
+        # Same reasoning for x on the wgrad reduction axis: with 1D block
+        # scaling, axis=0 and axis=-1 encode different block layouts, so
+        # misaligned shapes must fail fast instead of silently changing the
+        # recipe.  Hadamard decorrelates outliers along the batch axis before
+        # axis=0 QDQ so the wgrad matmul sees FP4 inputs with more uniform
+        # per-block ranges; because the same orthogonal H is applied to
+        # grad_output in backward, ``(Hx)ᵀ(Hg) = xᵀg`` is preserved in high
+        # precision and only the FP4 rounding sees the decorrelated blocks.
         if not use_2dblock_x:
-            # Hadamard decorrelates outliers along the batch axis before axis=0
-            # QDQ so the wgrad matmul sees FP4 inputs with more uniform per-
-            # block ranges. Because the same orthogonal H is also applied to
-            # grad_output in backward, ``(Hx)ᵀ(Hg) = xᵀg`` is preserved in
-            # high precision — the rotation only changes how the FP4 rounding
-            # clips outliers within a block.
+            torch._check(
+                x_2d.shape[0] % BLOCK_SIZE_DEFAULT == 0,
+                lambda: (
+                    "NVFP4LinearFunction wgrad-axis activation QDQ requires "
+                    f"x.shape[0] ({x_2d.shape[0]}) divisible by "
+                    f"BLOCK_SIZE_DEFAULT ({BLOCK_SIZE_DEFAULT}) when "
+                    "use_2dblock_x=False.  Silent fallback to the fprop "
+                    "axis=-1 view is not mathematically valid for 1D blocks."
+                ),
+            )
             if hadamard_transform is not None:
                 x_for_axis0 = hadamard_transform(x_2d, left_mul=True)
             else:

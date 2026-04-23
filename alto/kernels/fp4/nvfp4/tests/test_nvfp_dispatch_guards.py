@@ -4,15 +4,11 @@
 
 """Dispatch-layer guard tests for the NVFP4 weight-wrapper tensor.
 
-These tests pin down two behaviours that, if regressed, would cause a silent
-downgrade to BF16 under a ``scheme=nvfp4`` configuration (see review items
-B1 and B2):
-
-* ``torch._grouped_mm`` on an NVFP4-wrapped weight must raise
-  ``NotImplementedError``, not quietly fall through to the default BF16 kernel.
-* ``F.linear`` / ``mm`` / ``addmm`` on an NVFP4-wrapped weight must refuse
-  configs with ``use_hadamard=True`` or ``use_dge=True`` — neither is
-  implemented on the NVFP4 linear path yet.
+These tests pin down behaviour that would otherwise silently change the active
+low-precision recipe under ``scheme=nvfp4``.  The op-level tests verify the
+math of ``NVFP4LinearFunction`` and ``nvfp4_grouped_gemm``; this file verifies
+that the production wrapper / dispatch path preserves the user's config and
+still routes gradients to the wrapper leaf.
 """
 
 import pytest
@@ -20,6 +16,7 @@ import torch
 
 from alto.kernels.dispatch.config import TrainingOpConfig
 from alto.kernels.dispatch.tensor import NVFP4TrainingWeightWrapperTensor
+from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import ALIGN_SIZE_M
 
 
 def _make_config(**overrides) -> TrainingOpConfig:
@@ -48,22 +45,53 @@ def _make_wrapper(config: TrainingOpConfig, shape=(32, 32), device="cuda"):
 
 
 # ---------------------------------------------------------------------------
-# B1 — grouped_mm must hard-fail rather than silently fall back to BF16
+# grouped_mm smoke — scheme='nvfp4' on a 2D × 3D grouped_mm (MoE routed
+# experts layout) must reach the NVFP4 grouped-GEMM path, produce a BF16
+# output with the expected shape, and actually execute a matmul (not a silent
+# all-zero fallback on non-native platforms).
 # ---------------------------------------------------------------------------
 
-def test_grouped_mm_raises_not_implemented(device):
-    """B1: applying scheme='nvfp4' to a module that issues torch._grouped_mm
-    (e.g. MoE GroupedExperts) must raise, not silently run BF16."""
+def test_grouped_mm_smoke(device):
     cfg = _make_config()
-    # 2D × 3D grouped-matmul signature (MoE routed-experts shape).
-    num_experts, K, N, M = 2, 16, 16, 16
+    num_experts, K, N, M = 2, 16, 16, ALIGN_SIZE_M
     A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
     W = torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device)
     W_wrapped = NVFP4TrainingWeightWrapperTensor(W, cfg)
     offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
 
-    with pytest.raises(NotImplementedError, match="grouped"):
-        torch._grouped_mm(A, W_wrapped, offs=offs)
+    y = torch._grouped_mm(A, W_wrapped, offs=offs)
+    assert y.shape == (M, N)
+    assert y.dtype == torch.bfloat16
+    assert y.abs().max().item() > 0, "grouped_mm smoke must exercise a real matmul"
+
+
+@pytest.mark.parametrize("use_hadamard,use_dge", [
+    (True, False),
+    (False, True),
+    (True, True),
+])
+def test_grouped_mm_recipe_surface_smoke(device, use_hadamard, use_dge):
+    """Grouped-GEMM must accept the same recipe knobs as the dense NVFP4 linear
+    path once the implementation is present.  This is a lightweight smoke test:
+    grouped recipe variants should produce a BF16 output with the expected
+    shape and should not silently fall back to BF16 or zero-output behaviour."""
+    cfg = _make_config(
+        use_2dblock_x=False,  # Hadamard is defined only on the 1D-x path
+        use_2dblock_w=True,
+        use_sr_grad=True,
+        use_hadamard=use_hadamard,
+        use_dge=use_dge,
+    )
+    num_experts, K, N, M = 2, 16, 16, ALIGN_SIZE_M
+    A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    W = torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device)
+    W_wrapped = NVFP4TrainingWeightWrapperTensor(W, cfg)
+    offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
+
+    y = torch._grouped_mm(A, W_wrapped, offs=offs)
+    assert y.shape == (M, N)
+    assert y.dtype == torch.bfloat16
+    assert y.abs().max().item() > 0
 
 
 # ---------------------------------------------------------------------------

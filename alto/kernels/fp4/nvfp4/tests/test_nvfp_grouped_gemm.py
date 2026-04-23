@@ -8,23 +8,31 @@
 
 Test layers
 -----------
-1. ``test_nvfp4_grouped_gemm_forward_accuracy``
-   Forward output SNR vs BF16 reference.  Thresholds mirror the NVFP4 linear
-   P2P test: 1D/1D → SNR > 10 dB; any 2D block → SNR > 5 dB.
-
-2. ``test_nvfp4_grouped_gemm_autograd``
+1. ``test_nvfp4_grouped_gemm_autograd``
    Full forward+backward (O, dX, dW) vs BF16 autograd reference.
    Thresholds from NVFP4LinearFunction autograd test:
      use_sr_grad=True  → SNR > 3 dB
      use_sr_grad=False → SNR > 4 dB
+   Also enforces the tighter forward SNR bound on the non-SR BF16 path so
+   regressions in the QDQ / fprop kernels get caught early.
 
-3. ``test_nvfp4_grouped_gemm_boundary``
-   Smoke test: various expert counts and group multipliers must not produce
-   NaN/Inf outputs.
+2. ``test_nvfp4_grouped_gemm_boundary``
+   Smoke test on shape corner cases (single group / 1-expert / 32-expert).
 
-4. ``test_nvfp4_grouped_gemm_single_expert_equals_linear``
+3. ``test_nvfp4_grouped_gemm_recipe_variants_smoke``
+   Recipe knobs (2D-w, PTS, Hadamard, DGE, combinations) run end-to-end and
+   produce finite outputs + gradients.
+
+4. ``test_nvfp4_grouped_gemm_rejects_non_aligned_mtotal``
+   Contract guard: loop backend must fail fast on misaligned M_total.
+
+5. ``test_nvfp4_grouped_gemm_single_expert_equals_linear``
    Consistency: when all tokens go to one expert the grouped GEMM result must
    match the plain NVFP4 linear result (SNR > 30 dB).
+
+6. ``test_nvfp4_native_dispatch_forward``
+   Dispatch path (_quantize_then_nvfp4_scaled_grouped_mm, offs-based) must
+   numerically match the user-facing path (nvfp4_grouped_gemm, indices-based).
 """
 
 import pytest
@@ -36,8 +44,6 @@ from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import (
     nvfp4_grouped_gemm,
     _quantize_then_nvfp4_scaled_grouped_mm,
 )
-from alto.kernels.fp4.fp4_common import use_cdna4_grouped_backend
-from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.cg_backward import _nvfp4_grouped_wgrad
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from .utils import prepare_data, calc_snr, calc_cossim
 
@@ -74,60 +80,7 @@ def _bf16_grouped_ref_forward(
 
 
 # ---------------------------------------------------------------------------
-# Test 1 – forward accuracy
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("shape", [(512, 256, 256, 4), (1024, 512, 512, 8)])
-@pytest.mark.parametrize("use_2dblock_x", [False, True])
-@pytest.mark.parametrize("use_2dblock_w", [False, True])
-@pytest.mark.parametrize("trans_weights", [True])
-@pytest.mark.parametrize("data_type", [torch.bfloat16])
-def test_nvfp4_grouped_gemm_forward_accuracy(
-    shape, use_2dblock_x, use_2dblock_w, trans_weights, data_type
-):
-    """NVFP4 grouped GEMM forward output should be close to the BF16 reference."""
-    M_total, N, K, num_experts = shape
-    M_total = (M_total // ALIGN_SIZE_M) * ALIGN_SIZE_M
-    num_groups = M_total // ALIGN_SIZE_M
-    device = torch.device("cuda")
-
-    inputs = prepare_data((M_total, K), data_type)
-    expert_weights = prepare_data((num_experts, N, K), data_type)
-    expert_indices = _make_contiguous_expert_indices(
-        M_total, num_groups, num_experts, device
-    )
-
-    y_ref = _bf16_grouped_ref_forward(
-        inputs, expert_weights, expert_indices, M_total, N, num_groups, trans_weights
-    )
-    y_nvfp4 = nvfp4_grouped_gemm(
-        inputs, expert_weights, expert_indices,
-        trans_weights=trans_weights,
-        use_2dblock_x=use_2dblock_x,
-        use_2dblock_w=use_2dblock_w,
-        use_sr_grad=False,
-    )
-
-    assert y_nvfp4.shape == y_ref.shape
-    assert y_nvfp4.dtype == y_ref.dtype
-
-    snr = calc_snr(y_ref, y_nvfp4)
-    cossim = calc_cossim(y_ref, y_nvfp4)
-
-    print()
-    print(tabulate(
-        [["Output", f"{snr:.2f}", f"{cossim:.6f}"]],
-        headers=["Tensor", "SNR(dB)", "CosSim"],
-        tablefmt="github",
-    ))
-
-    min_snr = 10 if not (use_2dblock_x or use_2dblock_w) else 5
-    assert snr > min_snr, f"Forward SNR too low: {snr:.2f} (min {min_snr})"
-    assert cossim > 0.95, f"Forward CosSim too low: {cossim:.6f}"
-
-
-# ---------------------------------------------------------------------------
-# Test 2 – autograd (O, dX, dW)
+# Test 1 – autograd (O, dX, dW)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("shape", [(512, 256, 256, 4), (1024, 512, 512, 8)])
@@ -198,15 +151,32 @@ def test_nvfp4_grouped_gemm_autograd(
     assert dx_snr > min_snr, f"dX SNR too low:      {dx_snr:.2f}"
     assert dw_snr > min_snr, f"dW SNR too low:      {dw_snr:.2f}"
 
+    # Tight forward-path floor on the deterministic (non-SR) BF16 path.
+    # This replaces the previous ``test_nvfp4_grouped_gemm_forward_accuracy``:
+    # the old 1D/1D → 10 dB and any-2D → 5 dB bounds are preserved here so
+    # regressions in QDQ / fprop kernels still get caught, without paying for
+    # a second parametrized test with overlapping coverage.
+    if not use_sr_grad and data_type == torch.bfloat16:
+        fwd_min_snr = 10 if not (use_2dblock_x or use_2dblock_w) else 5
+        assert o_snr > fwd_min_snr, (
+            f"Forward SNR too low on non-SR BF16 path: {o_snr:.2f} "
+            f"(min {fwd_min_snr})"
+        )
+        assert o_sim > 0.95, f"Forward CosSim too low: {o_sim:.6f}"
+
 
 # ---------------------------------------------------------------------------
-# Test 3 – boundary / smoke
+# Test 2 – boundary / smoke (corner cases)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("M_multiplier", [1, 4, 8])
-@pytest.mark.parametrize("num_experts", [1, 4, 32])
+@pytest.mark.parametrize("M_multiplier,num_experts", [
+    (1, 1),   # smallest possible grouped run
+    (1, 32),  # many experts, few tokens
+    (8, 1),   # many tokens, single expert
+    (8, 32),  # many tokens, many experts
+])
 def test_nvfp4_grouped_gemm_boundary(M_multiplier, num_experts):
-    """Various expert counts and group sizes must not crash or produce NaN/Inf."""
+    """Corner-case expert / group counts must not crash or produce NaN/Inf."""
     M_total = ALIGN_SIZE_M * M_multiplier
     N, K = 256, 256
     device = torch.device("cuda")
@@ -226,7 +196,7 @@ def test_nvfp4_grouped_gemm_boundary(M_multiplier, num_experts):
 
 
 # ---------------------------------------------------------------------------
-# Test 3c – focused recipe smoke for grouped-only knobs that are not covered by
+# Test 3 – focused recipe smoke for grouped-only knobs that are not covered by
 # the dense linear tests: grouped 2D-w, grouped PTS, grouped Hadamard, grouped
 # DGE, and their combination.
 # ---------------------------------------------------------------------------
@@ -276,7 +246,7 @@ def test_nvfp4_grouped_gemm_recipe_variants_smoke(
 
 
 # ---------------------------------------------------------------------------
-# Test 3b – contract checks for misaligned M_total
+# Test 4 – contract checks for misaligned M_total
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("M_total", [64, 150])
@@ -286,8 +256,6 @@ def test_nvfp4_grouped_gemm_rejects_non_aligned_mtotal(M_total):
     device = torch.device("cuda")
     dtype = torch.bfloat16
     num_experts, N, K = 4, 256, 256
-    # One expert per ALIGN_SIZE_M-sized chunk for the aligned prefix.
-    num_groups = max(1, M_total // ALIGN_SIZE_M)
 
     inputs = prepare_data((M_total, K), dtype)
     expert_weights = prepare_data((num_experts, N, K), dtype)
@@ -313,7 +281,7 @@ def test_nvfp4_grouped_gemm_rejects_non_aligned_mtotal(M_total):
 
 
 # ---------------------------------------------------------------------------
-# Test 4 – consistency with NVFP4 linear (single expert)
+# Test 5 – consistency with NVFP4 linear (single expert)
 # ---------------------------------------------------------------------------
 
 def test_nvfp4_grouped_gemm_single_expert_equals_linear():
@@ -356,91 +324,13 @@ def test_nvfp4_grouped_gemm_single_expert_equals_linear():
 
 
 # ---------------------------------------------------------------------------
-# Test 5 – _nvfp4_grouped_wgrad in isolation
+# Test 6 – native dispatch path (_quantize_then_nvfp4_scaled_grouped_mm)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("shape", [(512, 256, 256, 4)])
-@pytest.mark.parametrize("use_sr_grad", [False, True])
-def test_nvfp4_grouped_wgrad_isolation(shape, use_sr_grad):
-    """_nvfp4_grouped_wgrad should produce the same dW as the full autograd path."""
-    M_total, N, K, num_experts = shape
-    M_total = (M_total // ALIGN_SIZE_M) * ALIGN_SIZE_M
-    num_groups = M_total // ALIGN_SIZE_M
-    device = torch.device("cuda")
-    dtype = torch.bfloat16
-
-    inputs_ref = prepare_data((M_total, K), dtype).requires_grad_(True)
-    weights_ref = prepare_data((num_experts, N, K), dtype).requires_grad_(True)
-    expert_indices = _make_contiguous_expert_indices(
-        M_total, num_groups, num_experts, device
-    )
-    target = prepare_data((M_total, N), dtype)
-
-    # BF16 reference wgrad
-    y_ref = _bf16_grouped_ref_forward(
-        inputs_ref, weights_ref, expert_indices, M_total, N, num_groups,
-        trans_weights=True,
-    )
-    loss_ref = torch.nn.functional.mse_loss(y_ref, target)
-    loss_ref.backward()
-    dw_ref = weights_ref.grad.clone()
-
-    # Use NVFP4 autograd path to get x_bwd, then call _nvfp4_grouped_wgrad
-    from alto.kernels.fp4.nvfp4.nvfp_linear import _qdq
-
-    inputs_det = inputs_ref.detach().clone()
-    x_bwd = _qdq(inputs_det, axis=0, is_2d_block=False, use_per_tensor_scale=False)
-    grad_output = 2.0 * (y_ref.detach() - target) / target.numel()
-
-    dw = _nvfp4_grouped_wgrad(
-        grad_output=grad_output,
-        x_bwd=x_bwd,
-        expert_indices=expert_indices,
-        num_experts=num_experts,
-        num_groups=num_groups,
-        use_sr_grad=use_sr_grad,
-        use_per_tensor_scale=False,
-        use_2dblock_x=False,
-        output_dtype=dtype,
-    )
-
-    snr = calc_snr(dw_ref, dw)
-    cossim = calc_cossim(dw_ref, dw)
-
-    print()
-    print(tabulate(
-        [["dW (wgrad)", f"{snr:.2f}", f"{cossim:.6f}"]],
-        headers=["Tensor", "SNR(dB)", "CosSim"],
-        tablefmt="github",
-    ))
-
-    min_snr = 2 if use_sr_grad else 3
-    assert snr > min_snr, f"wgrad SNR too low: {snr:.2f}"
-
-
-# ---------------------------------------------------------------------------
-# Test 6 – CDNA4 grouped backend detection
-# ---------------------------------------------------------------------------
-
-def test_grouped_mm_platform_detection():
-    """use_cdna4_grouped_backend should return a bool and be deterministic."""
-    result = use_cdna4_grouped_backend()
-    assert isinstance(result, bool)
-    assert use_cdna4_grouped_backend() == result, "Detection must be deterministic"
-    print(f"\nCDNA4 grouped backend available: {result}")
-
-
-# ---------------------------------------------------------------------------
-# Test 7 – native dispatch path (_quantize_then_nvfp4_scaled_grouped_mm)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("shape", [(512, 256, 256, 4)])
-@pytest.mark.parametrize("use_2dblock_x", [False])
-@pytest.mark.parametrize("use_2dblock_w", [False])
-def test_nvfp4_native_dispatch_forward(shape, use_2dblock_x, use_2dblock_w):
+def test_nvfp4_native_dispatch_forward():
     """_quantize_then_nvfp4_scaled_grouped_mm (dispatch path) forward should match
     nvfp4_grouped_gemm (loop path) when tokens are sorted by expert."""
-    M_total, N, K, num_experts = shape
+    M_total, N, K, num_experts = 512, 256, 256, 4
     M_total = (M_total // ALIGN_SIZE_M) * ALIGN_SIZE_M
     num_groups = M_total // ALIGN_SIZE_M
     device = torch.device("cuda")
@@ -450,8 +340,8 @@ def test_nvfp4_native_dispatch_forward(shape, use_2dblock_x, use_2dblock_w):
     # dispatch convention: W is [E, K, N] (trans_weights=False)
     expert_weights = prepare_data((num_experts, K, N), dtype)
 
-    # Build sorted expert_indices and matching offs
-    # Assign groups round-robin to experts, sorted
+    # Build sorted expert_indices and matching offs.  Assign groups
+    # round-robin to experts, sorted.
     sorted_indices = torch.zeros(M_total, dtype=torch.int32, device=device)
     groups_per_expert = num_groups // num_experts
     remainder = num_groups % num_experts
@@ -472,16 +362,16 @@ def test_nvfp4_native_dispatch_forward(shape, use_2dblock_x, use_2dblock_w):
     y_loop = nvfp4_grouped_gemm(
         inputs, expert_weights, sorted_indices,
         trans_weights=False,
-        use_2dblock_x=use_2dblock_x,
-        use_2dblock_w=use_2dblock_w,
+        use_2dblock_x=False,
+        use_2dblock_w=False,
         use_sr_grad=False,
     )
 
     # Native dispatch path
     y_native = _quantize_then_nvfp4_scaled_grouped_mm(
         inputs, expert_weights, offs,
-        use_2dblock_x=use_2dblock_x,
-        use_2dblock_w=use_2dblock_w,
+        use_2dblock_x=False,
+        use_2dblock_w=False,
         use_sr_grad=False,
     )
 

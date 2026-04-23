@@ -34,6 +34,7 @@ from alto.kernels.fp4.mxfp4.mxfp_quantization import (
 from alto.kernels.dge import dge_bwd
 from alto.kernels.hadamard_transform.transform import (HadamardFactory, HadamardTransform)
 from ..macro_block_scaling import macro_block_scaling, macro_block_descaling
+from ...fp4_common.tensor_wrappers import unwrap_weight_wrapper
 
 # ============ Triton kernel for contiguous grouped GEMM backward inputs ============
 
@@ -625,6 +626,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             quant_axis_w = -2
             requant_axis_w = -1
 
+        expert_weights = unwrap_weight_wrapper(expert_weights)
         if use_macro_block_scaling:
             inputs_scaled, input_mbs = macro_block_scaling(inputs, axis=-1, use_2d_block=use_2dblock_x)
             expert_weights_scaled, expert_weight_mbs = macro_block_scaling(expert_weights,
@@ -673,7 +675,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 axis=-1,
                 is_2d_block=use_2dblock_x,
                 use_static_clip=use_2dblock_x and use_static_clip,
-            ).contiguous()
+            )
             w_dq = torch.ops.torchtitan.convert_from_mxfp4(
                 expert_weights_mxfp4,
                 expert_weight_scales,
@@ -687,7 +689,9 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 x_dq = macro_block_descaling(x_dq, input_mbs, axis=-1, use_2d_block=use_2dblock_x)
             if not trans_weights:
                 w_dq = w_dq.transpose(-2, -1)
-            res = cg_grouped_gemm_forward(x_dq.contiguous(), w_dq.contiguous(), expert_indices)
+            w_dq = w_dq.contiguous()
+            x_dq = x_dq.contiguous()
+            res = cg_grouped_gemm_forward(x_dq, w_dq, expert_indices)
 
         if not use_2dblock_w:
             if use_macro_block_scaling:

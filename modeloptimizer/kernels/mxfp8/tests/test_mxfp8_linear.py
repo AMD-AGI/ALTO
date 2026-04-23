@@ -25,8 +25,27 @@ SMALL_DIVISIBLE_SHAPES = [
     (128, 128, 128),
 ]
 
+LINEAR_KERNEL_SHAPES = [
+    (32, 32, 32),
+    (256, 384, 128),
+    (512, 1024, 256),
+]
 
-@pytest.mark.parametrize("shape", SMALL_DIVISIBLE_SHAPES)
+# With BLOCK_SIZE_K tied to the 32-wide quant block, 1e-4/1e-4 is enough for
+# the larger kernel shapes below while still catching the regressed K=64
+# variant, which needs much looser tolerances to pass.
+LINEAR_KERNEL_ATOL = 1e-4
+LINEAR_KERNEL_RTOL = 1e-4
+
+# The dequantize + tl.dot debug path still uses the simpler K>=64 launch
+# heuristic, so it needs a looser relative tolerance on the larger shapes even
+# though it stays much closer to the reference than the regressed dot_scaled
+# K=64 variant.
+DEQUANT_DOT_KERNEL_ATOL = 1e-4
+DEQUANT_DOT_KERNEL_RTOL = 5e-3
+
+
+@pytest.mark.parametrize("shape", LINEAR_KERNEL_SHAPES)
 @pytest.mark.parametrize("trans_a", [False, True])
 @pytest.mark.parametrize("trans_b", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
@@ -114,7 +133,12 @@ def test_mxfp8_linear_kernel(
     )
     c_ref = (a_dq.T if trans_a else a_dq) @ (b_dq.T if trans_b else b_dq)
 
-    assert torch.allclose(c_ref, c)
+    torch.testing.assert_close(
+        c,
+        c_ref,
+        atol=LINEAR_KERNEL_ATOL,
+        rtol=LINEAR_KERNEL_RTOL,
+    )
 
 
 @pytest.mark.parametrize("shape", SMALL_DIVISIBLE_SHAPES)

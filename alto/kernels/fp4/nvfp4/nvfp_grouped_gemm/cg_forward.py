@@ -16,36 +16,54 @@ from .autotune import ALIGN_SIZE_M
 from .utils import _check_grouped_loop_contract, _group_ids_from_expert_indices, _use_cdna4_grouped_backend
 
 
-def _nvfp4_grouped_mm_2d_3d(
-    A: torch.Tensor,
-    B: torch.Tensor,
+def _nvfp4_grouped_fprop(
+    inputs: torch.Tensor,          # [M_total, K]
+    expert_weights: torch.Tensor,  # [E, N, K]  (canonical internal layout)
     *,
     expert_indices: torch.Tensor,
     num_groups: Optional[int],
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Grouped GEMM for 2D activations × 3D expert weights.
+    """Grouped forward GEMM for 2D activations × 3D expert weights.
 
-    `A` is `[M_total, X]`, `B` is `[E, X, Y]`. On CDNA4 the Triton grouped
-    backend is used; otherwise a loop fallback computes one ALIGN_SIZE_M-sized
-    expert group at a time without per-group host syncs.
+    Computes, per expert e, ``Y[m, :] = inputs[m, :] @ expert_weights[e, :, :].T``
+    over the tokens routed to that expert.
+
+    Shapes
+        inputs          : ``[M_total, K]`` (already QDQ-ed on axis -1)
+        expert_weights  : ``[E, N, K]`` (already QDQ-ed on axis -1; this is the
+                          CDNA4-native layout shared with
+                          ``cg_grouped_gemm_forward``)
+        expert_indices  : ``[M_total]`` int32, contiguous
+    Returns
+        output          : ``[M_total, N]`` in ``output_dtype``
+
+    On CDNA4 the Triton grouped backend is used directly (no per-step transpose);
+    otherwise a Python-loop fallback computes one ALIGN_SIZE_M-sized expert
+    group at a time without per-group host syncs.
     """
     if _use_cdna4_grouped_backend():
+        # The CDNA4 kernels assert ``is_contiguous`` on every buffer; keep a
+        # defensive ``.contiguous()`` here because non-last-axis QDQ outputs
+        # can otherwise arrive as strided views.  These are O(1) no-ops when
+        # the tensor is already contiguous (the usual case).
         return cg_grouped_gemm_forward(
-            A.contiguous(),
-            B.transpose(-2, -1).contiguous(),
-            expert_indices.contiguous(),
+            inputs.contiguous(),
+            expert_weights.contiguous(),
+            expert_indices,
         ).to(output_dtype)
 
-    assert num_groups is not None, "_nvfp4_grouped_mm_2d_3d: loop fallback requires num_groups"
-    M_total = A.shape[0]
-    _check_grouped_loop_contract(M_total, where="_nvfp4_grouped_mm_2d_3d")
-    X = A.shape[1]
-    Y = B.shape[2]
+    assert num_groups is not None, "_nvfp4_grouped_fprop: loop fallback requires num_groups"
+    M_total = inputs.shape[0]
+    _check_grouped_loop_contract(M_total, where="_nvfp4_grouped_fprop")
+    K = inputs.shape[1]
+    N = expert_weights.shape[1]
     group_ids = _group_ids_from_expert_indices(expert_indices, num_groups)
-    A_groups = A.view(num_groups, ALIGN_SIZE_M, X)
-    y_groups = torch.zeros((num_groups, ALIGN_SIZE_M, Y), dtype=output_dtype, device=A.device)
-    for eid in range(B.shape[0]):
+    x_groups = inputs.view(num_groups, ALIGN_SIZE_M, K)
+    y_groups = torch.zeros((num_groups, ALIGN_SIZE_M, N), dtype=output_dtype, device=inputs.device)
+    for eid in range(expert_weights.shape[0]):
         mask = group_ids == eid
-        y_groups[mask] = A_groups[mask] @ B[eid]
-    return y_groups.reshape(M_total, Y)
+        # expert_weights[eid] is [N, K]; .T is a zero-copy strided view that
+        # PyTorch's bf16 matmul handles natively, so no contiguous() needed.
+        y_groups[mask] = x_groups[mask] @ expert_weights[eid].T
+    return y_groups.reshape(M_total, N)

@@ -6,17 +6,21 @@
 
 """Public entry-points for NVFP4 Grouped GEMM.
 
-Mirrors mxfp4/mxfp_grouped_gemm/functional.py so the two format families
+Mirrors ``mxfp4/mxfp_grouped_gemm/functional.py`` so the two format families
 can be swapped transparently at the dispatch layer.
 
 Two public APIs:
 
   * ``nvfp4_grouped_gemm``: accepts ``expert_indices`` (per-token expert id),
-    works with any token ordering.  Uses the Python-loop backend.
+    works with any token ordering.
 
-  * ``_quantize_then_nvfp4_scaled_grouped_mm``: accepts ``offs`` (cumulative offsets)
-    from the dispatch layer where tokens are pre-sorted by expert.  Uses
-    ``torch._grouped_mm`` when available, falls back to loop otherwise.
+  * ``_quantize_then_nvfp4_scaled_grouped_mm``: accepts ``offs`` (cumulative
+    offsets) from the dispatch layer where tokens are pre-sorted by expert.
+
+Both paths funnel into :class:`~alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.autograd.NVFP4GroupedGEMM`
+through the single private helper :func:`_nvfp4_grouped_gemm_impl`, which is
+also the only place that materializes ``expert_weights`` into the canonical
+``[E, N, K]`` internal layout.
 """
 
 from __future__ import annotations
@@ -45,11 +49,10 @@ def _build_hadamard_transform_if_needed(
 
 def _nvfp4_grouped_gemm_impl(
     inputs: torch.Tensor,
-    expert_weights: torch.Tensor,
+    expert_weights: torch.Tensor,  # always [E, N, K] (canonical) when this is called
     *,
     expert_indices: torch.Tensor | None = None,
     offs: torch.Tensor | None = None,
-    trans_weights: bool = True,
     use_2dblock_x: bool = False,
     use_2dblock_w: bool = False,
     use_sr_grad: bool = True,
@@ -59,9 +62,11 @@ def _nvfp4_grouped_gemm_impl(
 ) -> torch.Tensor:
     """Normalized entrypoint shared by both public APIs.
 
-    This is the NVFP4 analogue of the MXFP4 `mxfp4_grouped_gemm(...)` wrapper:
+    This is the NVFP4 analogue of the MXFP4 ``mxfp4_grouped_gemm(...)`` wrapper:
     it owns recipe normalization / transform construction and is the single
-    place that calls into the grouped autograd Function.
+    place that calls into the grouped autograd Function.  Its caller is
+    responsible for having already transposed ``expert_weights`` into the
+    canonical ``[E, N, K]`` layout.
     """
     if expert_indices is not None and expert_indices.dtype != torch.int32:
         expert_indices = expert_indices.to(torch.int32)
@@ -75,7 +80,6 @@ def _nvfp4_grouped_gemm_impl(
         expert_weights,
         expert_indices,
         offs,
-        trans_weights,
         use_2dblock_x,
         use_2dblock_w,
         use_sr_grad,
@@ -105,9 +109,12 @@ def nvfp4_grouped_gemm(
 
     Args:
         inputs:            [M_total, K] activation tensor (BF16).
-        expert_weights:    [E, N, K] or [E, K, N] expert weight tensors.
+        expert_weights:    [E, N, K] if ``trans_weights=True`` (default), or
+                           [E, K, N] if ``trans_weights=False``.  Internally
+                           normalized to [E, N, K] once.
         expert_indices:    [M_total] int32, one entry per token giving its expert id.
-        trans_weights:     If True, expert_weights is [E, N, K] and we compute x @ W.T.
+        trans_weights:     Whether caller stores weights in ``[E, N, K]`` (True)
+                           or ``[E, K, N]`` (False).
         use_2dblock_x:     Use 16x16 2D scaling for activations.
         use_2dblock_w:     Use 16x16 2D scaling for weights.
         use_sr_grad:       Stochastic rounding for gradient quantisation.
@@ -118,11 +125,14 @@ def nvfp4_grouped_gemm(
     Returns:
         [M_total, N] output tensor.
     """
+    if not trans_weights:
+        # User/dispatch stored weights as [E, K, N]; materialize the canonical
+        # [E, N, K] layout exactly once, here at the wrapper boundary.
+        expert_weights = expert_weights.transpose(-2, -1).contiguous()
     return _nvfp4_grouped_gemm_impl(
         inputs,
         expert_weights,
         expert_indices=expert_indices,
-        trans_weights=trans_weights,
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=use_sr_grad,
@@ -134,7 +144,7 @@ def nvfp4_grouped_gemm(
 
 def _quantize_then_nvfp4_scaled_grouped_mm(
     A: torch.Tensor,
-    B: torch.Tensor,
+    B: torch.Tensor,               # [E, K, N] per dispatch convention
     offs: torch.Tensor,
     use_2dblock_x: bool,
     use_2dblock_w: bool,
@@ -147,15 +157,15 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
     ``_quantize_then_mxfp_scaled_grouped_mm``.
 
     Tokens in ``A`` are already sorted by expert.  ``offs`` is the cumulative
-    per-expert token count tensor from the MoE routing layer.  This is the
-    dispatch-entry helper that normalizes the grouped recipe and then forwards
-    to the same grouped wrapper layer used by ``nvfp4_grouped_gemm(...)``.
+    per-expert token count tensor from the MoE routing layer.  ``B`` arrives
+    in dispatch layout ``[E, K, N]`` and is transposed once to the canonical
+    ``[E, N, K]`` layout shared by the autograd function and its primitives.
     """
+    B_canonical = B.transpose(-2, -1).contiguous()
     return _nvfp4_grouped_gemm_impl(
         A,
-        B,
+        B_canonical,
         offs=offs,
-        trans_weights=False,  # dispatch convention: B is [E, K, N]
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=use_sr_grad,

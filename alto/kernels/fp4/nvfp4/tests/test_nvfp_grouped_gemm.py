@@ -401,7 +401,6 @@ def test_nvfp4_grouped_wgrad_isolation(shape, use_sr_grad):
         use_sr_grad=use_sr_grad,
         use_per_tensor_scale=False,
         use_2dblock_x=False,
-        trans_weights=True,
         output_dtype=dtype,
     )
 

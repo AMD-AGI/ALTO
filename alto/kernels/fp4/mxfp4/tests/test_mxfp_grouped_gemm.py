@@ -30,8 +30,8 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, con
                          use_macro_block_scaling, data_type):
     if use_2dblock_x and use_hadamard:
         pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
-    if not is_cdna4() and not trans_weights:
-        pytest.skip("BF16 GroupedMM only supports trans_weights=True.")
+    # if not is_cdna4() and not trans_weights:
+    #     pytest.skip("BF16 GroupedMM only supports trans_weights=True.")
 
     M_total, N, K, num_experts = shape
     # Ensure M_total is a multiple of group_size_m

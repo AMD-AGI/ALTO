@@ -56,6 +56,18 @@ def _kernel_cg_persistent_forward(
         # Pointers to block scales (if needed)
         a_s_ptr,
         b_s_ptr,
+        stride_am,
+        stride_ak,
+        stride_be,
+        stride_bn,
+        stride_bk,
+        stride_cm,
+        stride_cn,
+        stride_asm,
+        stride_ask,
+        stride_bse,
+        stride_bsn,
+        stride_bsk,
         # Matrix dimensions
         M_TOTAL,  # Total M dimension (sum of all groups)
         N: tl.constexpr,  # N dimension
@@ -86,9 +98,6 @@ def _kernel_cg_persistent_forward(
     num_tiles = num_pid_m * num_pid_n
     tile_id_c = start_pid - NUM_SMS
     num_pid_in_group = SUPER_GROUP_M * num_pid_n
-
-    b_s_n = N // BLOCK_SIZE_K
-    b_s_k = K // BLOCK_SIZE_K
 
     for tile_id in tl.range(start_pid, num_tiles, NUM_SMS):
 
@@ -124,18 +133,19 @@ def _kernel_cg_persistent_forward(
                 expert_idx = tl.load(indices_ptr + group_idx * GROUP_SIZE_M)
 
                 # Load inputs (A) with bounds checking
-                a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+                a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
                 a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
                 # Load expert weights (B) for the expert assigned to this block
-                b_ptrs = (b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :])
+                b_ptrs = (b_ptr + expert_idx * stride_be + offs_n[:, None] * stride_bn + offs_k[None, :] * stride_bk)
                 b = tl.load(b_ptrs, mask=mask_b, other=0.0)
                 ab = tl.dot(a, b.T)
 
                 if USE_FP8:
-                    a_s_ptrs = a_s_ptr + offs_m * b_s_k + ki
+                    a_s_ptrs = a_s_ptr + offs_m * stride_asm + ki * stride_ask
                     a_scale = tl.load(a_s_ptrs, mask=mask_m, other=1.0)
-                    b_s_ptrs = b_s_ptr + expert_idx * b_s_n * b_s_k + (offs_n // BLOCK_SIZE_K) * b_s_k + ki
+                    b_s_ptrs = (b_s_ptr + expert_idx * stride_bse + (offs_n // BLOCK_SIZE_K) * stride_bsn +
+                                ki * stride_bsk)
                     b_scale = tl.load(b_s_ptrs, mask=mask_n, other=1.0)
                     ab = ab * a_scale[:, None] * b_scale[None, :]
 
@@ -156,7 +166,7 @@ def _kernel_cg_persistent_forward(
             c = accumulator.to(tl.float32)
 
             # Store output (C) with bounds checking
-            c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+            c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
             tl.store(c_ptrs, c.to(c_type), mask=mask_c)
 
 
@@ -177,6 +187,13 @@ def _kernel_cg_forward_aligned(
     c_ptr,
     # Pointer to indices array
     indices_ptr,
+    stride_am,
+    stride_ak,
+    stride_be,
+    stride_bn,
+    stride_bk,
+    stride_cm,
+    stride_cn,
     # Matrix dimensions
     M_BUFFERLEN: tl.constexpr,  # Total M dimension (buffer length)
     M_TOTAL: tl.constexpr,  # Total M dimension (sum of all groups)
@@ -242,11 +259,11 @@ def _kernel_cg_forward_aligned(
             mask_b = mask_n[:, None] & mask_k[None, :]
 
             # Load inputs (A) with bounds checking
-            a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
+            a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
             a = tl.load(a_ptrs, mask=mask_a, other=0.0)
 
             # Load expert weights (B) for the expert assigned to this block
-            b_ptrs = b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :]
+            b_ptrs = b_ptr + expert_idx * stride_be + offs_n[:, None] * stride_bn + offs_k[None, :] * stride_bk
             b = tl.load(b_ptrs, mask=mask_b, other=0.0)
 
             # Accumulate matrix multiplication for this K tile
@@ -254,7 +271,7 @@ def _kernel_cg_forward_aligned(
 
         # Store results with bounds checking
 
-        c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+        c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
         mask_c = mask_m[:, None] & mask_n[None, :]
         tl.store(c_ptrs, acc.to(c_type), mask=mask_c)
 
@@ -286,8 +303,6 @@ def cg_grouped_gemm_forward(
         Output tensor of shape [M_total, N]
     """
     # Validate inputs
-    assert inputs.is_contiguous(), "Input tensor must be contiguous"
-    assert expert_weights.is_contiguous(), "Expert weights tensor must be contiguous"
     assert expert_indices.is_contiguous(), "Expert indices tensor must be contiguous"
     # Check if inputs are properly aligned
     M_bufferlen, K = inputs.shape
@@ -311,13 +326,22 @@ def cg_grouped_gemm_forward(
 
     # Create output tensor
     output = torch.zeros((M_bufferlen, N), device=inputs.device, dtype=torch_dtype)
+    stride_am, stride_ak = inputs.stride()
+    stride_be, stride_bn, stride_bk = expert_weights.stride()
+    stride_cm, stride_cn = output.stride()
 
     # Calculate grid size for the kernel
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     use_fp8 = input_scales is not None and weight_scales is not None
     if use_fp8:
-        assert input_scales.is_contiguous()
-        assert weight_scales.is_contiguous()
+        stride_asm, stride_ask = input_scales.stride()
+        stride_bse, stride_bsn, stride_bsk = weight_scales.stride()
+    else:
+        stride_asm = 0
+        stride_ask = 0
+        stride_bse = 0
+        stride_bsn = 0
+        stride_bsk = 0
 
     grid = (NUM_SMS, 1, 1)
     # Launch kernel
@@ -328,6 +352,18 @@ def cg_grouped_gemm_forward(
         expert_indices,
         input_scales,
         weight_scales,
+        stride_am,
+        stride_ak,
+        stride_be,
+        stride_bn,
+        stride_bk,
+        stride_cm,
+        stride_cn,
+        stride_asm,
+        stride_ask,
+        stride_bse,
+        stride_bsn,
+        stride_bsk,
         M_TOTAL=M_total,
         N=N,
         K=K,
@@ -378,8 +414,6 @@ def cg_grouped_gemm_forward_dynamic(
         Output tensor of shape [M_total, N]
     """
     # Validate inputs
-    assert inputs.is_contiguous(), "Input tensor must be contiguous"
-    assert expert_weights.is_contiguous(), "Expert weights tensor must be contiguous"
     assert expert_indices.is_contiguous(), "Expert indices tensor must be contiguous"
 
     # Check if inputs are properly aligned
@@ -402,6 +436,9 @@ def cg_grouped_gemm_forward_dynamic(
 
     # Create output tensor
     output = torch.empty((M_total, N), device=inputs.device, dtype=inputs.dtype)
+    stride_am, stride_ak = inputs.stride()
+    stride_be, stride_bn, stride_bk = expert_weights.stride()
+    stride_cm, stride_cn = output.stride()
 
     # Calculate grid size for the kernel
     grid = lambda meta: (triton.cdiv(M_total, meta["BLOCK_SIZE_M"]) * triton.cdiv(N, meta["BLOCK_SIZE_N"]),)
@@ -412,6 +449,13 @@ def cg_grouped_gemm_forward_dynamic(
         expert_weights,
         output,
         expert_indices,
+        stride_am,
+        stride_ak,
+        stride_be,
+        stride_bn,
+        stride_bk,
+        stride_cm,
+        stride_cn,
         M_TOTAL=M_total,
         N=N,
         K=K,

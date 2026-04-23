@@ -52,6 +52,18 @@ def _kernel_cg_backward_dx(
         # Matrix dimensions
     go_s_ptr,  # [M_TOTAL, N // block_size] or None
         b_s_ptr,  # [num_experts, N // block_size, K // block_size] or None
+        stride_gom,
+        stride_gon,
+        stride_be,
+        stride_bn,
+        stride_bk,
+        stride_gim,
+        stride_gik,
+        stride_gosm,
+        stride_gosn,
+        stride_bse,
+        stride_bsn,
+        stride_bsk,
         M_TOTAL,  # Total M dimension (sum of all groups)
         N: tl.constexpr,  # N dimension
         K: tl.constexpr,  # K dimension
@@ -73,9 +85,6 @@ def _kernel_cg_backward_dx(
 
     # number of tiles per matrix dimension
     num_k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-
-    b_s_n = N // BLOCK_SIZE_N
-    b_s_k = K // BLOCK_SIZE_N
 
     # 2D tile index from linear
     tile_m = pid // num_k_tiles
@@ -114,20 +123,20 @@ def _kernel_cg_backward_dx(
             mask_w = mask_n[:, None] & mask_k[None, :]
 
             # Load grad_output with bounds checking
-            go_ptrs = grad_output_ptr + offs_m[:, None] * N + offs_n[None, :]
+            go_ptrs = grad_output_ptr + offs_m[:, None] * stride_gom + offs_n[None, :] * stride_gon
             go = tl.load(go_ptrs, mask=mask_go, other=0.0)
 
             # Load expert weights for the expert assigned to this block
             # For backward pass, we need W, not W^T, so dimensions are [N, K]
-            w_ptrs = b_ptr + expert_idx * N * K + offs_n[:, None] * K + offs_k[None, :]
+            w_ptrs = b_ptr + expert_idx * stride_be + offs_n[:, None] * stride_bn + offs_k[None, :] * stride_bk
             w = tl.load(w_ptrs, mask=mask_w, other=0.0)
 
             gow = tl.dot(go, w)
 
             if USE_FP8:
                 ni = n // BLOCK_SIZE_N
-                go_s_ptrs = go_s_ptr + offs_m * b_s_n + ni
-                b_s_ptrs = b_s_ptr + expert_idx * b_s_n * b_s_k + ni * b_s_k + offs_k // BLOCK_SIZE_N
+                go_s_ptrs = go_s_ptr + offs_m * stride_gosm + ni * stride_gosn
+                b_s_ptrs = b_s_ptr + expert_idx * stride_bse + ni * stride_bsn + (offs_k // BLOCK_SIZE_N) * stride_bsk
                 go_scale = tl.load(go_s_ptrs, mask=mask_m, other=1.0)
                 w_scale = tl.load(b_s_ptrs, mask=mask_k, other=1.0)
                 gow = gow * go_scale[:, None] * w_scale[None, :]
@@ -137,7 +146,7 @@ def _kernel_cg_backward_dx(
             grad_input += gow
 
         # Store results with bounds checking
-        grad_input_ptrs = grad_input_ptr + offs_m[:, None] * K + offs_k[None, :]
+        grad_input_ptrs = grad_input_ptr + offs_m[:, None] * stride_gim + offs_k[None, :] * stride_gik
         mask_gi = mask_m[:, None] & mask_k[None, :]
         tl.store(grad_input_ptrs, grad_input, mask=mask_gi)
 
@@ -166,6 +175,17 @@ def _kernel_cg_backward_dw(
     indices_ptr,  # [M_total]
     go_s_ptr,  # [M_TOTAL // block_size, N] or None
     a_s_ptr,  # [M_TOTAL // block_size, K] or None
+    stride_gom,
+    stride_gon,
+    stride_am,
+    stride_ak,
+    stride_gwe,
+    stride_gwn,
+    stride_gwk,
+    stride_gosm,
+    stride_gosn,
+    stride_asm,
+    stride_ask,
     # Matrix dimensions
     M_TOTAL,  # Total M dimension
     N: tl.constexpr,  # N dimension
@@ -232,12 +252,12 @@ def _kernel_cg_backward_dw(
                         mask_m = offs_m < min(group_start + GROUP_SIZE_M, M_TOTAL)
 
                         # Load grad_output [M, N]
-                        go_ptrs = (grad_output_ptr + offs_m[:, None] * N + offs_n[None, :])
+                        go_ptrs = grad_output_ptr + offs_m[:, None] * stride_gom + offs_n[None, :] * stride_gon
                         mask_go = mask_m[:, None] & mask_n[None, :]
                         go = tl.load(go_ptrs, mask=mask_go, other=0.0)
 
                         # Load inputs [M, K]
-                        in_ptrs = inputs_ptr + offs_m[:, None] * K + offs_k[None, :]
+                        in_ptrs = inputs_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
                         mask_in = mask_m[:, None] & mask_k[None, :]
                         inp = tl.load(in_ptrs, mask=mask_in, other=0.0)
 
@@ -248,15 +268,16 @@ def _kernel_cg_backward_dw(
                         if USE_FP8:
                             # Load scales if using FP8
                             mi = m_start // BLOCK_SIZE_M
-                            go_s_ptrs = go_s_ptr + mi * N + offs_n
-                            a_s_ptrs = a_s_ptr + mi * K + offs_k
+                            go_s_ptrs = go_s_ptr + mi * stride_gosm + offs_n * stride_gosn
+                            a_s_ptrs = a_s_ptr + mi * stride_asm + offs_k * stride_ask
                             go_scale = tl.load(go_s_ptrs, mask=mask_n, other=1.0)
                             a_scale = tl.load(a_s_ptrs, mask=mask_k, other=1.0)
                             go_t_inp = go_t_inp * go_scale[:, None] * a_scale[None, :]
                         grad_weights += go_t_inp
 
             # Store results to the appropriate part of the expert's weight gradients
-            grad_w_ptrs = (grad_weights_ptr + expert_id * N * K + offs_n[:, None] * K + offs_k[None, :])
+            grad_w_ptrs = (grad_weights_ptr + expert_id * stride_gwe + offs_n[:, None] * stride_gwn +
+                           offs_k[None, :] * stride_gwk)
             mask_gw = mask_n[:, None] & mask_k[None, :]
             tl.store(grad_w_ptrs, grad_weights, mask=mask_gw)
 
@@ -283,8 +304,6 @@ def cg_grouped_gemm_backward_weights(
         grad_weights: Gradient with respect to expert weights, shape [num_experts, N, K]
     """
     # Validate inputs
-    assert grad_output.is_contiguous(), "Grad output tensor must be contiguous"
-    assert inputs.is_contiguous(), "Inputs tensor must be contiguous"
     assert expert_indices.is_contiguous(), "Expert indices tensor must be contiguous"
 
     # Get dimensions
@@ -303,14 +322,22 @@ def cg_grouped_gemm_backward_weights(
 
     # Create output tensor for gradients
     grad_weights = torch.zeros((num_experts, N, K), device=grad_output.device, dtype=torch_dtype)
+    stride_gom, stride_gon = grad_output.stride()
+    stride_am, stride_ak = inputs.stride()
+    stride_gwe, stride_gwn, stride_gwk = grad_weights.stride()
 
     # Calculate grid size for the kernel
     # Each thread block handles one expert's N-K tile
     grid = lambda meta: (num_experts * triton.cdiv(N, meta["BLOCK_SIZE_N"]) * triton.cdiv(K, meta["BLOCK_SIZE_K"]),)
     use_fp8 = go_scales is not None and input_scales is not None
     if use_fp8:
-        assert go_scales.is_contiguous()
-        assert input_scales.is_contiguous()
+        stride_gosm, stride_gosn = go_scales.stride()
+        stride_asm, stride_ask = input_scales.stride()
+    else:
+        stride_gosm = 0
+        stride_gosn = 0
+        stride_asm = 0
+        stride_ask = 0
 
     # Launch kernel
     wrap_triton(_kernel_cg_backward_dw)[grid](
@@ -320,6 +347,17 @@ def cg_grouped_gemm_backward_weights(
         expert_indices,
         go_scales,
         input_scales,
+        stride_gom,
+        stride_gon,
+        stride_am,
+        stride_ak,
+        stride_gwe,
+        stride_gwn,
+        stride_gwk,
+        stride_gosm,
+        stride_gosn,
+        stride_asm,
+        stride_ask,
         M_TOTAL=M_total,
         N=N,
         K=K,
@@ -370,8 +408,6 @@ def cg_grouped_gemm_backward_inputs(
         grad_inputs: Gradient with respect to inputs, shape [M_total, K]
     """
     # Validate inputs
-    assert grad_output.is_contiguous(), "Grad output tensor must be contiguous"
-    assert expert_weights.is_contiguous(), "Expert weights tensor must be contiguous"
     assert expert_indices.is_contiguous(), "Expert indices tensor must be contiguous"
 
     # Get dimensions
@@ -386,14 +422,23 @@ def cg_grouped_gemm_backward_inputs(
 
     # Create output tensor for gradients
     grad_inputs = torch.zeros((M_bufferlen, K), device=grad_output.device, dtype=torch_dtype)
+    stride_gom, stride_gon = grad_output.stride()
+    stride_be, stride_bn, stride_bk = expert_weights.stride()
+    stride_gim, stride_gik = grad_inputs.stride()
 
     # Calculate grid size for the kernel
     grid = lambda meta: (triton.cdiv(M_total, meta["BLOCK_SIZE_M"]) * triton.cdiv(K, meta["BLOCK_SIZE_K"]),)
 
     use_fp8 = go_scales is not None and expert_weight_scales is not None
     if use_fp8:
-        assert go_scales.is_contiguous()
-        assert expert_weight_scales.is_contiguous()
+        stride_gosm, stride_gosn = go_scales.stride()
+        stride_bse, stride_bsn, stride_bsk = expert_weight_scales.stride()
+    else:
+        stride_gosm = 0
+        stride_gosn = 0
+        stride_bse = 0
+        stride_bsn = 0
+        stride_bsk = 0
 
     # Launch kernel
     wrap_triton(_kernel_cg_backward_dx)[grid](
@@ -403,6 +448,18 @@ def cg_grouped_gemm_backward_inputs(
         expert_indices,
         go_scales,
         expert_weight_scales,
+        stride_gom,
+        stride_gon,
+        stride_be,
+        stride_bn,
+        stride_bk,
+        stride_gim,
+        stride_gik,
+        stride_gosm,
+        stride_gosn,
+        stride_bse,
+        stride_bsn,
+        stride_bsk,
         M_TOTAL=M_total,
         N=N,
         K=K,
@@ -589,7 +646,7 @@ def cg_grouped_gemm(
         expert_indices = expert_indices.to(torch.int32)
 
     if not trans_weights:
-        expert_weights = expert_weights.transpose(-1, -2).contiguous()
+        expert_weights = expert_weights.transpose(-1, -2)
     res = ContiguousGroupedGEMM.apply(inputs, expert_weights, expert_indices, use_fp8)
 
     return res

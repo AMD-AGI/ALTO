@@ -34,12 +34,10 @@ import torch
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import (
     ALIGN_SIZE_M,
     nvfp4_grouped_gemm,
-    _nvfp4_grouped_wgrad,
-    _has_native_grouped_mm,
-)
-from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,
 )
+from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.cg_backward import _nvfp4_grouped_wgrad
+from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.utils import _use_cdna4_grouped_backend
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from .utils import prepare_data, calc_snr, calc_cossim
 
@@ -422,15 +420,15 @@ def test_nvfp4_grouped_wgrad_isolation(shape, use_sr_grad):
 
 
 # ---------------------------------------------------------------------------
-# Test 6 – torch._grouped_mm platform detection
+# Test 6 – CDNA4 grouped backend detection
 # ---------------------------------------------------------------------------
 
 def test_grouped_mm_platform_detection():
-    """_has_native_grouped_mm should return a bool and be deterministic."""
-    result = _has_native_grouped_mm()
+    """_use_cdna4_grouped_backend should return a bool and be deterministic."""
+    result = _use_cdna4_grouped_backend()
     assert isinstance(result, bool)
-    assert _has_native_grouped_mm() == result, "Detection must be deterministic"
-    print(f"\ntorch._grouped_mm available: {result}")
+    assert _use_cdna4_grouped_backend() == result, "Detection must be deterministic"
+    print(f"\nCDNA4 grouped backend available: {result}")
 
 
 # ---------------------------------------------------------------------------

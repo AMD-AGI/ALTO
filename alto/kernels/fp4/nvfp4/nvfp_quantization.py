@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import triton
@@ -674,3 +674,57 @@ def _fake_convert_from_nvfp4(
 ) -> torch.Tensor:
     data_hp = data_lp.new_empty(data_lp.shape, dtype=output_dtype)
     return torch.cat((data_hp, data_hp), dim=axis)
+
+
+def _qdq(
+    tensor: torch.Tensor,
+    *,
+    axis: int,
+    is_2d_block: bool,
+    use_per_tensor_scale: bool,
+    use_sr: bool = False,
+    block_size: int = 16,
+    return_raw: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Quantize to NVFP4 then immediately dequantize back (QDQ round-trip).
+
+    This helper is the core building block used to emulate the numerical effect
+    of a future pure-NVFP4 GEMM path. Even though the current implementation
+    executes the final matrix multiplications in BF16, every operand first goes
+    through an explicit NVFP4 round-trip so the surrounding autograd code can
+    model how a native FP4 kernel would see its inputs.
+
+    When ``return_raw=True``, the packed FP4 data tensor (``uint8``) and the
+    per-block scales (``float32`` held as E4M3-round-tripped values) are also
+    returned alongside the dequantized BF16 view. This is used by the DGE
+    backward path to recover the exact FP4 bin each weight element fell into
+    without paying a second quantization pass.
+    """
+    pts = (
+        torch.empty(1, dtype=torch.float32, device=tensor.device)
+        if use_per_tensor_scale
+        else None
+    )
+    data_lp, scales = convert_to_nvfp4(
+        tensor,
+        block_size=block_size,
+        axis=axis,
+        is_2d_block=is_2d_block,
+        per_tensor_scale=pts,
+        # With pts provided, refresh it in-place from tensor.amax(); without
+        # pts, skip tensor-wise scaling entirely.
+        update_per_tensor_scale=use_per_tensor_scale,
+        use_sr=use_sr,
+    )
+    dq = convert_from_nvfp4(
+        data_lp,
+        scales,
+        output_dtype=tensor.dtype,
+        block_size=block_size,
+        axis=axis,
+        is_2d_block=is_2d_block,
+        per_tensor_scale=pts,
+    )
+    if return_raw:
+        return dq, data_lp, scales
+    return dq

@@ -34,7 +34,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_sr_grad: bool = False
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
-    use_static_clip: bool = False
+    clip_mode: Literal["none", "static", "dynamic"] = "none"
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
 
@@ -84,7 +84,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_sr_grad=self.use_sr_grad,
                     use_dge=self.use_dge,
                     two_level_scaling=self.two_level_scaling,
-                    use_static_clip=self.use_static_clip,
+                    clip_mode=self.clip_mode,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

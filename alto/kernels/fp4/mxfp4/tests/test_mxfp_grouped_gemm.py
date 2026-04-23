@@ -23,13 +23,17 @@ from .utils import prepare_data, calc_cossim, calc_snr
 @pytest.mark.parametrize("trans_weights", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("use_hadamard", [False, True])
-@pytest.mark.parametrize("use_static_clip", [False, True])
+@pytest.mark.parametrize("clip_mode", ["none", "static", "dynamic"])
 @pytest.mark.parametrize("use_macro_block_scaling", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16])
-def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, contiguous, use_hadamard, use_static_clip,
+def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, contiguous, use_hadamard, clip_mode,
                          use_macro_block_scaling, data_type):
     if use_2dblock_x and use_hadamard:
         pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
+
+    if clip_mode == "dynamic" and not use_hadamard:
+        pytest.skip("Dynamic clip mode is not supported without Hadamard transform.")
+
     # if not is_cdna4() and not trans_weights:
     #     pytest.skip("BF16 GroupedMM only supports trans_weights=True.")
 
@@ -116,7 +120,7 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, con
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_hadamard=use_hadamard,
-        use_static_clip=use_static_clip,
+        clip_mode=clip_mode,
         use_macro_block_scaling=use_macro_block_scaling,
     )
     loss = torch.nn.functional.mse_loss(outputs, target)

@@ -271,7 +271,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         use_2dblock_w,
         use_sr_grad,
         use_dge,
-        use_static_clip,
+        clip_mode,
         use_macro_block_scaling,
         hadamard_transform: Optional[HadamardTransform] = None,
     ):
@@ -310,14 +310,12 @@ class MXFP4LinearFunction(torch.autograd.Function):
             x_scaled,
             axis=-1,
             is_2d_block=use_2dblock_x,
-            use_static_clip=use_2dblock_x and use_static_clip,
         )
 
         w_mxfp4, w_scale = torch.ops.torchtitan.convert_to_mxfp4(
             w_scaled,
             axis=-1,
             is_2d_block=use_2dblock_w,
-            use_static_clip=use_2dblock_w and use_static_clip,
         )
 
         if is_cdna4():
@@ -332,10 +330,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 trans_b=True,
                 output_dtype=original_dtype,
             )
-            if use_2dblock_w and use_static_clip:
-                y *= (4.0 / 3.0)
-            if use_2dblock_x and use_static_clip:
-                y *= (4.0 / 3.0)
         else:
             x_dq = torch.ops.torchtitan.convert_from_mxfp4(
                 x_mxfp4,
@@ -343,7 +337,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 original_dtype,
                 axis=-1,
                 is_2d_block=use_2dblock_x,
-                use_static_clip=use_2dblock_x and use_static_clip,
             )
             w_dq = torch.ops.torchtitan.convert_from_mxfp4(
                 w_mxfp4,
@@ -351,7 +344,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 original_dtype,
                 axis=-1,
                 is_2d_block=use_2dblock_w,
-                use_static_clip=use_2dblock_w and use_static_clip,
             )
 
             if use_macro_block_scaling:
@@ -371,7 +363,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 w_scaled,
                 axis=0,
                 is_2d_block=False,
-                use_static_clip=use_static_clip,
             )
             if not is_cdna4():
                 w_dq = torch.ops.torchtitan.convert_from_mxfp4(
@@ -380,7 +371,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                     original_dtype,
                     axis=0,
                     is_2d_block=False,
-                    use_static_clip=use_static_clip,
                 )
                 if use_macro_block_scaling:
                     w_dq = macro_block_descaling(w_dq, w_mbs, axis=0, use_2d_block=False)
@@ -397,7 +387,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 x_scaled,
                 axis=0,
                 is_2d_block=False,
-                use_static_clip=use_static_clip,
+                clip_mode=clip_mode,
             )
             if not is_cdna4():
                 x_dq = torch.ops.torchtitan.convert_from_mxfp4(
@@ -406,7 +396,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                     original_dtype,
                     axis=0,
                     is_2d_block=False,
-                    use_static_clip=use_static_clip,
+                    clip_mode=clip_mode,
                 )
                 if use_macro_block_scaling:
                     x_dq = macro_block_descaling(x_dq, x_mbs, axis=0, use_2d_block=False)
@@ -420,7 +410,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         ctx.use_sr_grad = use_sr_grad
         ctx.hadamard_transform = hadamard_transform
         ctx.use_dge = use_dge
-        ctx.use_static_clip = use_static_clip
+        ctx.clip_mode = clip_mode
         ctx.use_macro_block_scaling = use_macro_block_scaling
 
         return y.view(*original_shape[:-1], -1)  # Reshape back to original
@@ -450,7 +440,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 axis=-1,
                 is_2d_block=True,
                 use_sr=ctx.use_sr_grad,
-                use_static_clip=ctx.use_static_clip,
             )
             grad_output_mxfp4_m = grad_output_mxfp4
             grad_output_scales_m = grad_output_scales
@@ -463,7 +452,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                     original_dtype,
                     axis=-1,
                     is_2d_block=True,
-                    use_static_clip=ctx.use_static_clip,
                 )
                 if ctx.use_macro_block_scaling:
                     grad_output_dq = macro_block_descaling(grad_output_dq, grad_output_mbs, axis=-1, use_2d_block=True)
@@ -479,7 +467,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 axis=-1,
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=False,
-                use_static_clip=ctx.use_static_clip,
             )
 
             if ctx.hadamard_transform is not None:
@@ -494,7 +481,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 axis=0,
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=False,
-                use_static_clip=ctx.use_static_clip,
+                clip_mode=ctx.clip_mode,
             )
 
             if not is_cdna4():
@@ -504,7 +491,6 @@ class MXFP4LinearFunction(torch.autograd.Function):
                     original_dtype,
                     axis=-1,
                     is_2d_block=False,
-                    use_static_clip=ctx.use_static_clip,
                 )
                 grad_output_m_dq = torch.ops.torchtitan.convert_from_mxfp4(
                     grad_output_mxfp4_m,
@@ -512,7 +498,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                     original_dtype,
                     axis=0,
                     is_2d_block=False,
-                    use_static_clip=ctx.use_static_clip,
+                    clip_mode=ctx.clip_mode,
                 )
                 if ctx.use_macro_block_scaling:
                     grad_output_dq = macro_block_descaling(grad_output_dq, grad_output_mbs, axis=-1, use_2d_block=False)
@@ -545,8 +531,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 k_pack_b=not ctx.use_2dblock_x,
                 output_dtype=ctx.original_dtype,
             )
-            if ctx.use_static_clip:
-                grad_inputs *= (16.0 / 9.0)
+            if ctx.clip_mode:
                 grad_weights *= (16.0 / 9.0)
         else:
             grad_inputs = grad_output_dq @ w_dq
@@ -583,7 +568,7 @@ def _to_mxfp4_then_scaled_mm(
     use_2dblock_w: bool,
     use_sr_grad: int,
     use_dge: bool,
-    use_static_clip: bool,
+    clip_mode: str,
     use_hadamard: bool,
     use_macro_block_scaling: bool = False,
 ) -> torch.Tensor:
@@ -599,7 +584,7 @@ def _to_mxfp4_then_scaled_mm(
         use_2dblock_w,
         use_sr_grad,
         use_dge,
-        use_static_clip,
+        clip_mode,
         use_macro_block_scaling,
         hadamard_transform,
     )

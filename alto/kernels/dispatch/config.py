@@ -16,15 +16,23 @@ class TrainingOpConfig:
     use_sr_grad: bool
     use_dge: bool
 
-    # MXFP4-specific: apply a static clipping scale 3/4 before fp4 quantization
-    # for nvfp4, try 16/17 instead of 4/3
-    use_static_clip: bool = False
+    clip_mode: Literal["none", "static", "dynamic"] = "none"
+    """
+    clipping mode applied in MXFP4/NVFP4 quantization.
+    * none: no clipping
+    * static: apply a static clipping scale 3/4 before mxfp4 quantization (16/17 for nvfp4, but not implemented)
+    * dynamic: dynamic clipped scale based on the mean and std of the input tensor (only supported for mxfp4)
+    """
 
-    # this option adds an extra scaling factor besides the default blockwise scales.
-    # NVFP4: none or tensorwise
-    # MXFP4: none or blockwise (shared mantissa)
-    # MXFP8: none
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
+    """
+    apply an extra scaling factor besides the default blockwise scales of MXFP4/NVFP4.
+    * none: no extra scaling
+    * tensorwise: apply a global scale factor to the entire tensor (for NVFP4 only)
+    * blockwise:
+      * MXFP4: apply a blockwise scale factor containing shared mantissa to each block
+      * NVFP4: not implemented
+    """
 
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

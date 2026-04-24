@@ -176,7 +176,10 @@ def blockwise_mxfp8_gemm(
     M, N, K = int(M), int(N), int(K)
     BLOCK_SIZE_M = 64 if M >= 64 else M
     BLOCK_SIZE_N = 64 if N >= 64 else N
-    BLOCK_SIZE_K = 64 if K >= 64 else K
+    # Keep one quant block per dot_scaled call. When a single dot_scaled spans
+    # multiple 32-wide scale groups, outlier-heavy inputs diverge sharply from
+    # the dequantize-then-matmul reference.
+    BLOCK_SIZE_K = block_size
 
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_SIZE_M"]),

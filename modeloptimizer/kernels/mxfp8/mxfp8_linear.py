@@ -13,6 +13,10 @@ import triton.language as tl
 from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     _dequantize_fp8,
+    SUPPORTED_FORMATS,
+    convert_from_mxfp8,
+    convert_to_mxfp8,
+    is_cdna4,
 )
 
 
@@ -630,3 +634,122 @@ def blockwise_mxfp8_gemm_dequant_debug(
         DEBUG_PRINT=debug_print,
     )
     return c
+
+@torch.compiler.allow_in_graph
+class MXFP8LinearFunction(torch.autograd.Function):
+    """
+    Autograd function for MXFP8 linear.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        mxfp_format: str = "e4m3",
+        use_sr_grad: bool = False,
+    ) -> torch.Tensor:
+        if mxfp_format not in SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported format: {mxfp_format}. Supported: {SUPPORTED_FORMATS}")
+        if x.dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError(f"x dtype must be float32/bfloat16, got {x.dtype}")
+        if weight.dtype != x.dtype:
+            raise ValueError(f"weight dtype ({weight.dtype}) must match x dtype ({x.dtype})")
+
+        original_shape = x.shape
+        x_2d = x.reshape(-1, original_shape[-1])
+        output_dtype = x.dtype
+
+        x_lp, x_scales = convert_to_mxfp8(
+            x_2d,
+            block_size=BLOCK_SIZE_DEFAULT,
+            mxfp_format=mxfp_format,
+            axis=-1,
+            is_2d_block=False,
+        )
+        w_lp, w_scales = convert_to_mxfp8(
+            weight,
+            block_size=BLOCK_SIZE_DEFAULT,
+            mxfp_format=mxfp_format,
+            axis=-1,
+            is_2d_block=False,
+        )
+
+        # Save dequantized tensors for stable, portable backward path.
+        x_dq = convert_from_mxfp8(
+            x_lp,
+            x_scales,
+            output_dtype=output_dtype,
+            block_size=BLOCK_SIZE_DEFAULT,
+            axis=-1,
+            is_2d_block=False,
+        )
+        w_dq = convert_from_mxfp8(
+            w_lp,
+            w_scales,
+            output_dtype=output_dtype,
+            block_size=BLOCK_SIZE_DEFAULT,
+            axis=-1,
+            is_2d_block=False,
+        )
+
+        if is_cdna4():
+            y = blockwise_mxfp8_gemm(
+                x_lp,
+                x_scales,
+                w_lp,
+                w_scales,
+                trans_b=True,
+                block_size=BLOCK_SIZE_DEFAULT,
+                output_dtype=output_dtype,
+            )
+        else:
+            y = x_dq @ w_dq.T
+
+        ctx.save_for_backward(x_dq, w_dq)
+        ctx.use_sr_grad = use_sr_grad
+        ctx.mxfp_format = mxfp_format
+        ctx.input_shape = original_shape
+        return y.view(*original_shape[:-1], -1)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        x_dq, w_dq = ctx.saved_tensors
+        original_shape = grad_output.shape
+        grad_output_2d = grad_output.reshape(-1, original_shape[-1])
+
+        grad_lp, grad_scales = convert_to_mxfp8(
+            grad_output_2d,
+            block_size=BLOCK_SIZE_DEFAULT,
+            mxfp_format=ctx.mxfp_format,
+            axis=-1,
+            is_2d_block=False,
+            use_sr=ctx.use_sr_grad,
+        )
+        grad_dq = convert_from_mxfp8(
+            grad_lp,
+            grad_scales,
+            output_dtype=grad_output.dtype,
+            block_size=BLOCK_SIZE_DEFAULT,
+            axis=-1,
+            is_2d_block=False,
+        )
+
+        grad_input = grad_dq @ w_dq
+        grad_weight = grad_dq.T @ x_dq
+        return grad_input.view(*ctx.input_shape), grad_weight, None, None, None
+
+
+def _to_mxfp8_then_scaled_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    mxfp_format: str = "e4m3",
+    use_sr_grad: bool = False,
+) -> torch.Tensor:
+    # Backward-compatible public wrapper around MXFP8LinearFunction.apply.
+    return MXFP8LinearFunction.apply(
+        a,
+        b,
+        mxfp_format,
+        use_sr_grad,
+    )

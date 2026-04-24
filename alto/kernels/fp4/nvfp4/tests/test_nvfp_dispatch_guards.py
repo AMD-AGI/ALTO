@@ -27,6 +27,7 @@ def _make_config(**overrides) -> TrainingOpConfig:
         use_hadamard=False,
         use_sr_grad=False,
         use_dge=False,
+        use_per_tensor_scale=False,
     )
     defaults.update(overrides)
     return TrainingOpConfig(**defaults)
@@ -246,3 +247,56 @@ def test_linear_compiles_with_wrapper(device):
     y = model(x)
     assert y.shape == (16, 32)
     assert y.dtype == torch.bfloat16
+
+
+# ---------------------------------------------------------------------------
+# PTS (two-level scale) dispatch wire-through.
+#
+# The dispatch layer reads ``config.use_per_tensor_scale`` and forwards it to
+# either ``_to_nvfp4_then_scaled_mm`` (linear) or
+# ``_quantize_then_nvfp4_scaled_grouped_mm`` (grouped).  These two smoke tests
+# exercise both dispatch branches with PTS enabled to catch any regression
+# where the flag is silently dropped between dispatch and the autograd
+# function.
+# ---------------------------------------------------------------------------
+
+def test_linear_pts_flag_reaches_autograd(device):
+    """Linear path with ``use_per_tensor_scale=True`` must produce a finite,
+    non-zero BF16 output and flow gradients back to the wrapper leaf."""
+    cfg = _make_config(use_per_tensor_scale=True)
+    lin = torch.nn.Linear(32, 32, bias=False, dtype=torch.bfloat16, device=device)
+    orig = lin.weight.data
+    lin.weight = torch.nn.Parameter(
+        NVFP4TrainingWeightWrapperTensor(orig, cfg), requires_grad=True,
+    )
+    x = torch.randn(64, 32, dtype=torch.bfloat16, device=device, requires_grad=True)
+    y = lin(x); y.sum().backward()
+
+    assert torch.isfinite(y).all(), "PTS linear produced NaN/Inf output"
+    assert y.abs().max().item() > 0, "PTS linear output is all-zero"
+    assert lin.weight.grad is not None, "PTS param.grad dropped by dispatch"
+    assert lin.weight._data.grad is None, "PTS leaf routed to _data instead of wrapper"
+
+
+def test_grouped_mm_pts_flag_reaches_autograd(device):
+    """Grouped path with ``use_per_tensor_scale=True`` must reach the NVFP4
+    grouped GEMM and produce a finite, non-zero BF16 output.
+
+    Mirrors ``test_grouped_mm_smoke`` and ``test_grouped_mm_recipe_surface_smoke``:
+    forward-only smoke at the dispatch layer (those tests also do not run
+    backward through ``torch._grouped_mm`` + wrapper, because the full
+    autograd path is covered by ``test_nvfp4_grouped_gemm_autograd_with_pts``
+    at the op level).
+    """
+    cfg = _make_config(use_per_tensor_scale=True)
+    num_experts, K, N, M = 2, 16, 16, ALIGN_SIZE_M
+    A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    W = torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device)
+    W_wrapped = NVFP4TrainingWeightWrapperTensor(W, cfg)
+    offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
+
+    y = torch._grouped_mm(A, W_wrapped, offs=offs)
+    assert y.shape == (M, N)
+    assert y.dtype == torch.bfloat16
+    assert torch.isfinite(y).all(), "PTS grouped_mm produced NaN/Inf output"
+    assert y.abs().max().item() > 0, "PTS grouped_mm output is all-zero"

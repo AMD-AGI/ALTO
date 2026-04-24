@@ -166,6 +166,100 @@ def test_nvfp4_grouped_gemm_autograd(
 
 
 # ---------------------------------------------------------------------------
+# Test 1b – autograd parity with two-level (per-tensor × per-block) scale.
+# Mirrors ``test_nvfp4_grouped_gemm_autograd`` but with
+# ``use_per_tensor_scale=True``.  The main test runs with PTS=False to keep
+# the headline SNR gate focused on the shared 6-QDQ math; this companion
+# asserts the same O/dX/dW thresholds (and the tight non-SR forward bound)
+# when the NVFP4-specific two-level scale is active, so a regression on the
+# PTS code path surfaces at op-level rather than only at E2E training.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("shape", [(1024, 512, 512, 8)])
+@pytest.mark.parametrize("use_2dblock_x", [False, True])
+@pytest.mark.parametrize("use_2dblock_w", [False, True])
+@pytest.mark.parametrize("use_sr_grad", [False, True])
+def test_nvfp4_grouped_gemm_autograd_with_pts(
+    shape, use_2dblock_x, use_2dblock_w, use_sr_grad,
+):
+    """Output, dX, and dW SNR vs BF16 reference must remain above threshold
+    when ``use_per_tensor_scale=True``.
+
+    Single shape + BF16 only (8 cases); FP32 already covered by the PTS=False
+    variant.  Same thresholds as the main test — PTS must not make the grouped
+    path less accurate than single-level scaling.
+    """
+    M_total, N, K, num_experts = shape
+    M_total = (M_total // ALIGN_SIZE_M) * ALIGN_SIZE_M
+    num_groups = M_total // ALIGN_SIZE_M
+    device = torch.device("cuda")
+    data_type = torch.bfloat16
+
+    inputs_ref = prepare_data((M_total, K), data_type).requires_grad_(True)
+    weights_ref = prepare_data((num_experts, N, K), data_type).requires_grad_(True)
+    expert_indices = _make_contiguous_expert_indices(
+        M_total, num_groups, num_experts, device
+    )
+    target = prepare_data((M_total, N), data_type)
+
+    y_ref = _bf16_grouped_ref_forward(
+        inputs_ref, weights_ref, expert_indices, M_total, N, num_groups,
+        trans_weights=True,
+    )
+    loss_ref = torch.nn.functional.mse_loss(y_ref, target)
+    loss_ref.backward()
+    dx_ref = inputs_ref.grad.clone()
+    dw_ref = weights_ref.grad.clone()
+
+    inputs = inputs_ref.detach().clone().requires_grad_(True)
+    weights = weights_ref.detach().clone().requires_grad_(True)
+
+    y = nvfp4_grouped_gemm(
+        inputs, weights, expert_indices,
+        trans_weights=True,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=use_sr_grad,
+        use_per_tensor_scale=True,   # <── the axis under test
+    )
+    loss = torch.nn.functional.mse_loss(y, target)
+    loss.backward()
+
+    o_snr = calc_snr(y_ref.detach(), y.detach())
+    dx_snr = calc_snr(dx_ref, inputs.grad)
+    dw_snr = calc_snr(dw_ref, weights.grad)
+    o_sim = calc_cossim(y_ref.detach(), y.detach())
+    dx_sim = calc_cossim(dx_ref, inputs.grad)
+    dw_sim = calc_cossim(dw_ref, weights.grad)
+
+    print()
+    print(tabulate(
+        [
+            ["O",  f"{o_snr:.2f}",  f"{o_sim:.6f}"],
+            ["dX", f"{dx_snr:.2f}", f"{dx_sim:.6f}"],
+            ["dW", f"{dw_snr:.2f}", f"{dw_sim:.6f}"],
+        ],
+        headers=["Tensor (PTS=True)", "SNR(dB)", "CosSim"],
+        tablefmt="github",
+    ))
+
+    min_snr = 3 if use_sr_grad else 4
+    assert o_snr  > min_snr, f"Output SNR too low (PTS):  {o_snr:.2f}"
+    assert dx_snr > min_snr, f"dX SNR too low (PTS):      {dx_snr:.2f}"
+    assert dw_snr > min_snr, f"dW SNR too low (PTS):      {dw_snr:.2f}"
+
+    # Tight forward bound on the deterministic (non-SR) BF16 path, same as
+    # the main test — PTS should not break the QDQ / fprop kernel.
+    if not use_sr_grad:
+        fwd_min_snr = 10 if not (use_2dblock_x or use_2dblock_w) else 5
+        assert o_snr > fwd_min_snr, (
+            f"Forward SNR too low on non-SR BF16 PTS path: {o_snr:.2f} "
+            f"(min {fwd_min_snr})"
+        )
+        assert o_sim > 0.95, f"Forward CosSim too low (PTS): {o_sim:.6f}"
+
+
+# ---------------------------------------------------------------------------
 # Test 2 – boundary / smoke (corner cases)
 # ---------------------------------------------------------------------------
 

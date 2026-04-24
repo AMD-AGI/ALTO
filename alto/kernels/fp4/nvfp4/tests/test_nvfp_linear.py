@@ -161,6 +161,77 @@ def test_nvfp4_linear_autograd_function(
     assert dw_snr     > min_snr, f"dW SNR too low: {dw_snr:.2f}"
 
 
+# ---------------------------------------------------------------------------
+# PTS coverage for the autograd function.  ``test_nvfp4_linear_autograd_function``
+# intentionally runs at ``use_per_tensor_scale=False`` to keep the main SNR-gate
+# focused on the shared 6-QDQ linear math; this companion test asserts the same
+# O/dX/dW SNR floors when the two-level (per-tensor × per-block) scale is
+# enabled so an NVFP4-specific regression on the PTS path gets caught at
+# op-level rather than only showing up at E2E training time.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("use_2dblock_x", [False, True])
+@pytest.mark.parametrize("use_2dblock_w", [False, True])
+@pytest.mark.parametrize("use_sr_grad",   [False, True])
+def test_nvfp4_linear_autograd_function_with_pts(
+    use_2dblock_x, use_2dblock_w, use_sr_grad,
+):
+    """Forward + dX + dW must still track the BF16 reference in SNR when the
+    NVFP4 two-level scale (``use_per_tensor_scale=True``) is active.
+
+    Uses a single shape (the largest of the three shapes in the non-PTS test)
+    to keep the matrix at 8 cases.  BF16 only; FP32 is already covered by the
+    PTS=False variant so there is no new numerical concern that a second dtype
+    would exercise.
+    """
+    B, M, N, K = 1, 512, 384, 128
+    data_type = torch.bfloat16
+
+    inputs = prepare_data((B, M, K), data_type).requires_grad_(True)
+    weights = prepare_data((N, K), data_type).requires_grad_(True)
+    target = prepare_data((B, M, N), data_type)
+
+    outputs_ref = torch.nn.functional.linear(inputs, weights)
+    loss_ref = torch.nn.functional.mse_loss(outputs_ref, target)
+    loss_ref.backward()
+    grad_inputs_ref = inputs.grad.clone()
+    grad_weights_ref = weights.grad.clone()
+    inputs.grad.zero_(); weights.grad.zero_()
+
+    outputs = NVFP4LinearFunction.apply(
+        inputs, weights,
+        use_2dblock_x, use_2dblock_w, use_sr_grad,
+        True,  # use_per_tensor_scale
+    )
+    loss = torch.nn.functional.mse_loss(outputs, target)
+    loss.backward()
+
+    output_snr = calc_snr(outputs, outputs_ref)
+    dx_snr = calc_snr(inputs.grad, grad_inputs_ref)
+    dw_snr = calc_snr(weights.grad, grad_weights_ref)
+    output_sim = calc_cossim(outputs, outputs_ref)
+    dx_sim = calc_cossim(inputs.grad, grad_inputs_ref)
+    dw_sim = calc_cossim(weights.grad, grad_weights_ref)
+
+    print()
+    print(tabulate(
+        [
+            ["O",  f"{output_snr:.2f}", f"{output_sim:.6f}"],
+            ["dX", f"{dx_snr:.2f}",     f"{dx_sim:.6f}"],
+            ["dW", f"{dw_snr:.2f}",     f"{dw_sim:.6f}"],
+        ],
+        headers=["Tensor (PTS=True)", "SNR", "Cosine Sim"], tablefmt="github",
+    ))
+
+    # Same thresholds as the PTS=False variant; PTS is a strict superset of
+    # the block-scale path and must not degrade end-to-end accuracy below
+    # what single-level scaling already achieves.
+    min_snr = 3 if use_sr_grad else 4
+    assert output_snr > min_snr, f"Output SNR too low (PTS): {output_snr:.2f}"
+    assert dx_snr     > min_snr, f"dX SNR too low (PTS):     {dx_snr:.2f}"
+    assert dw_snr     > min_snr, f"dW SNR too low (PTS):     {dw_snr:.2f}"
+
+
 def test_nvfp4_linear_rejects_unaligned_axis0_activation_view():
     """1D wgrad activation QDQ must fail fast when the leading dim is not
     divisible by the NVFP4 block size, rather than silently reusing the fprop

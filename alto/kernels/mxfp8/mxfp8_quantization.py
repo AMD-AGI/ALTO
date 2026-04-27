@@ -169,10 +169,10 @@ def _quantize_fp8(
             # Hardware may produce NaN/Inf; saturate to max finite, preserving sign bit
             y = (y & 0xFF).to(tl.uint8)
             if FP8_FORMAT == 0:
-                # e4m3fn: NaN is 0x7F/0xFF ΓåÆ clamp to 0x7E/0xFE
+                # e4m3fn: NaN is 0x7F/0xFF; clamp to 0x7E/0xFE
                 y = tl.where((y & 0x7F) == 0x7F, ((y & 0x80) | 0x7E).to(tl.uint8), y)
             else:
-                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF ΓåÆ clamp to 0x7B/0xFB
+                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF; clamp to 0x7B/0xFB
                 y = tl.where((y & 0x7C) == 0x7C, ((y & 0x80) | 0x7B).to(tl.uint8), y)
             if FP8_FORMAT == 0:
                 return y.to(tl.float8e4nv, bitcast=True)
@@ -248,11 +248,11 @@ def _quantize_fp8(
             y0 = (y & 0xFF).to(tl.uint8)
             y1 = ((y >> 8) & 0xFF).to(tl.uint8)
             if FP8_FORMAT == 0:
-                # e4m3fn: NaN is 0x7F/0xFF ΓåÆ clamp to 0x7E/0xFE
+                # e4m3fn: NaN is 0x7F/0xFF; clamp to 0x7E/0xFE
                 y0 = tl.where((y0 & 0x7F) == 0x7F, ((y0 & 0x80) | 0x7E).to(tl.uint8), y0)
                 y1 = tl.where((y1 & 0x7F) == 0x7F, ((y1 & 0x80) | 0x7E).to(tl.uint8), y1)
             else:
-                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF ΓåÆ clamp to 0x7B/0xFB
+                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF; clamp to 0x7B/0xFB
                 y0 = tl.where((y0 & 0x7C) == 0x7C, ((y0 & 0x80) | 0x7B).to(tl.uint8), y0)
                 y1 = tl.where((y1 & 0x7C) == 0x7C, ((y1 & 0x80) | 0x7B).to(tl.uint8), y1)
             qx = tl.join(y0, y1).reshape(BLOCK_M, BLOCK_N)

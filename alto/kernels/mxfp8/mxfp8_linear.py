@@ -10,6 +10,8 @@ from torch.library import triton_op, wrap_triton
 import triton
 import triton.language as tl
 
+from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
+
 from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     SUPPORTED_FORMATS,
@@ -437,6 +439,8 @@ class MXFP8LinearFunction(torch.autograd.Function):
         mxfp_format: str = "e4m3",
         use_sr_grad: bool = False,
     ) -> torch.Tensor:
+        weight = unwrap_weight_wrapper(weight)
+
         if mxfp_format not in SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported format: {mxfp_format}. Supported: {SUPPORTED_FORMATS}")
         if x.dtype not in (torch.float32, torch.bfloat16):
@@ -463,25 +467,8 @@ class MXFP8LinearFunction(torch.autograd.Function):
             is_2d_block=False,
         )
 
-        # Save dequantized tensors for stable, portable backward path.
-        x_dq = torch.ops.alto.convert_from_mxfp8(
-            x_lp,
-            x_scales,
-            output_dtype=output_dtype,
-            block_size=BLOCK_SIZE_DEFAULT,
-            axis=-1,
-            is_2d_block=False,
-        )
-        w_dq = torch.ops.alto.convert_from_mxfp8(
-            w_lp,
-            w_scales,
-            output_dtype=output_dtype,
-            block_size=BLOCK_SIZE_DEFAULT,
-            axis=-1,
-            is_2d_block=False,
-        )
-
-        if is_cdna4():
+        use_cdna4 = is_cdna4()
+        if use_cdna4:
             y = torch.ops.alto.blockwise_mxfp8_gemm(
                 x_lp,
                 x_scales,
@@ -492,17 +479,72 @@ class MXFP8LinearFunction(torch.autograd.Function):
                 output_dtype=output_dtype,
             )
         else:
+            x_dq = torch.ops.alto.convert_from_mxfp8(
+                x_lp,
+                x_scales,
+                output_dtype=output_dtype,
+                block_size=BLOCK_SIZE_DEFAULT,
+                axis=-1,
+                is_2d_block=False,
+            )
+            w_dq = torch.ops.alto.convert_from_mxfp8(
+                w_lp,
+                w_scales,
+                output_dtype=output_dtype,
+                block_size=BLOCK_SIZE_DEFAULT,
+                axis=-1,
+                is_2d_block=False,
+            )
             y = x_dq @ w_dq.T
 
-        ctx.save_for_backward(x_dq, w_dq)
+        x_m_lp, x_m_scales = torch.ops.alto.convert_to_mxfp8(
+            x_2d,
+            block_size=BLOCK_SIZE_DEFAULT,
+            mxfp_format=mxfp_format,
+            axis=0,
+            is_2d_block=False,
+        )
+        w_m_lp, w_m_scales = torch.ops.alto.convert_to_mxfp8(
+            weight,
+            block_size=BLOCK_SIZE_DEFAULT,
+            mxfp_format=mxfp_format,
+            axis=0,
+            is_2d_block=False,
+        )
+
+        if use_cdna4:
+            ctx.save_for_backward(x_m_lp, x_m_scales, w_m_lp, w_m_scales)
+        else:
+            x_m_dq = torch.ops.alto.convert_from_mxfp8(
+                x_m_lp,
+                x_m_scales,
+                output_dtype=output_dtype,
+                block_size=BLOCK_SIZE_DEFAULT,
+                axis=0,
+                is_2d_block=False,
+            )
+            w_m_dq = torch.ops.alto.convert_from_mxfp8(
+                w_m_lp,
+                w_m_scales,
+                output_dtype=output_dtype,
+                block_size=BLOCK_SIZE_DEFAULT,
+                axis=0,
+                is_2d_block=False,
+            )
+            ctx.save_for_backward(x_m_dq, w_m_dq)
+        ctx.use_cdna4 = use_cdna4
         ctx.use_sr_grad = use_sr_grad
         ctx.mxfp_format = mxfp_format
+        ctx.output_dtype = output_dtype
         ctx.input_shape = original_shape
         return y.view(*original_shape[:-1], -1)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        x_dq, w_dq = ctx.saved_tensors
+        if ctx.use_cdna4:
+            x_m_lp, x_m_scales, w_m_lp, w_m_scales = ctx.saved_tensors
+        else:
+            x_m_dq, w_m_dq = ctx.saved_tensors
         original_shape = grad_output.shape
         grad_output_2d = grad_output.reshape(-1, original_shape[-1])
 
@@ -514,18 +556,53 @@ class MXFP8LinearFunction(torch.autograd.Function):
             is_2d_block=False,
             use_sr=ctx.use_sr_grad,
         )
-        grad_dq = torch.ops.alto.convert_from_mxfp8(
-            grad_lp,
-            grad_scales,
-            output_dtype=grad_output.dtype,
+        grad_m_lp, grad_m_scales = torch.ops.alto.convert_to_mxfp8(
+            grad_output_2d,
             block_size=BLOCK_SIZE_DEFAULT,
-            axis=-1,
+            mxfp_format=ctx.mxfp_format,
+            axis=0,
             is_2d_block=False,
+            use_sr=ctx.use_sr_grad,
         )
 
-        grad_input = grad_dq @ w_dq
-        grad_weight = grad_dq.T @ x_dq
-        return grad_input.view(*ctx.input_shape), grad_weight, None, None, None
+        if ctx.use_cdna4:
+            grad_input = torch.ops.alto.blockwise_mxfp8_gemm(
+                grad_lp,
+                grad_scales,
+                w_m_lp,
+                w_m_scales,
+                block_size=BLOCK_SIZE_DEFAULT,
+                output_dtype=ctx.output_dtype,
+            )
+            grad_weight = torch.ops.alto.blockwise_mxfp8_gemm(
+                grad_m_lp,
+                grad_m_scales,
+                x_m_lp,
+                x_m_scales,
+                trans_a=True,
+                block_size=BLOCK_SIZE_DEFAULT,
+                output_dtype=ctx.output_dtype,
+            )
+        else:
+            grad_dq = torch.ops.alto.convert_from_mxfp8(
+                grad_lp,
+                grad_scales,
+                output_dtype=ctx.output_dtype,
+                block_size=BLOCK_SIZE_DEFAULT,
+                axis=-1,
+                is_2d_block=False,
+            )
+            grad_m_dq = torch.ops.alto.convert_from_mxfp8(
+                grad_m_lp,
+                grad_m_scales,
+                output_dtype=ctx.output_dtype,
+                block_size=BLOCK_SIZE_DEFAULT,
+                axis=0,
+                is_2d_block=False,
+            )
+            grad_input = grad_dq @ w_m_dq
+            grad_weight = grad_m_dq.T @ x_m_dq
+        return grad_input.view(*ctx.input_shape), grad_weight, None, None
 
 
 def _to_mxfp8_then_scaled_mm(

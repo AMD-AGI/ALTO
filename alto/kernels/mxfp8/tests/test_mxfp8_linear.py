@@ -12,37 +12,8 @@ from alto.kernels.mxfp8.mxfp8_linear import (
     MXFP8LinearFunction,
 )
 from alto.kernels.fp4.mxfp4.tests.utils import calc_cossim, calc_snr
-from alto.kernels.mxfp8.mxfp8_quantization import (
-    BLOCK_SIZE_DEFAULT,
-    is_cdna4,
-)
+from alto.kernels.mxfp8.mxfp8_quantization import is_cdna4
 from .utils import prepare_data
-
-
-SMALL_DIVISIBLE_SHAPES = [
-    (32, 32, 32),
-    (64, 64, 64),
-    (128, 128, 128),
-]
-
-LINEAR_KERNEL_SHAPES = [
-    (32, 32, 32),
-    (256, 384, 128),
-    (512, 1024, 256),
-]
-
-# With BLOCK_SIZE_K tied to the 32-wide quant block, 1e-4/1e-4 is enough for
-# the larger kernel shapes below while still catching the regressed K=64
-# variant, which needs much looser tolerances to pass.
-LINEAR_KERNEL_ATOL = 1e-4
-LINEAR_KERNEL_RTOL = 1e-4
-
-# The dequantize + tl.dot debug path still uses the simpler K>=64 launch
-# heuristic, so it needs a looser relative tolerance on the larger shapes even
-# though it stays much closer to the reference than the regressed dot_scaled
-# K=64 variant.
-DEQUANT_DOT_KERNEL_ATOL = 1e-4
-DEQUANT_DOT_KERNEL_RTOL = 5e-3
 
 
 @pytest.mark.parametrize("shape", [(32, 32, 32), (256, 384, 128), (512, 1024, 256)])
@@ -133,6 +104,8 @@ def test_mxfp8_linear_kernel(
     )
     c_ref = (a_dq.T if trans_a else a_dq) @ (b_dq.T if trans_b else b_dq)
 
+    # BLOCK_SIZE_K is tied to the 32-wide quant block, so 1e-4 tolerance still
+    # catches the regressed K=64 variant while passing the larger kernel shapes.
     torch.testing.assert_close(
         c,
         c_ref,
@@ -144,7 +117,7 @@ def test_mxfp8_linear_kernel(
 # DEBUG TEST CASES
 # =============================================================================
 
-@pytest.mark.parametrize("shape", SMALL_DIVISIBLE_SHAPES)
+@pytest.mark.parametrize("shape", [(32, 32, 32), (64, 64, 64), (128, 128, 128)])
 @pytest.mark.parametrize("trans_a", [False, True])
 @pytest.mark.parametrize("trans_b", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
@@ -221,6 +194,7 @@ def test_mxfp8_linear_dequant_dot_kernel(
         is_2d_block=False,
     )
 
+    # Debug kernel, not formal operator
     c = blockwise_mxfp8_gemm_dequant_debug(
         a_lp,
         a_scales,

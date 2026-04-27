@@ -18,6 +18,7 @@ from torchtitan.tools.logging import logger
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
+from alto.kernels.mxfp8.mxfp8_linear import _to_mxfp8_then_scaled_mm
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten
@@ -365,7 +366,60 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # All other ops (copy_, view, ...) fall through without wrapping
             with torch._C.DisableTorchFunctionSubclass():
                 return func(*args, **kwargs)
+
+
+class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
+    """Weight tensor subclass that routes linear calls through MXFP8LinearFunction."""
+
+    @classmethod
+    def __torch_function__(cls, func, types, args, kwargs={}):
+        if func.__name__ == "_grouped_mm":
+            raise NotImplementedError(
+                "MXFP8 _grouped_mm is not supported by this dispatch path; "
+                "restrict scheme='mxfp8' to Linear targets."
+            )
+
+        if func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
+            trans_b = func.__name__ == "linear"
+            if func.__name__ == "addmm.default":
+                bias, A, B = args[0], args[1], args[2]
+            else:
+                A, B = args[0], args[1]
+                bias = args[2] if len(args) > 2 else None
+
+            assert not isinstance(A, cls), (
+                f"A should not be a {cls.__name__} for func {func.__name__}"
+            )
+            assert isinstance(B, cls), (
+                f"B should be a {cls.__name__} for func {func.__name__}"
+            )
+
+            config = B.config
+            assert config.precision == "mxfp8", (
+                f"expected TrainingOpConfig with precision=mxfp8, got {config.precision}"
+            )
+            assert not config.use_2dblock_x and not config.use_2dblock_w, (
+                "MXFP8 dispatch currently supports only 1D block scaling."
+            )
+            assert not config.use_hadamard and not config.use_dge, (
+                "MXFP8 dispatch does not support Hadamard or DGE options."
+            )
+
+            Y = _to_mxfp8_then_scaled_mm(
+                A,
+                B if trans_b else B.T,
+                use_sr_grad=config.use_sr_grad,
+            )
+            if bias is not None:
+                Y = Y + bias
+            return Y
+
+        with torch._C.DisableTorchFunctionSubclass():
+            return func(*args, **kwargs)
+
+
 torch.serialization.add_safe_globals([
     MXFP4TrainingWeightWrapperTensor,
     NVFP4TrainingWeightWrapperTensor,
+    MXFP8TrainingWeightWrapperTensor,
 ])

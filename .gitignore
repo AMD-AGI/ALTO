@@ -210,3 +210,5 @@ __marimo__/
 .vscode/
 *outputs/
 datasets/
+/models/
+comm_traces/

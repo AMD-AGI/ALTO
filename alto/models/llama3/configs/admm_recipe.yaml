@@ -1,0 +1,14 @@
+# ADMM unstructured sparsification recipe
+# Hessian-based iterative ADMM pruning
+sparsification_stage:
+  sparsity_modifiers:
+    AdmmModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.5
+      mask_structure: "0:0"
+      dampening_frac: 0.01
+      admm_rho: 10
+      admm_pruning_granularity: 32
+      admm_iterations: 32
+      targets: ["Linear"]
+      ignore: ["output"]

@@ -1,9 +1,12 @@
 #!/usr/bin/bash
-# Copyright (c) Advanced Micro Devices, Inc.
-# All rights reserved.
-
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
+# (see LICENSE in the root of this repository).
+#
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Original portions are licensed under the BSD 3-Clause License (see upstream PyTorch/torchtitan licensing).
+#
+# SPDX-License-Identifier: BSD-3-Clause AND MIT
 
 set -ex
 
@@ -27,7 +30,7 @@ set -ex
 
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
+TRAIN_FILE=${TRAIN_FILE:-"alto.train"}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 COMM_MODE=${COMM_MODE:-""}

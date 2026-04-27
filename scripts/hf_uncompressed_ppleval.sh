@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 
 # ── Config ─────────────────────────────────────────────────────────────────
@@ -17,7 +21,7 @@ export CUDA_VISIBLE_DEVICES=0
 mkdir -p "$OUTPUT_DIR"
 
 # ── Run ────────────────────────────────────────────────────────────────────
-python3 -m modeloptimizer.utils.evaluation.eval_ppl \
+python3 -m alto.utils.evaluation.eval_ppl \
     --model_path "$MODEL_PATH" \
     --datasets $DATASETS \
     --seqlen "$SEQLEN" \

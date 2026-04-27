@@ -1,18 +1,20 @@
 [tool.poetry]
-name = "ModelOptimizer"
-description = "AMD AIG-Models Research toolkit"
+name = "alto"
+description = "Advanced Lightweight Training and Optimization"
 version = "0.0.0"
-homepage = "https://github.com/AMD-AGI/ModelOptimizer"
+homepage = "https://github.com/AMD-AGI/ALTO"
 authors = [
     "Guanchen Li <GuanChen.Li@amd.com>",
+    "Zhitao Wang <Zhitao.Wang@amd.com>",
+    "Yue Sun <Yue.Sun2@amd.com>",
     "Han Wang <Han.Wang@amd.com>",
     "Yixing Xu <Yixing.Xu@amd.com>",
     "Xuanwu Yin <Xuanwu.Yin@amd.com>",
     "Dong Li <d.li@amd.com>",
 ]
-license = "BSD-3"
+license = "MIT"
 readme = "README.md"
-packages = [{ include = "modeloptimizer" }]
+packages = [{ include = "alto" }]
 include = [
     { path = "README.md", format = [
         "sdist",
@@ -23,6 +25,9 @@ include = [
         "wheel",
     ] },
 ]
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = ">=4.0.0"
 
 [tool.poetry.dependencies]
 python = ">=3.9.0"

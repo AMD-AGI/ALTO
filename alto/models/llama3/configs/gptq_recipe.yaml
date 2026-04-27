@@ -1,0 +1,19 @@
+# GPTQ W4A8 quantization recipe
+# Weight: 4-bit integer, symmetric, per-group (group_size=128), via GPTQ
+# Activation: 8-bit integer, symmetric, per-token dynamic, minmax observer
+quantization_stage:
+  quantization_modifiers:
+    GPTQModifier:
+      sequential_granularity: "sublayer"
+      block_size: 128
+      dampening_frac: 0.01
+      ignore: ["output"]
+      config_groups:
+        group_0:
+          weights:
+            num_bits: 4
+            type: "int"
+            symmetric: true
+            strategy: "group"
+            group_size: 128
+          targets: ["Linear"]

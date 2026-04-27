@@ -1,4 +1,8 @@
 #!/usr/bin/bash
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 # GPTQ W4A8 quantization on Llama-3.1-8B
 # Uses Hessian-based optimal weight quantization (4-bit per-group)
 # with dynamic 8-bit activation quantization
@@ -12,7 +16,7 @@ set -ex
 export CUDA_VISIBLE_DEVICES=0
 NGPU=${NGPU:-"1"}
 export LOG_RANK=${LOG_RANK:-0}
-TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
+TRAIN_FILE=${TRAIN_FILE:-"alto.train"}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_8b_gptq"}
 COMM_MODE=${COMM_MODE:-""}

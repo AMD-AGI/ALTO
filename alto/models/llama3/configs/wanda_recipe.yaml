@@ -1,0 +1,10 @@
+# Wanda unstructured sparsification recipe
+# One-shot activation-aware pruning using |W| * sqrt(S) metric
+sparsification_stage:
+  sparsity_modifiers:
+    WandaModifier:
+      sequential_granularity: "sublayer"
+      sparsity: 0.5
+      mask_structure: "0:0"
+      targets: ["Linear"]
+      ignore: ["output"]

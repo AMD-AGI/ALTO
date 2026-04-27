@@ -1,9 +1,8 @@
 #!/usr/bin/bash
-# Copyright (c) Advanced Micro Devices, Inc.
-# All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
 
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
 
 set -ex
 
@@ -28,7 +27,7 @@ rm -rf outputs/
 NGPU=${NGPU:-"1"}
 export CUDA_VISIBLE_DEVICES=0
 export LOG_RANK=${LOG_RANK:-0}
-TRAIN_FILE=${TRAIN_FILE:-"modeloptimizer.train"}
+TRAIN_FILE=${TRAIN_FILE:-"alto.train"}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_8b_rtn"}
 COMM_MODE=${COMM_MODE:-""}

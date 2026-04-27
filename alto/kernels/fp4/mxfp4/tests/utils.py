@@ -4,7 +4,12 @@
 
 import torch
 from torch import Tensor
-from alto.kernels.mxfp4.mxfp_quantization import (BLOCK_SIZE_DEFAULT)
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (BLOCK_SIZE_DEFAULT)
+
+# Re-exported so existing ``from .utils import calc_snr, calc_cossim``
+# call-sites keep working; the single source of truth lives in
+# ``alto.kernels.fp4.testing_utils``.
+from alto.kernels.fp4.testing_utils import calc_snr, calc_cossim  # noqa: F401
 
 
 def prepare_data(tensor_shape, data_type):
@@ -14,35 +19,6 @@ def prepare_data(tensor_shape, data_type):
     p_mask = torch.bernoulli(torch.ones_like(x) * 0.005)
     x += 100 * torch.randn_like(x) * p_mask
     return x
-
-
-def calc_snr(
-    x: torch.Tensor,
-    y: torch.Tensor,
-) -> float:
-    """
-    Calculate the Signal-to-Noise Ratio (SNR) between two tensors.
-    SNR = 10 * log10(sum(x^2) / (sum((x - y)^2)))
-    """
-    signal = torch.sum(x**2)
-    noise = torch.sum((x - y)**2)
-    return 10 * torch.log10(signal / noise)
-
-
-def calc_cossim(
-    x: torch.Tensor,
-    y: torch.Tensor,
-) -> float:
-    """
-    Calculate the cosine similarity between two tensors.
-    Cosine similarity = dot(x, y) / (norm(x) * norm(y))
-    """
-    x = x.reshape(-1)
-    y = y.reshape(-1)
-    dot_product = torch.sum(x * y)
-    norm_x = torch.norm(x)
-    norm_y = torch.norm(y)
-    return dot_product / (norm_x * norm_y)
 
 
 def _n_ones(n: int) -> int:
@@ -310,6 +286,7 @@ def convert_to_mxfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
+    use_static_clip: bool = False,
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if data_hp.dtype == torch.float32:
@@ -359,7 +336,12 @@ def convert_to_mxfp4_pytorch(
     scales_fp = (scales.to(hp_int_dtype) << hp_mbits).view(data_hp.dtype).unsqueeze(-1)
     if is_2d_block:
         scales_fp = scales_fp.unsqueeze(-3)
-    data_lp = data_hp / scales_fp
+    if use_static_clip:
+        # Note: in-place multiplication leads to incorrect results
+        data_clipped = data_hp * (3.0 / 4.0)
+    else:
+        data_clipped = data_hp
+    data_lp = data_clipped / scales_fp
 
     data_lp = data_lp.reshape(orig_shape)
     data_lp = f32_to_f4_unpacked(data_lp.float())
@@ -375,6 +357,7 @@ def convert_from_mxfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
+    use_static_clip: bool = False,
 ) -> torch.Tensor:
     data_lp = data_lp.transpose(axis, -1)
     scales = scales.transpose(axis, -1)
@@ -383,6 +366,8 @@ def convert_from_mxfp4_pytorch(
     f4_unpacked = unpack_uint4(data_lp)
     f32 = f4_unpacked_to_f32(f4_unpacked)
     data_hp = f32.to(output_dtype)
+    if use_static_clip:
+        data_hp *= 4.0 / 3.0
     orig_shape = (*orig_shape[:-1], orig_shape[-1] * 2)
 
     if is_2d_block:

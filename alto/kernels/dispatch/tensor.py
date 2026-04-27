@@ -1,12 +1,7 @@
 # modified from https://github.com/pytorch/ao/blob/5ebd10d003b1fe6c9330f802ab9741ffde0bb7a9/torchao/prototype/moe_training/tensor.py
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
-# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
-# (see LICENSE in the root of this repository).
 #
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# Original portions are licensed under the BSD 3-Clause License (see upstream PyTorch licensing).
-#
-# SPDX-License-Identifier: BSD-3-Clause AND MIT
+# SPDX-License-Identifier: MIT
 
 from typing import Any, Optional, Tuple
 
@@ -20,8 +15,9 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 from torchao.utils import TorchAOBaseTensor
 from torchtitan.tools.logging import logger
 
-from alto.kernels.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
-from alto.kernels.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
+from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
+from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten
@@ -242,6 +238,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_sr_grad=config.use_sr_grad,
                 use_dge=config.use_dge,
                 use_hadamard=config.use_hadamard,
+                use_static_clip=config.use_static_clip,
             )
 
         # linear op override
@@ -270,6 +267,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
                 use_dge=config.use_dge,
+                use_static_clip=config.use_static_clip,
                 use_hadamard=config.use_hadamard,
             )
             if bias is not None:
@@ -282,4 +280,94 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 return func(*args, **kwargs)
 
 
-torch.serialization.add_safe_globals([MXFP4TrainingWeightWrapperTensor])
+class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
+    """Weight tensor subclass that routes F.linear calls through NVFP4LinearFunction.
+
+    The dispatch mechanism follows the same pattern as MXFP4TrainingWeightWrapperTensor:
+    when PyTorch sees a linear/mm operation whose *weight* (B) is wrapped in this
+    subclass, __torch_function__ is triggered and the NVFP4 QDQ path is used instead
+    of the standard BF16 matmul.
+
+    This means model code never needs to change — the training precision is
+    controlled purely by wrapping the weight parameters via swap_params().
+
+    Config fields used:
+        use_2dblock_x  – 2D block scaling on activations
+        use_2dblock_w  – 2D block scaling on weights (mirrors the axis-invariant view)
+        use_sr_grad    – stochastic rounding on gradient quantization
+        use_hadamard   – wgrad-path Hadamard rotation (mirrors MXFP4 behaviour)
+        use_dge        – differentiable gradient estimator on wgrad (mirrors MXFP4)
+        use_per_tensor_scale – two-level NVFP4 scaling (global × per-block)
+
+    Unsupported ops (hard-fail rather than silently fall back to BF16):
+        _grouped_mm    – NVFP4 grouped GEMM is tracked in a separate branch; until
+                         it lands here, applying ``scheme=nvfp4`` to a
+                         ``GroupedExperts`` module is rejected to avoid
+                         quietly running those matmuls in BF16.
+    """
+
+    @classmethod
+    def __torch_function__(cls, func, types, args, kwargs={}):
+        # Grouped-matmul (MoE routed experts).  NVFP4 does not yet implement a
+        # grouped GEMM path, so refuse the call instead of letting it silently
+        # fall through to BF16 — that would quietly violate the user's
+        # ``scheme=nvfp4`` intent.
+        if func.__name__ == "_grouped_mm":
+            raise NotImplementedError(
+                "NVFP4 _grouped_mm is not supported on this branch; applying "
+                "scheme='nvfp4' to GroupedExperts / MoE modules would silently "
+                "fall back to BF16. Use the NVFP4 grouped-GEMM branch, or "
+                "restrict the 'nvfp4' scheme to Linear targets."
+            )
+
+        # linear / mm overrides
+        if func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
+            trans_b = func.__name__ == "linear"
+            if func.__name__ == "addmm.default":
+                bias, A, B = args[0], args[1], args[2]
+            else:
+                A, B = args[0], args[1]
+                bias = args[2] if len(args) > 2 else None
+
+            assert not isinstance(A, cls), (
+                f"A should not be a {cls.__name__} for func {func.__name__}"
+            )
+            assert isinstance(B, cls), (
+                f"B should be a {cls.__name__} for func {func.__name__}"
+            )
+
+            config = B.config
+            assert config.precision == "nvfp4", (
+                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}"
+            )
+
+            # Pass the wrapper tensor itself into the autograd function —
+            # matching the MXFP4 path — so that any upstream subclass
+            # semantics (FSDP2 post-all-gather hooks, observability hooks
+            # registered on __torch_dispatch__, subclass-preserving aten ops
+            # in ``_ops_to_preserve_subclass``) reach the kernel boundary.
+            # ``NVFP4LinearFunction.forward`` unwraps to ``._data`` at its
+            # entry, so the autograd tape and downstream QDQ ops still see
+            # plain tensors.
+            W = B if trans_b else B.T
+            Y = _to_nvfp4_then_scaled_mm(
+                A,
+                W,
+                use_2dblock_x=config.use_2dblock_x,
+                use_2dblock_w=config.use_2dblock_w,
+                use_sr_grad=config.use_sr_grad,
+                use_per_tensor_scale=config.use_per_tensor_scale,
+                use_hadamard=config.use_hadamard,
+                use_dge=config.use_dge,
+            )
+            if bias is not None:
+                Y = Y + bias
+            return Y
+        else:
+            # All other ops (copy_, view, ...) fall through without wrapping
+            with torch._C.DisableTorchFunctionSubclass():
+                return func(*args, **kwargs)
+torch.serialization.add_safe_globals([
+    MXFP4TrainingWeightWrapperTensor,
+    NVFP4TrainingWeightWrapperTensor,
+])

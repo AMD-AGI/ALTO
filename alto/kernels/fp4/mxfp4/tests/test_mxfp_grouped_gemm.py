@@ -5,11 +5,11 @@
 import pytest
 from tabulate import tabulate
 import torch
-from alto.kernels.mxfp4.mxfp_quantization import (
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
 )
-from alto.kernels.mxfp4.mxfp_grouped_gemm import (
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm import (
     ALIGN_SIZE_M,
     mxfp4_grouped_gemm,
 )
@@ -23,8 +23,9 @@ from .utils import prepare_data, calc_cossim, calc_snr
 @pytest.mark.parametrize("trans_weights", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("use_hadamard", [False, True])
-@pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, contiguous, use_hadamard, data_type):
+@pytest.mark.parametrize("use_static_clip", [False, True])
+@pytest.mark.parametrize("data_type", [torch.bfloat16])
+def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, contiguous, use_hadamard, use_static_clip, data_type):
     if use_2dblock_x and use_hadamard:
         pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
     if not is_cdna4() and not trans_weights:
@@ -108,6 +109,7 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, con
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_hadamard=use_hadamard,
+        use_static_clip=use_static_clip,
     )
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()

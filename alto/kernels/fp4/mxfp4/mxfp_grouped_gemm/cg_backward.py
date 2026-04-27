@@ -22,12 +22,12 @@ from alto.kernels.blockwise_fp8.grouped_gemm.cg_backward import (
     cg_grouped_gemm_backward_inputs,
     cg_grouped_gemm_backward_weights,
 )
-from alto.kernels.mxfp4.mxfp_grouped_gemm.cg_forward import mxfp4_grouped_gemm_forward
-from alto.kernels.mxfp4.mxfp_grouped_gemm.autotune import (
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.cg_forward import mxfp4_grouped_gemm_forward
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import (
     STANDARD_CONFIGS,
     ALIGN_SIZE_M,
 )
-from alto.kernels.mxfp4.mxfp_quantization import (
+from alto.kernels.fp4.mxfp4.mxfp_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
 )
@@ -611,6 +611,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
         use_2dblock_w=True,
         use_sr_grad=False,
         use_dge=False,
+        use_static_clip=False,
         hadamard_transform: Optional[HadamardTransform] = None,
     ):
         """Forward pass for contiguous grouped GEMM."""
@@ -620,6 +621,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             inputs,
             axis=-1,
             is_2d_block=use_2dblock_x,
+            use_static_clip=use_2dblock_x and use_static_clip,
         )
         if trans_weights:
             quant_axis_w = -1
@@ -632,6 +634,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             expert_weights,
             axis=quant_axis_w,
             is_2d_block=use_2dblock_w,
+            use_static_clip=use_2dblock_w and use_static_clip,
         )
 
         if is_cdna4():
@@ -646,6 +649,10 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 use_2dblock_w=use_2dblock_w,
                 output_dtype=original_dtype,
             )
+            if use_2dblock_w and use_static_clip:
+                res *= (4.0 / 3.0)
+            if use_2dblock_x and use_static_clip:
+                res *= (4.0 / 3.0)
         else:
             x_dq = torch.ops.torchtitan.convert_from_mxfp4(
                 inputs_mxfp4,
@@ -653,6 +660,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 original_dtype,
                 axis=-1,
                 is_2d_block=use_2dblock_x,
+                use_static_clip=use_2dblock_x and use_static_clip,
             ).contiguous()
             w_dq = torch.ops.torchtitan.convert_from_mxfp4(
                 expert_weights_mxfp4,
@@ -660,6 +668,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 original_dtype,
                 axis=quant_axis_w,
                 is_2d_block=use_2dblock_w,
+                use_static_clip=use_2dblock_w and use_static_clip,
             )
             if not trans_weights:
                 w_dq = w_dq.transpose(-2, -1)
@@ -671,6 +680,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 expert_weights,
                 axis=requant_axis_w,
                 is_2d_block=False,
+                use_static_clip=use_static_clip,
             )
             if not is_cdna4():
                 w_dq = torch.ops.torchtitan.convert_from_mxfp4(
@@ -679,6 +689,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                     original_dtype,
                     axis=requant_axis_w,
                     is_2d_block=False,
+                    use_static_clip=use_static_clip,
                 )
                 if not trans_weights:
                     w_dq = w_dq.transpose(-2, -1)
@@ -690,6 +701,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 inputs,
                 axis=0,
                 is_2d_block=False,
+                use_static_clip=use_static_clip,
             )
             if not is_cdna4():
                 x_dq = torch.ops.torchtitan.convert_from_mxfp4(
@@ -698,6 +710,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                     original_dtype,
                     axis=0,
                     is_2d_block=use_2dblock_x,
+                    use_static_clip=use_static_clip,
                 ).contiguous()
 
         # Save for backward
@@ -713,6 +726,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
         ctx.use_sr_grad = use_sr_grad
         ctx.use_dge = use_dge
         ctx.hadamard_transform = hadamard_transform
+        ctx.use_static_clip = use_static_clip
 
         return res
 
@@ -739,6 +753,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 axis=-1,
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=True,
+                use_static_clip=ctx.use_static_clip,
             )
             grad_output_mxfp4_m = grad_output_mxfp4
             grad_output_scales_m = grad_output_scales
@@ -750,6 +765,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                     ctx.original_dtype,
                     axis=-1,
                     is_2d_block=True,
+                    use_static_clip=ctx.use_static_clip,
                 ).contiguous()
                 grad_output_m_dq = grad_output_dq
         else:
@@ -758,6 +774,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 axis=-1,
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=False,
+                use_static_clip=ctx.use_static_clip,
             )
             if ctx.hadamard_transform is not None:
                 grad_output = ctx.hadamard_transform(grad_output, left_mul=True)
@@ -766,6 +783,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 axis=0,
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=False,
+                use_static_clip=ctx.use_static_clip,
             )
 
             if not is_cdna4():
@@ -775,6 +793,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                     ctx.original_dtype,
                     axis=-1,
                     is_2d_block=False,
+                    use_static_clip=ctx.use_static_clip,
                 ).contiguous()
                 grad_output_m_dq = torch.ops.torchtitan.convert_from_mxfp4(
                     grad_output_mxfp4_m,
@@ -782,6 +801,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                     ctx.original_dtype,
                     axis=0,
                     is_2d_block=False,
+                    use_static_clip=ctx.use_static_clip,
                 ).contiguous()
 
         # Compute gradients
@@ -813,6 +833,10 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 k_pack_x=not ctx.use_2dblock_x,
                 output_dtype=ctx.original_dtype,
             )
+            
+            if ctx.use_static_clip:
+                grad_inputs *= (16.0 / 9.0)
+                grad_weights *= (16.0 / 9.0)
         else:
             grad_inputs = cg_grouped_gemm_backward_inputs(
                 grad_output=grad_output_dq,
@@ -847,7 +871,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
-        return grad_inputs, grad_weights, None, None, None, None, None, None, None
+        return grad_inputs, grad_weights, None, None, None, None, None, None, None, None
 
 
 def mxfp4_grouped_gemm(
@@ -861,6 +885,7 @@ def mxfp4_grouped_gemm(
     use_sr_grad: bool = False,
     use_dge: bool = False,
     use_hadamard: bool = False,
+    use_static_clip: bool = False,
 ) -> torch.Tensor:
     """
     Interface for contiguous grouped GEMM with full backward pass support.
@@ -899,6 +924,7 @@ def mxfp4_grouped_gemm(
         use_2dblock_w,
         use_sr_grad,
         use_dge,
+        use_static_clip,
         hadamard_transform,
     )
 

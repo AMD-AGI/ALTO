@@ -15,7 +15,7 @@ from alto.kernels.mxfp8.mxfp8_quantization import (
 def prepare_data(tensor_shape, data_type, pattern="random"):
     """
     Prepare test data with specified pattern.
-
+    
     Args:
         tensor_shape: Shape of the output tensor.
         data_type: Data type (torch.float32 or torch.bfloat16).

@@ -160,6 +160,7 @@ def llama3_8b_lpt() -> Trainer.Config:
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config
 
+
 def llama3_1b_gptq() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1

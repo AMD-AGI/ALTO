@@ -50,33 +50,46 @@ def _macro_block_scaling_kernel(
     pid_b = tl.program_id(axis=0)
     pid_m = tl.program_id(axis=1)
     pid_n = tl.program_id(axis=2)
-    BLOCK_M: tl.constexpr = BLOCK_SIZE if USE_2D_BLOCK else 1
+    BLOCK_M: tl.constexpr = BLOCK_SIZE
     BLOCK_N: tl.constexpr = BLOCK_SIZE
 
     offs_m = tl.arange(0, BLOCK_M)[:, None]
     offs_n = tl.arange(0, BLOCK_N)[None, :]
-    if USE_2D_BLOCK:
-        idx_m = pid_m * BLOCK_M + offs_m
-        idx_n = pid_n * BLOCK_N + offs_n
-    else:
-        idx_m = pid_m + offs_m
-        idx_n = pid_n * BLOCK_N + offs_n
+    row_ids = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    idx_m = pid_m * BLOCK_M + offs_m
+    idx_n = pid_n * BLOCK_N + offs_n
 
     mask = (idx_m < M) & (idx_n < N)
     offs_x = pid_b * stride_xb + idx_m * stride_xm + idx_n * stride_xn
     x = tl.load(x_ptr + offs_x, mask=mask, other=0)
-    max_abs = tl.max(tl.max(tl.abs(x).to(tl.float32), axis=1), axis=0)
-    amax = tl.maximum(max_abs, 1e-12)
-    amax_int32 = (MAX_FP4_CONST / amax).to(tl.int32, bitcast=True)
-    scale = amax_int32 & 0x007F8000
-    scale_uint8 = (scale >> 15).to(tl.uint8)
-    scale_fp32 = (scale + (127 << 23)).to(tl.float32, bitcast=True)
+
+    if USE_2D_BLOCK:
+        max_abs = tl.max(tl.max(tl.abs(x).to(tl.float32), axis=1), axis=0)
+        amax = tl.maximum(max_abs, 1e-12)
+        amax_int32 = (MAX_FP4_CONST / amax).to(tl.int32, bitcast=True)
+        scale = amax_int32 & 0x007F8000
+        scale_uint8 = (scale >> 15).to(tl.uint8)
+        scale_fp32 = (scale + (127 << 23)).to(tl.float32, bitcast=True)
+    else:
+        max_abs = tl.max(tl.abs(x).to(tl.float32), axis=1)
+        amax = tl.maximum(max_abs, 1e-12)
+        amax_int32 = (MAX_FP4_CONST / amax).to(tl.int32, bitcast=True)
+        scale = amax_int32 & 0x007F8000
+        scale_uint8 = (scale >> 15).to(tl.uint8)
+        scale_fp32 = (scale + (127 << 23)).to(tl.float32, bitcast=True)[:, None]
 
     y = x * scale_fp32
     offs_y = pid_b * stride_yb + idx_m * stride_ym + idx_n * stride_yn
-    offs_s = pid_b * stride_sb + pid_m * stride_sm + pid_n * stride_sn
+    if USE_2D_BLOCK:
+        offs_s = pid_b * stride_sb + pid_m * stride_sm + pid_n * stride_sn
+    else:
+        offs_s = pid_b * stride_sb + row_ids * stride_sm + pid_n * stride_sn
+        row_mask = row_ids < M
     tl.store(y_ptr + offs_y, y.to(y_ptr.type.element_ty), mask=mask)
-    tl.store(scale_ptr + offs_s, scale_uint8)
+    if USE_2D_BLOCK:
+        tl.store(scale_ptr + offs_s, scale_uint8)
+    else:
+        tl.store(scale_ptr + offs_s, scale_uint8, mask=row_mask)
 
 
 @triton.jit
@@ -101,25 +114,28 @@ def _macro_block_descaling_kernel(
     pid_b = tl.program_id(axis=0)
     pid_m = tl.program_id(axis=1)
     pid_n = tl.program_id(axis=2)
-    BLOCK_M: tl.constexpr = BLOCK_SIZE if USE_2D_BLOCK else 1
+    BLOCK_M: tl.constexpr = BLOCK_SIZE
     BLOCK_N: tl.constexpr = BLOCK_SIZE
 
     offs_m = tl.arange(0, BLOCK_M)[:, None]
     offs_n = tl.arange(0, BLOCK_N)[None, :]
-    if USE_2D_BLOCK:
-        idx_m = pid_m * BLOCK_M + offs_m
-        idx_n = pid_n * BLOCK_N + offs_n
-    else:
-        idx_m = pid_m + offs_m
-        idx_n = pid_n * BLOCK_N + offs_n
+    row_ids = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    idx_m = pid_m * BLOCK_M + offs_m
+    idx_n = pid_n * BLOCK_N + offs_n
 
     mask = (idx_m < M) & (idx_n < N)
     offs_y = pid_b * stride_yb + idx_m * stride_ym + idx_n * stride_yn
     y = tl.load(y_ptr + offs_y, mask=mask, other=0)
 
-    offs_s = pid_b * stride_sb + pid_m * stride_sm + pid_n * stride_sn
-    scale_uint8 = tl.load(scale_ptr + offs_s).to(tl.uint32)
-    scale_fp32 = ((scale_uint8 << 15) + (127 << 23)).to(tl.float32, bitcast=True)
+    if USE_2D_BLOCK:
+        offs_s = pid_b * stride_sb + pid_m * stride_sm + pid_n * stride_sn
+        scale_uint8 = tl.load(scale_ptr + offs_s).to(tl.uint32)
+        scale_fp32 = ((scale_uint8 << 15) + (127 << 23)).to(tl.float32, bitcast=True)
+    else:
+        offs_s = pid_b * stride_sb + row_ids * stride_sm + pid_n * stride_sn
+        row_mask = row_ids < M
+        scale_uint8 = tl.load(scale_ptr + offs_s, mask=row_mask, other=127).to(tl.uint32)
+        scale_fp32 = ((scale_uint8 << 15) + (127 << 23)).to(tl.float32, bitcast=True)[:, None]
 
     x = y / scale_fp32
     offs_x = pid_b * stride_xb + idx_m * stride_xm + idx_n * stride_xn
@@ -221,24 +237,24 @@ def _macro_block_scaling_triton_impl(
     n_tiles = _ceil_div(n, MACRO_BLOCK_SIZE)
 
     if use_2d_block:
-        scale = torch.empty(
+        scale = torch.zeros(
             (bsz, m_tiles, n_tiles),
             dtype=torch.uint8,
             device=x.device,
         )
-        grid = (bsz, m_tiles, n_tiles)
     else:
-        scale = torch.empty(
+        scale = torch.zeros(
             (bsz, m, n_tiles),
             dtype=torch.uint8,
             device=x.device,
         )
-        grid = (bsz, m, n_tiles)
+    grid = (bsz, m_tiles, n_tiles)
 
     y_3d = torch.empty_like(x_3d)
     stride_xb, stride_xm, stride_xn = x_3d.stride()
     stride_yb, stride_ym, stride_yn = y_3d.stride()
     stride_sb, stride_sm, stride_sn = scale.stride()
+
     _macro_block_scaling_kernel[grid](
         x_3d,
         y_3d,
@@ -257,7 +273,6 @@ def _macro_block_scaling_triton_impl(
         MAX_FP4_CONST=MAX_FP4,
         BLOCK_SIZE=MACRO_BLOCK_SIZE,
         USE_2D_BLOCK=use_2d_block,
-        num_warps=8 if use_2d_block else 4,
     )
     if x.ndim == 2:
         y = y_3d.squeeze(0)
@@ -370,10 +385,7 @@ def _macro_block_descaling_triton_impl(
     m_tiles = _ceil_div(m, MACRO_BLOCK_SIZE)
     n_tiles = _ceil_div(n, MACRO_BLOCK_SIZE)
 
-    if use_2d_block:
-        grid = (bsz, m_tiles, n_tiles)
-    else:
-        grid = (bsz, m, n_tiles)
+    grid = (bsz, m_tiles, n_tiles)
 
     stride_yb, stride_ym, stride_yn = y_3d.stride()
     stride_xb, stride_xm, stride_xn = x_3d.stride()
@@ -395,7 +407,6 @@ def _macro_block_descaling_triton_impl(
         stride_sn,
         BLOCK_SIZE=MACRO_BLOCK_SIZE,
         USE_2D_BLOCK=use_2d_block,
-        num_warps=8 if use_2d_block else 4,
     )
 
     if y.ndim == 2:
@@ -406,8 +417,8 @@ def _macro_block_descaling_triton_impl(
 
 
 def macro_block_scaling(x: torch.Tensor, axis: int = -1, use_2d_block: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
-    # if x.is_cuda:
-    #     return _macro_block_scaling_triton_impl(x, axis=axis, use_2d_block=use_2d_block)
+    if x.is_cuda:
+        return _macro_block_scaling_triton_impl(x, axis=axis, use_2d_block=use_2d_block)
     return _macro_block_scaling_torch_impl(x, axis=axis, use_2d_block=use_2d_block)
 
 
@@ -417,6 +428,6 @@ def macro_block_descaling(
     axis: int = -1,
     use_2d_block: bool = False,
 ) -> torch.Tensor:
-    # if y.is_cuda:
-    #     return _macro_block_descaling_triton_impl(y, scale, axis=axis, use_2d_block=use_2d_block)
+    if y.is_cuda:
+        return _macro_block_descaling_triton_impl(y, scale, axis=axis, use_2d_block=use_2d_block)
     return _macro_block_descaling_torch_impl(y, scale, axis=axis, use_2d_block=use_2d_block)

@@ -531,7 +531,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 k_pack_b=not ctx.use_2dblock_x,
                 output_dtype=ctx.original_dtype,
             )
-            if ctx.clip_mode:
+            if ctx.clip_mode == "static":
                 grad_weights *= (16.0 / 9.0)
         else:
             grad_inputs = grad_output_dq @ w_dq

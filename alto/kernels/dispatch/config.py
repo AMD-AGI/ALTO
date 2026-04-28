@@ -2,24 +2,37 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import Literal
 from dataclasses import dataclass
 import torch
 
 
 @dataclass(unsafe_hash=True, kw_only=True, slots=True)
 class TrainingOpConfig:
-    precision: str
+    precision: Literal["mxfp4", "mxfp8", "nvfp4"]
     use_2dblock_x: bool
     use_2dblock_w: bool
     use_hadamard: bool
     use_sr_grad: bool
     use_dge: bool
-    # NVFP4-specific: apply a two-level (per-tensor × per-block) scale on top
-    # of the E4M3 block scales.  Ignored by precisions whose scale scheme
-    # already absorbs the global dynamic range (e.g. MXFP4's E8M0 scales),
-    # hence the default of ``False`` which preserves current behaviour for
-    # every non-NVFP4 scheme.
-    use_per_tensor_scale: bool = False
+
+    clip_mode: Literal["none", "static", "dynamic"] = "none"
+    """
+    clipping mode applied in MXFP4/NVFP4 quantization.
+    * none: no clipping
+    * static: apply a static clipping scale 3/4 before mxfp4 quantization (16/17 for nvfp4, but not implemented)
+    * dynamic: dynamic clipped scale based on the mean and std of the input tensor (only supported for mxfp4)
+    """
+
+    two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
+    """
+    apply an extra scaling factor besides the default blockwise scales of MXFP4/NVFP4.
+    * none: no extra scaling
+    * tensorwise: apply a global scale factor to the entire tensor (for NVFP4 only)
+    * blockwise:
+      * MXFP4: apply a blockwise scale factor containing shared mantissa to each block
+      * NVFP4: not implemented
+    """
 
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

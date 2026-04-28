@@ -10,3 +10,5 @@ training_stage:
       use_hadamard: true
       use_sr_grad: true
       use_dge: false
+      clip_mode: none
+      two_level_scaling: none

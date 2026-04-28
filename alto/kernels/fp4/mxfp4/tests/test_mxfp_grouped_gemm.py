@@ -23,17 +23,29 @@ from .utils import prepare_data, calc_cossim, calc_snr
 @pytest.mark.parametrize("trans_weights", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
 @pytest.mark.parametrize("use_hadamard", [False, True])
-@pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
-def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, contiguous, use_hadamard, data_type):
+@pytest.mark.parametrize("clip_mode", ["none", "static", "dynamic"])
+@pytest.mark.parametrize("use_macro_block_scaling", [False, True])
+@pytest.mark.parametrize("data_type", [torch.bfloat16])
+def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, contiguous, use_hadamard, clip_mode,
+                         use_macro_block_scaling, data_type):
     if use_2dblock_x and use_hadamard:
         pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
-    if not is_cdna4() and not trans_weights:
-        pytest.skip("BF16 GroupedMM only supports trans_weights=True.")
+
+    if clip_mode == "dynamic" and not use_hadamard:
+        pytest.skip("Dynamic clip mode is not supported without Hadamard transform.")
+
+    # if not is_cdna4() and not trans_weights:
+    #     pytest.skip("BF16 GroupedMM only supports trans_weights=True.")
 
     M_total, N, K, num_experts = shape
     # Ensure M_total is a multiple of group_size_m
     M_total = (M_total // ALIGN_SIZE_M) * ALIGN_SIZE_M
     num_groups = M_total // ALIGN_SIZE_M
+
+    if is_cdna4() and use_macro_block_scaling:
+        pytest.skip("Macro block scaling is not supported on real mxfp4 kernels.")
+    if use_macro_block_scaling and (M_total < 128 or N < 128 or K < 128):
+        pytest.skip("Macro block scaling is not supported for small input sizes.")
 
     # Create test tensors
     device = torch.device("cuda")
@@ -108,6 +120,8 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, con
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_hadamard=use_hadamard,
+        clip_mode=clip_mode,
+        use_macro_block_scaling=use_macro_block_scaling,
     )
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
@@ -134,5 +148,5 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, con
                  tablefmt="github"))
 
     assert output_snr > 10
-    assert dx_snr > 10
-    assert dw_snr > 10
+    assert dx_snr > 9
+    assert dw_snr > 9

@@ -17,7 +17,8 @@ def _quantize_then_scaled_grouped_mm(
     use_sr_grad: bool,
     use_dge: bool,
     use_hadamard: bool,
-    use_static_clip: bool,
+    clip_mode: str,
+    use_macro_block_scaling: bool,
 ) -> torch.Tensor:
     m_indices = create_indices_from_offsets_nosync(offs)
     return mxfp4_grouped_gemm(
@@ -30,5 +31,6 @@ def _quantize_then_scaled_grouped_mm(
         use_sr_grad=use_sr_grad,
         use_dge=use_dge,
         use_hadamard=use_hadamard,
-        use_static_clip=use_static_clip,
+        clip_mode=clip_mode,
+        use_macro_block_scaling=use_macro_block_scaling,
     )

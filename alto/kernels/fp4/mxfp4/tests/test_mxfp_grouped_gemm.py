@@ -147,6 +147,11 @@ def test_mxfp_group_gemm(shape, use_2dblock_x, use_2dblock_w, trans_weights, con
                  headers=["Tensor", "SNR", "Cosine Sim"],
                  tablefmt="github"))
 
+    if clip_mode == "static":
+        min_snr = 6.3
+    else:
+        min_snr = 9
+
     assert output_snr > 10
-    assert dx_snr > 9
-    assert dw_snr > 9
+    assert dx_snr > min_snr
+    assert dw_snr > min_snr

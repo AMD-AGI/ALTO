@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+
 import torch
 import torch.nn.functional as F
 import triton
@@ -237,13 +241,13 @@ def _macro_block_scaling_triton_impl(
     n_tiles = _ceil_div(n, MACRO_BLOCK_SIZE)
 
     if use_2d_block:
-        scale = torch.zeros(
+        scale = torch.empty(
             (bsz, m_tiles, n_tiles),
             dtype=torch.uint8,
             device=x.device,
         )
     else:
-        scale = torch.zeros(
+        scale = torch.empty(
             (bsz, m, n_tiles),
             dtype=torch.uint8,
             device=x.device,

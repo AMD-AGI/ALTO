@@ -11,4 +11,4 @@ training_stage:
       use_sr_grad: true
       use_dge: false
       clip_mode: none
-      two_level_scaling: none
+      two_level_scaling: blockwise

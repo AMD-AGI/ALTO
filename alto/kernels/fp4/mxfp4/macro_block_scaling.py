@@ -406,8 +406,8 @@ def _macro_block_descaling_triton_impl(
 
 
 def macro_block_scaling(x: torch.Tensor, axis: int = -1, use_2d_block: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
-    if x.is_cuda:
-        return _macro_block_scaling_triton_impl(x, axis=axis, use_2d_block=use_2d_block)
+    # if x.is_cuda:
+    #     return _macro_block_scaling_triton_impl(x, axis=axis, use_2d_block=use_2d_block)
     return _macro_block_scaling_torch_impl(x, axis=axis, use_2d_block=use_2d_block)
 
 
@@ -417,6 +417,6 @@ def macro_block_descaling(
     axis: int = -1,
     use_2d_block: bool = False,
 ) -> torch.Tensor:
-    if y.is_cuda:
-        return _macro_block_descaling_triton_impl(y, scale, axis=axis, use_2d_block=use_2d_block)
+    # if y.is_cuda:
+    #     return _macro_block_descaling_triton_impl(y, scale, axis=axis, use_2d_block=use_2d_block)
     return _macro_block_descaling_torch_impl(y, scale, axis=axis, use_2d_block=use_2d_block)

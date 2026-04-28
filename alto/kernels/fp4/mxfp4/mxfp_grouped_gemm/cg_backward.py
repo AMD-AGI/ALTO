@@ -882,7 +882,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 output_dtype=ctx.original_dtype,
             )
 
-            if ctx.clip_mode:
+            if ctx.clip_mode == "static":
                 grad_weights *= (16.0 / 9.0)
         else:
             grad_inputs = cg_grouped_gemm_backward_inputs(

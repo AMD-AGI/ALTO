@@ -26,6 +26,7 @@ import pytest
 from tabulate import tabulate
 import torch
 
+from alto.kernels.fp4.testing_utils import check_nvfp4_autograd_snr
 from alto.kernels.fp4.nvfp4.nvfp_linear import NVFP4LinearFunction, _qdq
 from .utils import prepare_data, calc_snr, calc_cossim
 
@@ -107,8 +108,10 @@ def test_nvfp4_linear_autograd_function(
 ):
     """Forward + dX + dW must match a BF16 nn.Linear reference in SNR.
 
-    The SR-on-grad path is slightly noisier than RNE (unbiased but higher
-    variance), so the threshold is 3 dB with SR and 4 dB without.
+    The check is K-aware: large reduction dimensions amplify stochastic
+    rounding noise roughly as sqrt(K), so K=2048 stress cases get a lower
+    per-tensor hard floor while small/medium cases keep tighter aggregate
+    quality checks.
     """
     B, M, N, K = shape
     inputs = prepare_data((B, M, K), data_type).requires_grad_(True)
@@ -155,10 +158,16 @@ def test_nvfp4_linear_autograd_function(
         headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github",
     ))
 
-    min_snr = 3 if use_sr_grad else 4
-    assert output_snr > min_snr, f"Output SNR too low: {output_snr:.2f}"
-    assert dx_snr     > min_snr, f"dX SNR too low: {dx_snr:.2f}"
-    assert dw_snr     > min_snr, f"dW SNR too low: {dw_snr:.2f}"
+    check_nvfp4_autograd_snr(
+        {"O": output_snr, "dX": dx_snr, "dW": dw_snr},
+        K=K,
+        use_sr_grad=use_sr_grad,
+        kind="nvfp4_linear",
+        context=(
+            f"NVFP4Linear shape={shape} dtype={data_type} "
+            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w}"
+        ),
+    )
 
 
 def test_nvfp4_linear_rejects_unaligned_axis0_activation_view():

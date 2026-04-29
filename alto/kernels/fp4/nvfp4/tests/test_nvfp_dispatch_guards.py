@@ -14,6 +14,7 @@ still routes gradients to the wrapper leaf.
 import pytest
 import torch
 
+import alto.kernels.dispatch.tensor as dispatch_tensor
 from alto.kernels.dispatch.config import TrainingOpConfig
 from alto.kernels.dispatch.tensor import NVFP4TrainingWeightWrapperTensor
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import ALIGN_SIZE_M
@@ -63,6 +64,64 @@ def test_grouped_mm_smoke(device):
     assert y.shape == (M, N)
     assert y.dtype == torch.bfloat16
     assert y.abs().max().item() > 0, "grouped_mm smoke must exercise a real matmul"
+
+
+def test_grouped_mm_routes_to_nvfp4_grouped_kernel(monkeypatch, device):
+    """Dispatch must route NVFP4-wrapped grouped_mm to the NVFP4 grouped path.
+
+    This is intentionally a lightweight mock-based test: it verifies routing
+    and argument propagation without launching the Triton grouped kernels.
+    """
+    calls = []
+
+    def _mock_grouped(A, B, *, offs, use_2dblock_x, use_2dblock_w,
+                      use_sr_grad, use_per_tensor_scale, use_hadamard, use_dge):
+        calls.append({
+            "A": A,
+            "B": B,
+            "offs": offs,
+            "use_2dblock_x": use_2dblock_x,
+            "use_2dblock_w": use_2dblock_w,
+            "use_sr_grad": use_sr_grad,
+            "use_per_tensor_scale": use_per_tensor_scale,
+            "use_hadamard": use_hadamard,
+            "use_dge": use_dge,
+        })
+        return A.new_full((A.shape[0], B.shape[-1]), 7.0)
+
+    monkeypatch.setattr(dispatch_tensor, "_quantize_then_nvfp4_scaled_grouped_mm", _mock_grouped)
+
+    cfg = _make_config(
+        use_2dblock_x=True,
+        use_2dblock_w=True,
+        use_sr_grad=True,
+        use_hadamard=True,
+        use_dge=True,
+        two_level_scaling="tensorwise",
+    )
+    num_experts, K, N, M = 2, 16, 32, ALIGN_SIZE_M
+    A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    W_wrapped = NVFP4TrainingWeightWrapperTensor(
+        torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device),
+        cfg,
+    )
+    offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
+
+    y = torch._grouped_mm(A, W_wrapped, offs=offs)
+
+    assert y.shape == (M, N)
+    assert torch.all(y == 7)
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["A"] is A
+    assert call["B"] is W_wrapped
+    assert call["offs"] is offs
+    assert call["use_2dblock_x"] is True
+    assert call["use_2dblock_w"] is True
+    assert call["use_sr_grad"] is True
+    assert call["use_per_tensor_scale"] is True
+    assert call["use_hadamard"] is True
+    assert call["use_dge"] is True
 
 
 @pytest.mark.parametrize("use_hadamard,use_dge", [
@@ -124,6 +183,53 @@ def test_linear_supported_knobs_still_work(
     y = torch.nn.functional.linear(x, W_wrapped)
     assert y.shape == (64, 32)
     assert y.dtype == torch.bfloat16
+
+
+def test_linear_routes_to_nvfp4_linear_kernel(monkeypatch, device):
+    """Dispatch must route NVFP4-wrapped F.linear to the NVFP4 linear path."""
+    calls = []
+
+    def _mock_linear(A, B, *, use_2dblock_x, use_2dblock_w, use_sr_grad,
+                     use_per_tensor_scale, use_hadamard, use_dge):
+        calls.append({
+            "A": A,
+            "B": B,
+            "use_2dblock_x": use_2dblock_x,
+            "use_2dblock_w": use_2dblock_w,
+            "use_sr_grad": use_sr_grad,
+            "use_per_tensor_scale": use_per_tensor_scale,
+            "use_hadamard": use_hadamard,
+            "use_dge": use_dge,
+        })
+        return A.new_full((A.shape[0], B.shape[0]), 5.0)
+
+    monkeypatch.setattr(dispatch_tensor, "_to_nvfp4_then_scaled_mm", _mock_linear)
+
+    cfg = _make_config(
+        use_2dblock_x=True,
+        use_2dblock_w=True,
+        use_sr_grad=True,
+        use_hadamard=True,
+        use_dge=True,
+        two_level_scaling="tensorwise",
+    )
+    W_wrapped = _make_wrapper(cfg, device=device, shape=(32, 16))
+    x = torch.randn(8, 16, dtype=torch.bfloat16, device=device)
+
+    y = torch.nn.functional.linear(x, W_wrapped)
+
+    assert y.shape == (8, 32)
+    assert torch.all(y == 5)
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["A"] is x
+    assert call["B"] is W_wrapped
+    assert call["use_2dblock_x"] is True
+    assert call["use_2dblock_w"] is True
+    assert call["use_sr_grad"] is True
+    assert call["use_per_tensor_scale"] is True
+    assert call["use_hadamard"] is True
+    assert call["use_dge"] is True
 
 
 # ---------------------------------------------------------------------------

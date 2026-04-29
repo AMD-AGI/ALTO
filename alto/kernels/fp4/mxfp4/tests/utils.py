@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import Literal
 import torch
 from torch import Tensor
 from alto.kernels.fp4.mxfp4.mxfp_quantization import (BLOCK_SIZE_DEFAULT)
@@ -286,6 +287,7 @@ def convert_to_mxfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
+    clip_mode: Literal["none", "static", "dynamic"] = "none",
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if data_hp.dtype == torch.float32:
@@ -308,13 +310,20 @@ def convert_to_mxfp4_pytorch(
         block_shape = (*orig_shape[:-2], orig_shape[-2] // block_size, orig_shape[-1] // block_size,
                        block_size * block_size)
         data_hp = data_hp.reshape(new_shape)
-
-        max_abs = torch.amax(torch.abs(data_hp.transpose(-2, -3).reshape(block_shape)), dim=-1)
+        max_abs = data_hp.transpose(-2, -3).reshape(block_shape)
     else:
         new_shape = (*orig_shape[:-1], orig_shape[-1] // block_size, block_size)
         data_hp = data_hp.reshape(new_shape)
+        max_abs = data_hp
 
-        max_abs = torch.amax(torch.abs(data_hp), dim=-1)
+    if clip_mode == "dynamic":
+        mean_squared = torch.mean(max_abs**2, dim=-1)
+        mean = torch.mean(max_abs, dim=-1)
+        std = torch.sqrt(mean_squared - mean**2)
+        max_abs = (2.92247856 / 6.0) * std + 1e-8
+        target_max_pow2 = 0
+    else:
+        max_abs = torch.amax(torch.abs(max_abs), dim=-1)
 
     # round even (adaptive)
     max_abs = max_abs.view(hp_int_dtype)
@@ -335,7 +344,12 @@ def convert_to_mxfp4_pytorch(
     scales_fp = (scales.to(hp_int_dtype) << hp_mbits).view(data_hp.dtype).unsqueeze(-1)
     if is_2d_block:
         scales_fp = scales_fp.unsqueeze(-3)
-    data_lp = data_hp / scales_fp
+    if clip_mode == "static":
+        # Note: in-place multiplication leads to incorrect results
+        data_clipped = data_hp * (3.0 / 4.0)
+    else:
+        data_clipped = data_hp
+    data_lp = data_clipped / scales_fp
 
     data_lp = data_lp.reshape(orig_shape)
     data_lp = f32_to_f4_unpacked(data_lp.float())
@@ -351,6 +365,7 @@ def convert_from_mxfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
+    clip_mode: Literal["none", "static", "dynamic"] = "none",
 ) -> torch.Tensor:
     data_lp = data_lp.transpose(axis, -1)
     scales = scales.transpose(axis, -1)
@@ -359,6 +374,8 @@ def convert_from_mxfp4_pytorch(
     f4_unpacked = unpack_uint4(data_lp)
     f32 = f4_unpacked_to_f32(f4_unpacked)
     data_hp = f32.to(output_dtype)
+    if clip_mode == "static":
+        data_hp *= 4.0 / 3.0
     orig_shape = (*orig_shape[:-1], orig_shape[-1] * 2)
 
     if is_2d_block:

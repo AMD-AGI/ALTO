@@ -239,6 +239,8 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_sr_grad=config.use_sr_grad,
                 use_dge=config.use_dge,
                 use_hadamard=config.use_hadamard,
+                clip_mode=config.clip_mode,
+                use_macro_block_scaling=config.two_level_scaling == "blockwise",
             )
 
         # linear op override
@@ -267,7 +269,9 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
                 use_dge=config.use_dge,
+                clip_mode=config.clip_mode,
                 use_hadamard=config.use_hadamard,
+                use_macro_block_scaling=config.two_level_scaling == "blockwise",
             )
             if bias is not None:
                 Y = Y + bias
@@ -296,7 +300,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
         use_sr_grad    – stochastic rounding on gradient quantization
         use_hadamard   – wgrad-path Hadamard rotation (mirrors MXFP4 behaviour)
         use_dge        – differentiable gradient estimator on wgrad (mirrors MXFP4)
-        use_per_tensor_scale – two-level NVFP4 scaling (global × per-block)
+        two_level_scaling – two-level NVFP4 scaling (global × per-block)
 
     Unsupported ops (hard-fail rather than silently fall back to BF16):
         _grouped_mm    – NVFP4 grouped GEMM is tracked in a separate branch; until
@@ -312,12 +316,10 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
         # fall through to BF16 — that would quietly violate the user's
         # ``scheme=nvfp4`` intent.
         if func.__name__ == "_grouped_mm":
-            raise NotImplementedError(
-                "NVFP4 _grouped_mm is not supported on this branch; applying "
-                "scheme='nvfp4' to GroupedExperts / MoE modules would silently "
-                "fall back to BF16. Use the NVFP4 grouped-GEMM branch, or "
-                "restrict the 'nvfp4' scheme to Linear targets."
-            )
+            raise NotImplementedError("NVFP4 _grouped_mm is not supported on this branch; applying "
+                                      "scheme='nvfp4' to GroupedExperts / MoE modules would silently "
+                                      "fall back to BF16. Use the NVFP4 grouped-GEMM branch, or "
+                                      "restrict the 'nvfp4' scheme to Linear targets.")
 
         # linear / mm overrides
         if func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
@@ -328,17 +330,12 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 A, B = args[0], args[1]
                 bias = args[2] if len(args) > 2 else None
 
-            assert not isinstance(A, cls), (
-                f"A should not be a {cls.__name__} for func {func.__name__}"
-            )
-            assert isinstance(B, cls), (
-                f"B should be a {cls.__name__} for func {func.__name__}"
-            )
+            assert not isinstance(A, cls), (f"A should not be a {cls.__name__} for func {func.__name__}")
+            assert isinstance(B, cls), (f"B should be a {cls.__name__} for func {func.__name__}")
 
             config = B.config
             assert config.precision == "nvfp4", (
-                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}"
-            )
+                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}")
 
             # Pass the wrapper tensor itself into the autograd function —
             # matching the MXFP4 path — so that any upstream subclass
@@ -355,7 +352,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
-                use_per_tensor_scale=config.use_per_tensor_scale,
+                use_per_tensor_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )

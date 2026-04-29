@@ -50,7 +50,7 @@ class BlockwiseFP8LinearFunction(torch.autograd.Function):
             torch.Tensor: Output tensor after linear transformation.
         """
         original_shape = x.shape
-        x = x.contiguous().view(-1, original_shape[-1])  # Ensure x is 2D
+        x = x.reshape(-1, original_shape[-1])  # Ensure x is 2D
 
         x, x_scale = fp8_blockwise_act_quant(x, block_size)
         weight, w_scale = fp8_blockwise_weight_quant(weight, block_size)

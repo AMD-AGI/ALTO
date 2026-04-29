@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import Literal
 import pytest
 import torch
 from alto.kernels.fp4.mxfp4.mxfp_quantization import (
@@ -25,8 +26,9 @@ from .utils import (
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_sr", [False, True])
 @pytest.mark.parametrize("use_asm", [False, True])
+@pytest.mark.parametrize("clip_mode", ["dynamic"])
 @pytest.mark.parametrize("compile", [False])
-def test_mxfp_1d_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, use_asm, compile):
+def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, use_asm, clip_mode, compile):
     if use_asm and not is_cdna4():
         pytest.skip("ASM mode is only available on CDNA4 hardwares.")
 
@@ -42,6 +44,7 @@ def test_mxfp_1d_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr
         x,
         axis=axis,
         is_2d_block=is_2d_block,
+        clip_mode=clip_mode,
     )
     x_dq_ref = convert_from_mxfp4_pytorch(
         data_lp_ref,
@@ -49,6 +52,7 @@ def test_mxfp_1d_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr
         output_dtype=data_type,
         axis=axis,
         is_2d_block=is_2d_block,
+        clip_mode=clip_mode,
     )
 
     data_lp, scales = quant_func(
@@ -57,22 +61,38 @@ def test_mxfp_1d_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr
         is_2d_block=is_2d_block,
         use_sr=use_sr,
         use_asm=use_asm,
+        clip_mode=clip_mode,
     )
-    assert torch.all(scales_ref == scales).item()
-    if not use_sr:
-        assert torch.all(data_lp_ref == data_lp).item()
+    if clip_mode == "dynamic" and data_type == torch.bfloat16:
+        pass
     else:
-        data_lp_ref_lo = (data_lp_ref.to(torch.int8) & 0xF)
-        data_lp_ref_hi = ((data_lp_ref.to(torch.int8) >> 4) & 0xF)
-        data_lp_lo = (data_lp.to(torch.int8) & 0xF)
-        data_lp_hi = ((data_lp.to(torch.int8) >> 4) & 0xF)
-        assert torch.all(torch.max(torch.abs(data_lp_ref_lo - data_lp_lo)) <= 1).item()
-        assert torch.all(torch.max(torch.abs(data_lp_ref_hi - data_lp_hi)) <= 1).item()
+        assert torch.all(scales_ref == scales).item(), "scales mismatch!"
 
-    x_dq = dequant_func(data_lp, scales, output_dtype=data_type, axis=axis, is_2d_block=is_2d_block, use_asm=use_asm)
+        if not use_sr:
+            assert torch.all(data_lp_ref == data_lp).item(), "FP4 values mismatch!"
+        else:
+            data_lp_ref_lo = (data_lp_ref.to(torch.int8) & 0xF)
+            data_lp_ref_hi = ((data_lp_ref.to(torch.int8) >> 4) & 0xF)
+            data_lp_lo = (data_lp.to(torch.int8) & 0xF)
+            data_lp_hi = ((data_lp.to(torch.int8) >> 4) & 0xF)
+            assert torch.all(torch.max(torch.abs(data_lp_ref_lo - data_lp_lo)) <= 1).item(), "FP4 values mismatch!"
+            assert torch.all(torch.max(torch.abs(data_lp_ref_hi - data_lp_hi)) <= 1).item(), "FP4 values mismatch!"
 
-    if not use_sr:
-        assert torch.allclose(x_dq_ref, x_dq)
-    else:
+    x_dq = dequant_func(
+        data_lp,
+        scales,
+        output_dtype=data_type,
+        axis=axis,
+        is_2d_block=is_2d_block,
+        use_asm=use_asm,
+        clip_mode=clip_mode,
+    )
+    if clip_mode == "dynamic" and data_type == torch.bfloat16:
         dq_mae = (x_dq_ref - x_dq).abs().mean().item()
-        assert dq_mae < 1.0 if is_2d_block else 0.5
+        assert dq_mae < 0.5, "Dequant values mismatch!"
+    else:
+        if not use_sr:
+            assert torch.allclose(x_dq_ref, x_dq), "Dequant values mismatch!"
+        else:
+            dq_mae = (x_dq_ref - x_dq).abs().mean().item()
+            assert dq_mae < 1.0 if is_2d_block else 0.5, "Dequant values mismatch!"

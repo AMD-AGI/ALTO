@@ -32,6 +32,7 @@ def _calculate_scales(
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
+    USE_DYNAMIC_CLIP: tl.constexpr = False,
 ):
     if x.type.element_ty == tl.float32:
         hp_int_dtype = tl.int32
@@ -49,11 +50,25 @@ def _calculate_scales(
     if IS_2D_BLOCK:
         NEW_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
         x = x.reshape(NEW_BLOCK_M, QUANT_BLOCK_SIZE, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
-        max_abs = tl.max(tl.abs(x), axis=-1)
-        max_abs = tl.max(max_abs, axis=-2)
+        if USE_DYNAMIC_CLIP:
+            mean_squared = tl.sum(tl.sum(x * x, axis=-1), axis=-2) / (QUANT_BLOCK_SIZE * QUANT_BLOCK_SIZE)
+            mean = tl.sum(tl.sum(x, axis=-1), axis=-2) / (QUANT_BLOCK_SIZE * QUANT_BLOCK_SIZE)
+            std = tl.sqrt(mean_squared - mean * mean)
+            max_abs = (2.92247856 / 6.0) * std + 1e-8
+            target_max_pow2 = 0
+        else:
+            max_abs = tl.max(tl.abs(x), axis=-1)
+            max_abs = tl.max(max_abs, axis=-2)
     else:
         x = x.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
-        max_abs = tl.max(tl.abs(x), axis=-1)
+        if USE_DYNAMIC_CLIP:
+            mean_squared = tl.sum(x * x, axis=-1) / QUANT_BLOCK_SIZE
+            mean = tl.sum(x, axis=-1) / QUANT_BLOCK_SIZE
+            std = tl.sqrt(mean_squared - mean * mean)
+            max_abs = (2.92247856 / 6.0) * std + 1e-8
+            target_max_pow2 = 0
+        else:
+            max_abs = tl.max(tl.abs(x), axis=-1)
     max_abs = max_abs.to(x.type.element_ty)
 
     # round even (adaptive)
@@ -252,6 +267,8 @@ def _convert_to_mxfp4_kernel(
     IS_2D_BLOCK: tl.constexpr,
     USE_SR: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_STATIC_CLIP: tl.constexpr,
+    USE_DYNAMIC_CLIP: tl.constexpr,
 ):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
@@ -290,7 +307,12 @@ def _convert_to_mxfp4_kernel(
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
+        USE_DYNAMIC_CLIP=USE_DYNAMIC_CLIP,
     )
+
+    if USE_STATIC_CLIP:
+        x *= (3.0 / 4.0)
+
     y = _pack_fp4(
         x,
         scales,
@@ -325,6 +347,7 @@ def _convert_from_mxfp4_kernel(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_STATIC_CLIP: tl.constexpr = False,
 ):
     """
     Dequantizes the input tensor `x_ptr` with scaling factors in `s_ptr`, and stores the result in `y_ptr`.
@@ -370,6 +393,8 @@ def _convert_from_mxfp4_kernel(
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_ASM=USE_ASM,
     )
+    if USE_STATIC_CLIP:
+        y *= (4.0 / 3.0)
     offs_y = offs_m[:, None] * stride_ym + offs_yn[None, :] * stride_yn
     tl.store(y_ptr + offs_y, y)
 
@@ -384,12 +409,24 @@ def convert_to_mxfp4(
     use_asm: Optional[bool] = None,
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
+    clip_mode: str = "none",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if use_asm is None:
         use_asm = is_cdna4()
+    if clip_mode == "none":
+        use_static_clip = False
+        use_dynamic_clip = False
+    elif clip_mode == "static":
+        use_static_clip = True
+        use_dynamic_clip = False
+    elif clip_mode == "dynamic":
+        use_static_clip = False
+        use_dynamic_clip = True
+    else:
+        raise ValueError(f"Invalid clip mode: {clip_mode}")
     data_hp = data_hp.transpose(axis, -1)
     ori_shape = data_hp.shape
     data_hp = data_hp.reshape(-1, ori_shape[-1])
@@ -430,6 +467,8 @@ def convert_to_mxfp4(
         IS_2D_BLOCK=is_2d_block,
         USE_SR=use_sr,
         USE_ASM=use_asm,
+        USE_STATIC_CLIP=use_static_clip,
+        USE_DYNAMIC_CLIP=use_dynamic_clip,
     )
 
     return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
@@ -444,11 +483,22 @@ def convert_from_mxfp4(
     axis: int = -1,
     is_2d_block: bool = False,
     use_asm: Optional[bool] = None,
+    clip_mode: str = "none",
 ) -> torch.Tensor:
     assert output_dtype in [torch.float32, torch.bfloat16]
     if use_asm is None:
         use_asm = is_cdna4()
-
+    if clip_mode == "none":
+        use_static_clip = False
+        use_dynamic_clip = False
+    elif clip_mode == "static":
+        use_static_clip = True
+        use_dynamic_clip = False
+    elif clip_mode == "dynamic":
+        use_static_clip = False
+        use_dynamic_clip = True
+    else:
+        raise ValueError(f"Invalid clip mode: {clip_mode}")
     data_lp = data_lp.transpose(axis, -1)
     scales = scales.transpose(axis, -1)
     orig_shape = data_lp.shape
@@ -480,6 +530,7 @@ def convert_from_mxfp4(
         QUANT_BLOCK_SIZE=block_size,
         IS_2D_BLOCK=is_2d_block,
         USE_ASM=use_asm,
+        USE_STATIC_CLIP=use_static_clip,
     )
     return data_hp.reshape(orig_shape).transpose(axis, -1)
 
@@ -492,6 +543,7 @@ def _fake_convert_to_mxfp4(
     is_2d_block: bool = False,
     use_sr: bool = False,
     use_asm: Optional[bool] = None,
+    use_static_clip: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     data_hp = data_hp.transpose(axis, -1)
     orig_shape = data_hp.shape
@@ -516,6 +568,7 @@ def _fake_convert_from_mxfp4(
     axis: int = -1,
     is_2d_block: bool = False,
     use_asm: Optional[bool] = None,
+    use_static_clip: bool = False,
 ) -> torch.Tensor:
     data_hp = data_lp.new_empty(data_lp.shape, dtype=output_dtype)
     return torch.cat((data_hp, data_hp), dim=axis)

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import triton
@@ -248,6 +248,11 @@ def _convert_to_nvfp4_kernel(
     stride_sn,
     philox_seed,
     philox_offset,
+    M_ACTUAL,
+    N_ACTUAL,
+    PACKED_N_ACTUAL,
+    SCALE_M_ACTUAL,
+    SCALE_N_ACTUAL,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -278,7 +283,11 @@ def _convert_to_nvfp4_kernel(
     tl.static_assert(
         (x_ptr.type.element_ty == tl.float32) | (x_ptr.type.element_ty == tl.bfloat16)
     )
-    x = tl.load(x_ptr + offs_x)
+    x = tl.load(
+        x_ptr + offs_x,
+        mask=(offs_m[:, None] < M_ACTUAL) & (offs_xn[None, :] < N_ACTUAL),
+        other=0,
+    )
 
     out_scale, quant_scale = _calculate_nvfp4_scales(
         x,
@@ -302,8 +311,16 @@ def _convert_to_nvfp4_kernel(
         USE_SR=USE_SR,
     )
 
-    tl.store(y_ptr + offs_y, y.to(y_ptr.type.element_ty))
-    tl.store(s_ptr + offs_s, out_scale)
+    tl.store(
+        y_ptr + offs_y,
+        y.to(y_ptr.type.element_ty),
+        mask=(offs_m[:, None] < M_ACTUAL) & (offs_yn[None, :] < PACKED_N_ACTUAL),
+    )
+    tl.store(
+        s_ptr + offs_s,
+        out_scale,
+        mask=(offs_sm[:, None] < SCALE_M_ACTUAL) & (offs_sn[None, :] < SCALE_N_ACTUAL),
+    )
 
 
 @triton.jit
@@ -318,6 +335,11 @@ def _convert_from_nvfp4_kernel(
     stride_yn,
     stride_sm,
     stride_sn,
+    M_ACTUAL,
+    N_ACTUAL,
+    PACKED_N_ACTUAL,
+    SCALE_M_ACTUAL,
+    SCALE_N_ACTUAL,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -344,8 +366,16 @@ def _convert_from_nvfp4_kernel(
     offs_y = offs_m[:, None] * stride_ym + offs_yn[None, :] * stride_yn
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
 
-    x = tl.load(x_ptr + offs_x)
-    s = tl.load(s_ptr + offs_s)
+    x = tl.load(
+        x_ptr + offs_x,
+        mask=(offs_m[:, None] < M_ACTUAL) & (offs_xn[None, :] < PACKED_N_ACTUAL),
+        other=0,
+    )
+    s = tl.load(
+        s_ptr + offs_s,
+        mask=(offs_sm[:, None] < SCALE_M_ACTUAL) & (offs_sn[None, :] < SCALE_N_ACTUAL),
+        other=0,
+    )
 
     if USE_PER_TENSOR_SCALE:
         per_tensor_scale = tl.load(per_tensor_scale_ptr)
@@ -361,7 +391,11 @@ def _convert_from_nvfp4_kernel(
         IS_2D_BLOCK=IS_2D_BLOCK,
     )
 
-    tl.store(y_ptr + offs_y, y.to(y_ptr.type.element_ty))
+    tl.store(
+        y_ptr + offs_y,
+        y.to(y_ptr.type.element_ty),
+        mask=(offs_m[:, None] < M_ACTUAL) & (offs_yn[None, :] < N_ACTUAL),
+    )
 
 
 def compute_dynamic_per_tensor_scale(
@@ -422,7 +456,7 @@ def convert_to_nvfp4(
     """
     torch._check(
         data_hp.shape[axis] % block_size == 0,
-        f"tensor shape ({data_hp.shape}) at axis={axis} is not divisible by {block_size}",
+        lambda: f"tensor shape ({data_hp.shape}) at axis={axis} is not divisible by {block_size}",
     )
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     assert block_size % 2 == 0 and block_size >= 2, (
@@ -443,10 +477,10 @@ def convert_to_nvfp4(
                        ori_shape[-1] // block_size)
     else:
         scale_shape = (*ori_shape[:-1], ori_shape[-1] // block_size)
-    data_lp = torch.empty(new_shape, dtype=torch.uint8, device=data_hp.device).reshape(
+    data_lp = torch.zeros(new_shape, dtype=torch.uint8, device=data_hp.device).reshape(
         -1, new_shape[-1]
     )
-    scales = torch.empty(scale_shape, dtype=torch.float32, device=data_hp.device).reshape(
+    scales = torch.zeros(scale_shape, dtype=torch.float32, device=data_hp.device).reshape(
         -1, scale_shape[-1]
     )
 
@@ -501,6 +535,11 @@ def convert_to_nvfp4(
         stride_sn,
         philox_seed,
         philox_offset,
+        M,
+        N,
+        data_lp.shape[1],
+        scales.shape[0],
+        scales.shape[1],
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
@@ -578,6 +617,11 @@ def convert_from_nvfp4(
         stride_yn,
         stride_sm,
         stride_sn,
+        M,
+        N,
+        data_lp.shape[1],
+        scales.shape[0],
+        scales.shape[1],
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
@@ -630,3 +674,57 @@ def _fake_convert_from_nvfp4(
 ) -> torch.Tensor:
     data_hp = data_lp.new_empty(data_lp.shape, dtype=output_dtype)
     return torch.cat((data_hp, data_hp), dim=axis)
+
+
+def _qdq(
+    tensor: torch.Tensor,
+    *,
+    axis: int,
+    is_2d_block: bool,
+    use_per_tensor_scale: bool,
+    use_sr: bool = False,
+    block_size: int = 16,
+    return_raw: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Quantize to NVFP4 then immediately dequantize back (QDQ round-trip).
+
+    This helper is the core building block used to emulate the numerical effect
+    of a future pure-NVFP4 GEMM path. Even though the current implementation
+    executes the final matrix multiplications in BF16, every operand first goes
+    through an explicit NVFP4 round-trip so the surrounding autograd code can
+    model how a native FP4 kernel would see its inputs.
+
+    When ``return_raw=True``, the packed FP4 data tensor (``uint8``) and the
+    per-block scales (``float32`` held as E4M3-round-tripped values) are also
+    returned alongside the dequantized BF16 view. This is used by the DGE
+    backward path to recover the exact FP4 bin each weight element fell into
+    without paying a second quantization pass.
+    """
+    pts = (
+        torch.empty(1, dtype=torch.float32, device=tensor.device)
+        if use_per_tensor_scale
+        else None
+    )
+    data_lp, scales = convert_to_nvfp4(
+        tensor,
+        block_size=block_size,
+        axis=axis,
+        is_2d_block=is_2d_block,
+        per_tensor_scale=pts,
+        # With pts provided, refresh it in-place from tensor.amax(); without
+        # pts, skip tensor-wise scaling entirely.
+        update_per_tensor_scale=use_per_tensor_scale,
+        use_sr=use_sr,
+    )
+    dq = convert_from_nvfp4(
+        data_lp,
+        scales,
+        output_dtype=tensor.dtype,
+        block_size=block_size,
+        axis=axis,
+        is_2d_block=is_2d_block,
+        per_tensor_scale=pts,
+    )
+    if return_raw:
+        return dq, data_lp, scales
+    return dq

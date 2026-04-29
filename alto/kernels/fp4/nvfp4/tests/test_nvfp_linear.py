@@ -77,6 +77,9 @@ def test_nvfp4_qdq_roundtrip(
     # 2D + SR is the weakest combination (E4M3 block-scale rounding plus
     # stochastic-rounding variance), so its cossim floor is the loosest.
     min_snr = 8 if not is_2d_block else 5
+    # 2D block + SR case: E4M3 block scale rounding reduces precision slightly
+    # compared to float32 scales.  The SNR threshold (5 dB) is the binding
+    # criterion here; cosine similarity is set conservatively at 0.94.
     min_cossim = 0.99 if not is_2d_block else (0.94 if use_sr else 0.99)
     assert snr > min_snr, f"QDQ SNR too low: {snr:.2f}"
     assert cossim > min_cossim, f"QDQ cosine similarity too low: {cossim:.6f}"
@@ -156,3 +159,38 @@ def test_nvfp4_linear_autograd_function(
     assert output_snr > min_snr, f"Output SNR too low: {output_snr:.2f}"
     assert dx_snr     > min_snr, f"dX SNR too low: {dx_snr:.2f}"
     assert dw_snr     > min_snr, f"dW SNR too low: {dw_snr:.2f}"
+
+
+def test_nvfp4_linear_rejects_unaligned_axis0_activation_view():
+    """1D wgrad activation QDQ must fail fast when the leading dim is not
+    divisible by the NVFP4 block size, rather than silently reusing the fprop
+    axis=-1 view and changing the recipe."""
+    # Use a non-multiple of 16 that is still > 64 so the Triton tile size stays
+    # at BLOCK_M=64 (power-of-2) and the test reaches our runtime guard rather
+    # than failing earlier in Triton's shape checks.
+    x = prepare_data((150, 32), torch.bfloat16)
+    w = prepare_data((32, 32), torch.bfloat16)
+    with pytest.raises(RuntimeError, match="activation QDQ requires"):
+        _ = NVFP4LinearFunction.apply(
+            x, w,
+            False,  # use_2dblock_x
+            True,   # use_2dblock_w -> keep the weight side aligned so x trips first
+            False,
+            False,
+        )
+
+
+def test_nvfp4_linear_rejects_unaligned_axis0_weight_view():
+    """1D wgrad weight QDQ must fail fast when the leading dim is not
+    divisible by the NVFP4 block size, rather than silently reusing the fprop
+    axis=-1 view and changing the recipe."""
+    x = prepare_data((16, 32), torch.bfloat16)
+    w = prepare_data((150, 32), torch.bfloat16)
+    with pytest.raises(RuntimeError, match="weight QDQ requires"):
+        _ = NVFP4LinearFunction.apply(
+            x, w,
+            True,   # use_2dblock_x -> keep activation side aligned so w trips first
+            False,  # use_2dblock_w
+            False,
+            False,
+        )

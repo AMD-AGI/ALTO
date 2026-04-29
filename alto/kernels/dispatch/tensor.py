@@ -398,9 +398,6 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert config.precision == "mxfp8", (
                 f"expected TrainingOpConfig with precision=mxfp8, got {config.precision}"
             )
-            assert not config.use_2dblock_x and not config.use_2dblock_w, (
-                "MXFP8 dispatch currently supports only 1D block scaling."
-            )
             assert not config.use_hadamard and not config.use_dge, (
                 "MXFP8 dispatch does not support Hadamard or DGE options."
             )
@@ -409,6 +406,8 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 A,
                 B if trans_b else B.T,
                 use_sr_grad=config.use_sr_grad,
+                use_2dblock_x=config.use_2dblock_x,
+                use_2dblock_w=config.use_2dblock_w,
             )
             if bias is not None:
                 Y = Y + bias

@@ -47,9 +47,15 @@ def blockwise_mxfp8_gemm_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     FP8_FORMAT: tl.constexpr,  # 0=e4m3, 1=e5m2
+    USE_2DBLOCK_A: tl.constexpr,
+    USE_2DBLOCK_B: tl.constexpr,
     USE_DOT_SCALED: tl.constexpr,
     DEBUG_PRINT: tl.constexpr = False,
 ):
+    if USE_2DBLOCK_A:
+        tl.assume(BLOCK_SIZE_M % QUANT_BLOCK_SIZE == 0)
+    if USE_2DBLOCK_B:
+        tl.assume(BLOCK_SIZE_N % QUANT_BLOCK_SIZE == 0)
     tl.assume(BLOCK_SIZE_K % QUANT_BLOCK_SIZE == 0)
 
     n_rep_k: tl.constexpr = BLOCK_SIZE_K // QUANT_BLOCK_SIZE
@@ -63,6 +69,8 @@ def blockwise_mxfp8_gemm_kernel(
     mask_m = offs_m < M
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     mask_n = offs_n < N
+    offs_m_scale = offs_m // QUANT_BLOCK_SIZE if USE_2DBLOCK_A else offs_m
+    offs_n_scale = offs_n // QUANT_BLOCK_SIZE if USE_2DBLOCK_B else offs_n
 
     if DEBUG_PRINT:
         tl.device_print("=== GEMM DEBUG ===")
@@ -86,9 +94,9 @@ def blockwise_mxfp8_gemm_kernel(
 
         offs_k_scale = i * n_rep_k + tl.arange(0, n_rep_k)
         mask_k_scale = offs_k_scale < Ks
-        a_s_ptrs = a_s_ptr + offs_m[:, None] * stride_asm + offs_k_scale[None, :] * stride_ask
+        a_s_ptrs = a_s_ptr + offs_m_scale[:, None] * stride_asm + offs_k_scale[None, :] * stride_ask
         # B scales are loaded as [N, K//block_size] even though the logical B operand is [K, N].
-        b_s_ptrs = b_s_ptr + offs_n[:, None] * stride_bsn + offs_k_scale[None, :] * stride_bsk
+        b_s_ptrs = b_s_ptr + offs_n_scale[:, None] * stride_bsn + offs_k_scale[None, :] * stride_bsk
 
         a = tl.load(a_ptrs, mask=mask_a, other=0.0)
         b = tl.load(b_ptrs, mask=mask_b, other=0.0)
@@ -149,6 +157,8 @@ def blockwise_mxfp8_gemm(
     b_s: torch.Tensor,
     trans_a: bool = False,
     trans_b: bool = False,
+    use_2dblock_a: bool = False,
+    use_2dblock_b: bool = False,
     block_size: int = BLOCK_SIZE_DEFAULT,
     output_dtype: torch.dtype = torch.float32,
     use_dot_scaled: Optional[bool] = None,
@@ -159,6 +169,7 @@ def blockwise_mxfp8_gemm(
 
     A scales layout: [M, K//block_size] (trans_a=False) or [K//block_size, M] (trans_a=True).
     B scales layout: [N, K//block_size] (trans_b=True) or [K//block_size, N] (trans_b=False).
+    With 2D scaling, the non-reduction dimension is also divided by block_size.
     """
     if use_dot_scaled is None:
         use_dot_scaled = is_cdna4()
@@ -178,32 +189,56 @@ def blockwise_mxfp8_gemm(
         K, M = a.shape
         if K % block_size != 0:
             raise ValueError(f"K={K} must be divisible by block_size={block_size}")
-        assert a_s.shape == torch.Size((K // block_size, M)), \
-            f"A scale has shape {a_s.shape}, expected {(K // block_size, M)}"
+        if use_2dblock_a:
+            if M % block_size != 0:
+                raise ValueError(f"M={M} must be divisible by block_size={block_size} for 2D A scales")
+            expected_a_s_shape = (K // block_size, M // block_size)
+        else:
+            expected_a_s_shape = (K // block_size, M)
+        assert a_s.shape == torch.Size(expected_a_s_shape), \
+            f"A scale has shape {a_s.shape}, expected {expected_a_s_shape}"
         stride_ak, stride_am = a.stride()
         stride_ask, stride_asm = a_s.stride()
     else:
         M, K = a.shape
         if K % block_size != 0:
             raise ValueError(f"K={K} must be divisible by block_size={block_size}")
-        assert a_s.shape == torch.Size((M, K // block_size)), \
-            f"A scale has shape {a_s.shape}, expected {(M, K // block_size)}"
+        if use_2dblock_a:
+            if M % block_size != 0:
+                raise ValueError(f"M={M} must be divisible by block_size={block_size} for 2D A scales")
+            expected_a_s_shape = (M // block_size, K // block_size)
+        else:
+            expected_a_s_shape = (M, K // block_size)
+        assert a_s.shape == torch.Size(expected_a_s_shape), \
+            f"A scale has shape {a_s.shape}, expected {expected_a_s_shape}"
         stride_am, stride_ak = a.stride()
         stride_asm, stride_ask = a_s.stride()
 
     if trans_b:
         N, KB = b.shape
         assert KB == K, f"B reduction dim ({KB}) does not match A ({K})"
-        assert b_s.shape == torch.Size((N, K // block_size)), \
-            f"B scale has shape {b_s.shape}, expected {(N, K // block_size)}"
+        if use_2dblock_b:
+            if N % block_size != 0:
+                raise ValueError(f"N={N} must be divisible by block_size={block_size} for 2D B scales")
+            expected_b_s_shape = (N // block_size, K // block_size)
+        else:
+            expected_b_s_shape = (N, K // block_size)
+        assert b_s.shape == torch.Size(expected_b_s_shape), \
+            f"B scale has shape {b_s.shape}, expected {expected_b_s_shape}"
         stride_bn, stride_bk = b.stride()
         stride_bsn, stride_bsk = b_s.stride()
     else:
         KB, N = b.shape
         assert KB == K, f"B reduction dim ({KB}) does not match A ({K})"
         # b_s stored as [K//block_size, N]; kernel accesses as [N, K//block_size] via swapped strides
-        assert b_s.shape == torch.Size((K // block_size, N)), \
-            f"B scale has shape {b_s.shape}, expected {(K // block_size, N)}"
+        if use_2dblock_b:
+            if N % block_size != 0:
+                raise ValueError(f"N={N} must be divisible by block_size={block_size} for 2D B scales")
+            expected_b_s_shape = (K // block_size, N // block_size)
+        else:
+            expected_b_s_shape = (K // block_size, N)
+        assert b_s.shape == torch.Size(expected_b_s_shape), \
+            f"B scale has shape {b_s.shape}, expected {expected_b_s_shape}"
         stride_bk, stride_bn = b.stride()
         stride_bsk, stride_bsn = b_s.stride()
 
@@ -233,6 +268,7 @@ def blockwise_mxfp8_gemm(
         print(f"b.shape={b.shape}, b.stride()={b.stride()}")
         print(f"a_s.shape={a_s.shape}, a_s.stride()={a_s.stride()}")
         print(f"b_s.shape={b_s.shape}, b_s.stride()={b_s.stride()}")
+        print(f"use_2dblock_a={use_2dblock_a}, use_2dblock_b={use_2dblock_b}")
         print(f"stride_am={stride_am}, stride_ak={stride_ak}")
         print(f"stride_bn={stride_bn}, stride_bk={stride_bk}")
         print(f"stride_asm={stride_asm}, stride_ask={stride_ask}")
@@ -252,6 +288,8 @@ def blockwise_mxfp8_gemm(
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         QUANT_BLOCK_SIZE=block_size,
         FP8_FORMAT=fp8_format_id,
+        USE_2DBLOCK_A=use_2dblock_a,
+        USE_2DBLOCK_B=use_2dblock_b,
         USE_DOT_SCALED=use_dot_scaled,
         DEBUG_PRINT=debug_print,
     )
@@ -270,6 +308,8 @@ class MXFP8LinearFunction(torch.autograd.Function):
         weight: torch.Tensor,
         mxfp_format: str = "e4m3",
         use_sr_grad: bool = False,
+        use_2dblock_x: bool = False,
+        use_2dblock_w: bool = False,
     ) -> torch.Tensor:
         weight = unwrap_weight_wrapper(weight)
 
@@ -289,14 +329,14 @@ class MXFP8LinearFunction(torch.autograd.Function):
             block_size=BLOCK_SIZE_DEFAULT,
             mxfp_format=mxfp_format,
             axis=-1,
-            is_2d_block=False,
+            is_2d_block=use_2dblock_x,
         )
         w_lp, w_scales = torch.ops.alto.convert_to_mxfp8(
             weight,
             block_size=BLOCK_SIZE_DEFAULT,
             mxfp_format=mxfp_format,
             axis=-1,
-            is_2d_block=False,
+            is_2d_block=use_2dblock_w,
         )
 
         y = torch.ops.alto.blockwise_mxfp8_gemm(
@@ -305,27 +345,37 @@ class MXFP8LinearFunction(torch.autograd.Function):
             w_lp,
             w_scales,
             trans_b=True,
+            use_2dblock_a=use_2dblock_x,
+            use_2dblock_b=use_2dblock_w,
             block_size=BLOCK_SIZE_DEFAULT,
             output_dtype=output_dtype,
         )
 
-        x_m_lp, x_m_scales = torch.ops.alto.convert_to_mxfp8(
-            x_2d,
-            block_size=BLOCK_SIZE_DEFAULT,
-            mxfp_format=mxfp_format,
-            axis=0,
-            is_2d_block=False,
-        )
-        w_m_lp, w_m_scales = torch.ops.alto.convert_to_mxfp8(
-            weight,
-            block_size=BLOCK_SIZE_DEFAULT,
-            mxfp_format=mxfp_format,
-            axis=0,
-            is_2d_block=False,
-        )
+        if use_2dblock_x:
+            x_m_lp, x_m_scales = x_lp, x_scales
+        else:
+            x_m_lp, x_m_scales = torch.ops.alto.convert_to_mxfp8(
+                x_2d,
+                block_size=BLOCK_SIZE_DEFAULT,
+                mxfp_format=mxfp_format,
+                axis=0,
+                is_2d_block=False,
+            )
+        if use_2dblock_w:
+            w_m_lp, w_m_scales = w_lp, w_scales
+        else:
+            w_m_lp, w_m_scales = torch.ops.alto.convert_to_mxfp8(
+                weight,
+                block_size=BLOCK_SIZE_DEFAULT,
+                mxfp_format=mxfp_format,
+                axis=0,
+                is_2d_block=False,
+            )
 
         ctx.save_for_backward(x_m_lp, x_m_scales, w_m_lp, w_m_scales)
         ctx.use_sr_grad = use_sr_grad
+        ctx.use_2dblock_x = use_2dblock_x
+        ctx.use_2dblock_w = use_2dblock_w
         ctx.mxfp_format = mxfp_format
         ctx.output_dtype = output_dtype
         ctx.input_shape = original_shape
@@ -337,28 +387,41 @@ class MXFP8LinearFunction(torch.autograd.Function):
         original_shape = grad_output.shape
         grad_output_2d = grad_output.reshape(-1, original_shape[-1])
 
-        grad_lp, grad_scales = torch.ops.alto.convert_to_mxfp8(
-            grad_output_2d,
-            block_size=BLOCK_SIZE_DEFAULT,
-            mxfp_format=ctx.mxfp_format,
-            axis=-1,
-            is_2d_block=False,
-            use_sr=ctx.use_sr_grad,
-        )
-        grad_m_lp, grad_m_scales = torch.ops.alto.convert_to_mxfp8(
-            grad_output_2d,
-            block_size=BLOCK_SIZE_DEFAULT,
-            mxfp_format=ctx.mxfp_format,
-            axis=0,
-            is_2d_block=False,
-            use_sr=ctx.use_sr_grad,
-        )
+        if ctx.use_2dblock_x:
+            grad_lp, grad_scales = torch.ops.alto.convert_to_mxfp8(
+                grad_output_2d,
+                block_size=BLOCK_SIZE_DEFAULT,
+                mxfp_format=ctx.mxfp_format,
+                axis=-1,
+                is_2d_block=True,
+                use_sr=ctx.use_sr_grad,
+            )
+            grad_m_lp, grad_m_scales = grad_lp, grad_scales
+        else:
+            grad_lp, grad_scales = torch.ops.alto.convert_to_mxfp8(
+                grad_output_2d,
+                block_size=BLOCK_SIZE_DEFAULT,
+                mxfp_format=ctx.mxfp_format,
+                axis=-1,
+                is_2d_block=False,
+                use_sr=ctx.use_sr_grad,
+            )
+            grad_m_lp, grad_m_scales = torch.ops.alto.convert_to_mxfp8(
+                grad_output_2d,
+                block_size=BLOCK_SIZE_DEFAULT,
+                mxfp_format=ctx.mxfp_format,
+                axis=0,
+                is_2d_block=False,
+                use_sr=ctx.use_sr_grad,
+            )
 
         grad_input = torch.ops.alto.blockwise_mxfp8_gemm(
             grad_lp,
             grad_scales,
             w_m_lp,
             w_m_scales,
+            use_2dblock_a=ctx.use_2dblock_x,
+            use_2dblock_b=ctx.use_2dblock_w,
             block_size=BLOCK_SIZE_DEFAULT,
             output_dtype=ctx.output_dtype,
         )
@@ -368,10 +431,12 @@ class MXFP8LinearFunction(torch.autograd.Function):
             x_m_lp,
             x_m_scales,
             trans_a=True,
+            use_2dblock_a=ctx.use_2dblock_x,
+            use_2dblock_b=ctx.use_2dblock_x,
             block_size=BLOCK_SIZE_DEFAULT,
             output_dtype=ctx.output_dtype,
         )
-        return grad_input.view(*ctx.input_shape), grad_weight, None, None
+        return grad_input.view(*ctx.input_shape), grad_weight, None, None, None, None
 
 
 def _to_mxfp8_then_scaled_mm(
@@ -379,6 +444,8 @@ def _to_mxfp8_then_scaled_mm(
     b: torch.Tensor,
     mxfp_format: str = "e4m3",
     use_sr_grad: bool = False,
+    use_2dblock_x: bool = False,
+    use_2dblock_w: bool = False,
 ) -> torch.Tensor:
     # Backward-compatible public wrapper around MXFP8LinearFunction.apply.
     return MXFP8LinearFunction.apply(
@@ -386,4 +453,6 @@ def _to_mxfp8_then_scaled_mm(
         b,
         mxfp_format,
         use_sr_grad,
+        use_2dblock_x,
+        use_2dblock_w,
     )

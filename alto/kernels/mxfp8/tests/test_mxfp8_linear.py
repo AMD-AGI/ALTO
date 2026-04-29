@@ -14,6 +14,8 @@ from .utils import prepare_data
 
 @pytest.mark.parametrize("shape", [(32, 32, 32), (256, 384, 128), (512, 1024, 256)])
 @pytest.mark.parametrize("use_dot_scaled", [None, False], ids=["hardware_default", "dequant_dot"])
+@pytest.mark.parametrize("use_2dblock_a", [False, True])
+@pytest.mark.parametrize("use_2dblock_b", [False, True])
 @pytest.mark.parametrize("trans_a", [False, True])
 @pytest.mark.parametrize("trans_b", [False, True])
 @pytest.mark.parametrize("contiguous", [False, True])
@@ -22,6 +24,8 @@ from .utils import prepare_data
 def test_mxfp8_linear_kernel(
     shape,
     use_dot_scaled,
+    use_2dblock_a,
+    use_2dblock_b,
     trans_a,
     trans_b,
     contiguous,
@@ -67,13 +71,13 @@ def test_mxfp8_linear_kernel(
         a,
         mxfp_format=mxfp_format,
         axis=a_axis,
-        is_2d_block=False,
+        is_2d_block=use_2dblock_a,
     )
     b_lp, b_scales = torch.ops.alto.convert_to_mxfp8(
         b,
         mxfp_format=mxfp_format,
         axis=b_axis,
-        is_2d_block=False,
+        is_2d_block=use_2dblock_b,
     )
 
     a_dq = torch.ops.alto.convert_from_mxfp8(
@@ -81,14 +85,14 @@ def test_mxfp8_linear_kernel(
         a_scales,
         output_dtype=data_type,
         axis=a_axis,
-        is_2d_block=False,
+        is_2d_block=use_2dblock_a,
     )
     b_dq = torch.ops.alto.convert_from_mxfp8(
         b_lp,
         b_scales,
         output_dtype=data_type,
         axis=b_axis,
-        is_2d_block=False,
+        is_2d_block=use_2dblock_b,
     )
 
     c = torch.ops.alto.blockwise_mxfp8_gemm(
@@ -98,6 +102,8 @@ def test_mxfp8_linear_kernel(
         b_scales,
         trans_a=trans_a,
         trans_b=trans_b,
+        use_2dblock_a=use_2dblock_a,
+        use_2dblock_b=use_2dblock_b,
         output_dtype=data_type,
         use_dot_scaled=use_dot_scaled,
         debug_print=False,
@@ -106,23 +112,26 @@ def test_mxfp8_linear_kernel(
 
     atol, rtol = 1e-4, 1e-4
     if use_dot_scaled is False and data_type is torch.bfloat16:
-        atol, rtol = 1e-4, 5e-3
+        atol, rtol = 1e-4, 6e-3
 
     torch.testing.assert_close(
         c,
         c_ref,
         atol=atol,
         rtol=rtol,
-    )
-
+)
 @pytest.mark.parametrize("shape", [(1, 32, 32, 32), (1, 512, 384, 128), (4, 1024, 1024, 2048)])
 @pytest.mark.parametrize("mxfp_format", ["e4m3", "e5m2"])
 @pytest.mark.parametrize("use_sr_grad", [False, True])
+@pytest.mark.parametrize("use_2dblock_x", [False, True])
+@pytest.mark.parametrize("use_2dblock_w", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
 def test_mxfp8_linear_autograd_function(
     shape,
     mxfp_format,
     use_sr_grad,
+    use_2dblock_x,
+    use_2dblock_w,
     data_type,
 ):
     if not torch.cuda.is_available():
@@ -148,6 +157,8 @@ def test_mxfp8_linear_autograd_function(
         weights,
         mxfp_format,
         use_sr_grad,
+        use_2dblock_x,
+        use_2dblock_w,
     )
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()

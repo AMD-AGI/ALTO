@@ -64,6 +64,11 @@ INTERVALS = {t: (BREAK_POINTS[t][1:] - BREAK_POINTS[t][:-1]).to(hp_dtype) for t 
 def dge_fwd(x, dtype):
     break_points = BREAK_POINTS[dtype].to(x.device)
     intervals = INTERVALS[dtype].to(x.device)
+    # torch.searchsorted internally materializes non-contiguous inputs and emits
+    # a performance warning.  Make that copy explicit so DGE callers can pass
+    # axis-transposed QDQ views without noisy test output.
+    if not x.is_contiguous():
+        x = x.contiguous()
     idx = torch.searchsorted(break_points, x, right=False, out_int32=True) - 1
     idx = torch.where(idx < 0, 0, idx)
     idx = torch.where(idx >= len(break_points) - 1, len(break_points) - 2, idx)
@@ -76,6 +81,9 @@ def dge_fwd(x, dtype):
 def dge_bwd(x, dtype):
     break_points = BREAK_POINTS[dtype].to(x.device)
     intervals = INTERVALS[dtype].to(x.device)
+    # See dge_fwd: searchsorted expects contiguous values for the fast path.
+    if not x.is_contiguous():
+        x = x.contiguous()
     idx = torch.searchsorted(break_points, x, right=False, out_int32=True) - 1
     idx = torch.where(idx < 0, 0, idx)
     idx = torch.where(idx >= len(break_points) - 1, len(break_points) - 2, idx)

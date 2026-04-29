@@ -27,7 +27,12 @@ from tabulate import tabulate
 import torch
 
 from alto.kernels.fp4.testing_utils import check_nvfp4_autograd_snr
-from alto.kernels.fp4.nvfp4.nvfp_linear import NVFP4LinearFunction, _qdq
+from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.fp4.nvfp4.nvfp_linear import (
+    NVFP4LinearFunction,
+    _qdq,
+    _to_nvfp4_then_scaled_mm,
+)
 from .utils import prepare_data, calc_snr, calc_cossim
 
 
@@ -168,6 +173,78 @@ def test_nvfp4_linear_autograd_function(
             f"x_2d={use_2dblock_x} w_2d={use_2dblock_w}"
         ),
     )
+
+
+@pytest.mark.parametrize("shape,use_2dblock_x,use_2dblock_w", [
+    # Shared with both NVFP4 and MXFP4 linear-autograd test matrices.
+    ((1, 512, 384, 128), False, False),
+    ((1, 512, 384, 128), False, True),
+    ((4, 1024, 1024, 2048), False, False),
+])
+def test_nvfp4_linear_forward_compares_with_mxfp4_on_shared_cases(
+    shape, use_2dblock_x, use_2dblock_w,
+):
+    """NVFP4 and MXFP4 forward paths should both stay close to BF16 reference.
+
+    This is not an equality test between formats: NVFP4 uses E4M3 block scales
+    and MXFP4 uses E8M0 scales, so their quantization errors differ.  The goal
+    is to make sure both format families run on representative dense-linear
+    cases that already exist in both original test suites and remain in a
+    reasonable SNR band versus the same BF16 reference.
+    """
+    B, M, N, K = shape
+    dtype = torch.bfloat16
+    x = prepare_data((B, M, K), dtype)
+    w = prepare_data((N, K), dtype)
+    # Use one BF16 reference for both formats.  The comparison is therefore
+    # "NVFP4 vs BF16" and "MXFP4 vs BF16", not "NVFP4 vs MXFP4".
+    y_ref = torch.nn.functional.linear(x, w)
+
+    # Keep both recipes deliberately minimal and analogous: 1D block scales,
+    # deterministic rounding on the forward path, no clipping, no Hadamard,
+    # no DGE, no macro/outer scaling.  This keeps the test focused on whether
+    # each format family can run the same dense-linear shape and produce a
+    # finite output with reasonable forward error.
+    y_nv = _to_nvfp4_then_scaled_mm(
+        x,
+        w,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=False,
+        use_per_tensor_scale=False,
+    )
+    y_mx = _to_mxfp4_then_scaled_mm(
+        x,
+        w,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=False,
+        use_dge=False,
+        clip_mode="none",
+        use_hadamard=False,
+        use_macro_block_scaling=False,
+    )
+
+    nv_snr = calc_snr(y_ref, y_nv)
+    mx_snr = calc_snr(y_ref, y_mx)
+    print()
+    print(tabulate(
+        [
+            ["NVFP4", f"{nv_snr:.2f}", f"{calc_cossim(y_ref, y_nv):.6f}"],
+            ["MXFP4", f"{mx_snr:.2f}", f"{calc_cossim(y_ref, y_mx):.6f}"],
+        ],
+        headers=["Format", "SNR", "Cosine Sim"], tablefmt="github",
+    ))
+
+    assert torch.isfinite(y_nv).all()
+    assert torch.isfinite(y_mx).all()
+    # The two formats use different scale encodings (NVFP4: E4M3 block scale;
+    # MXFP4: E8M0 block scale), so bitwise equality is neither expected nor
+    # useful.  A 10 dB forward-SNR floor is intentionally loose enough to avoid
+    # making this test a recipe-quality benchmark, but tight enough to catch
+    # routing or catastrophic quantization regressions.
+    assert nv_snr > 10, f"NVFP4 forward SNR too low: {nv_snr:.2f}"
+    assert mx_snr > 10, f"MXFP4 forward SNR too low: {mx_snr:.2f}"
 
 
 def test_nvfp4_linear_rejects_unaligned_axis0_activation_view():

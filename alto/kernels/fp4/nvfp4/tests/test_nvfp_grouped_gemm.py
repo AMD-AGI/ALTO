@@ -39,6 +39,7 @@ from tabulate import tabulate
 import torch
 
 from alto.kernels.fp4.testing_utils import check_nvfp4_autograd_snr
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm import mxfp4_grouped_gemm
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import (
     ALIGN_SIZE_M,
     nvfp4_grouped_gemm,
@@ -173,6 +174,96 @@ def test_nvfp4_grouped_gemm_autograd(
             f"(min {fwd_min_snr})"
         )
         assert o_sim > 0.95, f"Forward CosSim too low: {o_sim:.6f}"
+
+
+@pytest.mark.parametrize("shape,trans_weights,use_2dblock_x,use_2dblock_w", [
+    # Shared with the MXFP4 grouped-GEMM test matrix.  Cover both expert-weight
+    # layouts without adding the full MXFP4 combinatorial grid here.
+    ((1024, 512, 512, 8), True,  False, False),
+    ((1024, 512, 512, 8), False, False, True),
+])
+def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
+    shape, trans_weights, use_2dblock_x, use_2dblock_w,
+):
+    """NVFP4 and MXFP4 grouped forward paths should both track BF16 reference.
+
+    The formats are not expected to match each other bitwise.  This comparison
+    only checks that both grouped-GEMM families run on representative
+    routed-expert cases that already exist in both original test suites and
+    remain within a reasonable forward-error band against BF16.
+    """
+    M_total, N, K, num_experts = shape
+    M_total = (M_total // ALIGN_SIZE_M) * ALIGN_SIZE_M
+    num_groups = M_total // ALIGN_SIZE_M
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    inputs = prepare_data((M_total, K), dtype)
+    expert_weights = prepare_data(
+        (num_experts, N, K) if trans_weights else (num_experts, K, N),
+        dtype,
+    )
+    expert_indices = _make_contiguous_expert_indices(
+        M_total, num_groups, num_experts, device,
+    )
+    # Build one BF16 routed-expert reference and compare both FP4 formats
+    # against it independently.  The test does not assert NVFP4 and MXFP4 are
+    # numerically identical; their scale formats and quantization errors differ.
+    y_ref = _bf16_grouped_ref_forward(
+        inputs,
+        expert_weights,
+        expert_indices,
+        M_total,
+        N,
+        num_groups,
+        trans_weights=trans_weights,
+    )
+
+    # Use analogous minimal grouped recipes for both format families.  In
+    # particular, do not enable MXFP4 clipping or macro-block scaling here:
+    # those are valuable recipe knobs, but this test is only a cross-format
+    # smoke/reference check for the common routed-expert shape.
+    y_nv = nvfp4_grouped_gemm(
+        inputs,
+        expert_weights,
+        expert_indices,
+        trans_weights=trans_weights,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=False,
+    )
+    y_mx = mxfp4_grouped_gemm(
+        inputs,
+        expert_weights,
+        expert_indices,
+        trans_weights=trans_weights,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=False,
+        use_dge=False,
+        use_hadamard=False,
+        clip_mode="none",
+        use_macro_block_scaling=False,
+    )
+
+    nv_snr = calc_snr(y_ref, y_nv)
+    mx_snr = calc_snr(y_ref, y_mx)
+    print()
+    print(tabulate(
+        [
+            ["NVFP4", f"{nv_snr:.2f}", f"{calc_cossim(y_ref, y_nv):.6f}"],
+            ["MXFP4", f"{mx_snr:.2f}", f"{calc_cossim(y_ref, y_mx):.6f}"],
+        ],
+        headers=["Format", "SNR", "CosSim"], tablefmt="github",
+    ))
+
+    assert torch.isfinite(y_nv).all()
+    assert torch.isfinite(y_mx).all()
+    # Forward SNR against BF16 is the invariant we care about.  A 10 dB floor
+    # catches wrong routing / scale handling while avoiding brittle assumptions
+    # about one FP4 format matching the other.
+    assert nv_snr > 10, f"NVFP4 grouped forward SNR too low: {nv_snr:.2f}"
+    assert mx_snr > 10, f"MXFP4 grouped forward SNR too low: {mx_snr:.2f}"
 
 
 # ---------------------------------------------------------------------------

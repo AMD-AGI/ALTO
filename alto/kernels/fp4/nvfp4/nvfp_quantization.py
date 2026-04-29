@@ -477,10 +477,10 @@ def convert_to_nvfp4(
                        ori_shape[-1] // block_size)
     else:
         scale_shape = (*ori_shape[:-1], ori_shape[-1] // block_size)
-    data_lp = torch.zeros(new_shape, dtype=torch.uint8, device=data_hp.device).reshape(
+    data_lp = torch.empty(new_shape, dtype=torch.uint8, device=data_hp.device).reshape(
         -1, new_shape[-1]
     )
-    scales = torch.zeros(scale_shape, dtype=torch.float32, device=data_hp.device).reshape(
+    scales = torch.empty(scale_shape, dtype=torch.float32, device=data_hp.device).reshape(
         -1, scale_shape[-1]
     )
 

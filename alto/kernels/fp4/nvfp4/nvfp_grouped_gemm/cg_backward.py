@@ -48,11 +48,13 @@ def _nvfp4_grouped_dgrad(
     there is no transpose on the hot path.
     """
     if use_cdna4_grouped_backend():
-        # Defensive ``.contiguous()`` at the CDNA4 kernel boundary (see
-        # cg_forward for rationale).
+        # The CDNA4 dgrad kernel computes pointer offsets from caller-supplied
+        # strides, so non-contiguous ``grad_output`` / ``expert_weights`` are
+        # consumed natively (see ``_kernel_cg_backward_dx`` in
+        # ``alto/kernels/blockwise_fp8/grouped_gemm/cg_backward.py``).
         return cg_grouped_gemm_backward_inputs(
-            grad_output.contiguous(),
-            expert_weights.contiguous(),
+            grad_output,
+            expert_weights,
             expert_indices,
         ).to(output_dtype)
 
@@ -102,10 +104,11 @@ def _nvfp4_grouped_wgrad(
         )
 
     if use_cdna4_grouped_backend():
-        # Defensive ``.contiguous()`` at the CDNA4 kernel boundary.
+        # The CDNA4 wgrad kernel consumes non-contiguous tensors via
+        # caller-supplied strides; no defensive ``.contiguous()`` needed.
         return cg_grouped_gemm_backward_weights(
-            g_m_dq.contiguous(),
-            x_bwd.contiguous(),
+            g_m_dq,
+            x_bwd,
             expert_indices,
             num_experts=num_experts,
         ).to(output_dtype)

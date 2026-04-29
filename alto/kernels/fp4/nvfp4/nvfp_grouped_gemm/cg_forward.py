@@ -47,13 +47,14 @@ def _nvfp4_grouped_fprop(
     group at a time without per-group host syncs.
     """
     if use_cdna4_grouped_backend():
-        # The CDNA4 kernels assert ``is_contiguous`` on every buffer; keep a
-        # defensive ``.contiguous()`` here because non-last-axis QDQ outputs
-        # can otherwise arrive as strided views.  These are O(1) no-ops when
-        # the tensor is already contiguous (the usual case).
+        # The CDNA4 grouped GEMM kernels now compute pointer offsets from
+        # caller-supplied strides (``stride_am``/``stride_be``/...), so they
+        # consume non-contiguous ``inputs`` / ``expert_weights`` natively.
+        # ``expert_indices`` is the only tensor still required to be
+        # contiguous; that is enforced upstream by ``resolve_expert_indices``.
         return cg_grouped_gemm_forward(
-            inputs.contiguous(),
-            expert_weights.contiguous(),
+            inputs,
+            expert_weights,
             expert_indices,
         ).to(output_dtype)
 

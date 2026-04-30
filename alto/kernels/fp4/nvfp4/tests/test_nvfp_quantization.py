@@ -210,3 +210,33 @@ def test_nvfp4_special_values(tensor_shape, axis, data_type, pattern):
     assert torch.equal(x_dq_ref, x_dq), (
         f"Dequant mismatch for pattern={pattern}"
     )
+
+
+@pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
+def test_nvfp4_non_aligned_m_no_nan_inf(data_type):
+    """Regression for the pre-existing edge-tile bug on non-aligned M.
+
+    Historically ``convert_to_nvfp4`` / ``convert_from_nvfp4`` could emit
+    garbage scales or NaN/Inf outputs when the leading dimension was not a
+    multiple of the Triton tile size (64), even though it was still divisible
+    by the quant block size (16).  The kernel now uses masked load/store on
+    edge tiles, so a shape such as (150, 128) must remain finite throughout.
+    """
+    x = prepare_data((150, 128), data_type)
+    data_lp, scales = convert_to_nvfp4(
+        x,
+        block_size=16,
+        axis=-1,
+        is_2d_block=False,
+        update_per_tensor_scale=False,
+    )
+    x_dq = convert_from_nvfp4(
+        data_lp,
+        scales,
+        output_dtype=data_type,
+        block_size=16,
+        axis=-1,
+        is_2d_block=False,
+    )
+    assert torch.isfinite(scales).all(), "non-aligned M produced Inf/NaN scales"
+    assert torch.isfinite(x_dq).all(), "non-aligned M produced Inf/NaN dequant output"

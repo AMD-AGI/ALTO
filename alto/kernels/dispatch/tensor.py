@@ -16,8 +16,11 @@ from torchao.utils import TorchAOBaseTensor
 from torchtitan.tools.logging import logger
 
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
-from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_scaled_grouped_mm
+from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_mxfp_scaled_grouped_mm
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
+from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
+    _quantize_then_nvfp4_scaled_grouped_mm,
+)
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten
@@ -229,7 +232,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # logger.info(
             #     f"[MXFP4GroupedMM]config: {config} A.shape: {A.shape} B.shape: {B.shape} offs.shape: {offs.shape}")
 
-            return _quantize_then_scaled_grouped_mm(
+            return _quantize_then_mxfp_scaled_grouped_mm(
                 A,
                 B,
                 offs=offs,
@@ -301,27 +304,49 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
         use_dge        – differentiable gradient estimator on wgrad (mirrors MXFP4)
         two_level_scaling – two-level NVFP4 scaling (global × per-block)
 
-    Unsupported ops (hard-fail rather than silently fall back to BF16):
-        _grouped_mm    – NVFP4 grouped GEMM is tracked in a separate branch; until
-                         it lands here, applying ``scheme=nvfp4`` to a
-                         ``GroupedExperts`` module is rejected to avoid
-                         quietly running those matmuls in BF16.
+    Supported ops:
+        linear / mm / addmm / matmul  – routed through ``_to_nvfp4_then_scaled_mm``
+        _grouped_mm                    – routed through
+                                         ``_quantize_then_nvfp4_scaled_grouped_mm``
+                                         (2D × 3D with ``offs`` for MoE routed
+                                         experts)
+
     """
 
     @classmethod
     def __torch_function__(cls, func, types, args, kwargs={}):
-        # Grouped-matmul (MoE routed experts).  NVFP4 does not yet implement a
-        # grouped GEMM path, so refuse the call instead of letting it silently
-        # fall through to BF16 — that would quietly violate the user's
-        # ``scheme=nvfp4`` intent.
+        # grouped_mm op override (MoE expert routing)
         if func.__name__ == "_grouped_mm":
-            raise NotImplementedError("NVFP4 _grouped_mm is not supported on this branch; applying "
-                                      "scheme='nvfp4' to GroupedExperts / MoE modules would silently "
-                                      "fall back to BF16. Use the NVFP4 grouped-GEMM branch, or "
-                                      "restrict the 'nvfp4' scheme to Linear targets.")
+            A, B = args[0], args[1]
+            bias = kwargs.get("bias", None)
+            offs = kwargs.get("offs", None)
+
+            assert not isinstance(A, cls), f"A should not be a {cls.__name__}"
+            assert isinstance(B, cls), f"B should be a {cls.__name__}"
+            assert A.ndim == 2 and B.ndim == 3 and offs is not None, (
+                "Only 2d x 3d with offsets is supported for NVFP4 grouped_mm"
+            )
+            assert bias is None, "Bias is not supported for grouped_mm"
+
+            config = B.config
+            assert config.precision == "nvfp4", (
+                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}"
+            )
+
+            return _quantize_then_nvfp4_scaled_grouped_mm(
+                A,
+                B,
+                offs=offs,
+                use_2dblock_x=config.use_2dblock_x,
+                use_2dblock_w=config.use_2dblock_w,
+                use_sr_grad=config.use_sr_grad,
+                use_per_tensor_scale=config.two_level_scaling == "tensorwise",
+                use_hadamard=config.use_hadamard,
+                use_dge=config.use_dge,
+            )
 
         # linear / mm overrides
-        if func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
+        elif func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
             trans_b = func.__name__ == "linear"
             if func.__name__ == "addmm.default":
                 bias, A, B = args[0], args[1], args[2]

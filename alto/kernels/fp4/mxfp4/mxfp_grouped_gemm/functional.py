@@ -8,7 +8,7 @@ from alto.kernels.dsgemm_utils import create_indices_from_offsets_nosync
 from .cg_backward import mxfp4_grouped_gemm
 
 
-def _quantize_then_scaled_grouped_mm(
+def _quantize_then_mxfp_scaled_grouped_mm(
     A: torch.Tensor,
     B: torch.Tensor,
     offs: torch.Tensor,

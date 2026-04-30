@@ -306,15 +306,15 @@ class MXFP8LinearFunction(torch.autograd.Function):
         ctx,
         x: torch.Tensor,
         weight: torch.Tensor,
-        mxfp_format: str = "e4m3",
+        fp8_variant: str = "e4m3",
         use_sr_grad: bool = False,
         use_2dblock_x: bool = False,
         use_2dblock_w: bool = False,
     ) -> torch.Tensor:
         weight = unwrap_weight_wrapper(weight)
 
-        if mxfp_format not in SUPPORTED_FORMATS:
-            raise ValueError(f"Unsupported format: {mxfp_format}. Supported: {SUPPORTED_FORMATS}")
+        if fp8_variant not in SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported FP8 variant: {fp8_variant}. Supported: {SUPPORTED_FORMATS}")
         if x.dtype not in (torch.float32, torch.bfloat16):
             raise ValueError(f"x dtype must be float32/bfloat16, got {x.dtype}")
         if weight.dtype != x.dtype:
@@ -327,14 +327,14 @@ class MXFP8LinearFunction(torch.autograd.Function):
         x_lp, x_scales = torch.ops.alto.convert_to_mxfp8(
             x_2d,
             block_size=BLOCK_SIZE_DEFAULT,
-            mxfp_format=mxfp_format,
+            mxfp_format=fp8_variant,
             axis=-1,
             is_2d_block=use_2dblock_x,
         )
         w_lp, w_scales = torch.ops.alto.convert_to_mxfp8(
             weight,
             block_size=BLOCK_SIZE_DEFAULT,
-            mxfp_format=mxfp_format,
+            mxfp_format=fp8_variant,
             axis=-1,
             is_2d_block=use_2dblock_w,
         )
@@ -357,7 +357,7 @@ class MXFP8LinearFunction(torch.autograd.Function):
             x_m_lp, x_m_scales = torch.ops.alto.convert_to_mxfp8(
                 x_2d,
                 block_size=BLOCK_SIZE_DEFAULT,
-                mxfp_format=mxfp_format,
+                mxfp_format=fp8_variant,
                 axis=0,
                 is_2d_block=False,
             )
@@ -367,7 +367,7 @@ class MXFP8LinearFunction(torch.autograd.Function):
             w_m_lp, w_m_scales = torch.ops.alto.convert_to_mxfp8(
                 weight,
                 block_size=BLOCK_SIZE_DEFAULT,
-                mxfp_format=mxfp_format,
+                mxfp_format=fp8_variant,
                 axis=0,
                 is_2d_block=False,
             )
@@ -376,7 +376,7 @@ class MXFP8LinearFunction(torch.autograd.Function):
         ctx.use_sr_grad = use_sr_grad
         ctx.use_2dblock_x = use_2dblock_x
         ctx.use_2dblock_w = use_2dblock_w
-        ctx.mxfp_format = mxfp_format
+        ctx.fp8_variant = fp8_variant
         ctx.output_dtype = output_dtype
         ctx.input_shape = original_shape
         return y.view(*original_shape[:-1], -1)
@@ -391,7 +391,7 @@ class MXFP8LinearFunction(torch.autograd.Function):
             grad_lp, grad_scales = torch.ops.alto.convert_to_mxfp8(
                 grad_output_2d,
                 block_size=BLOCK_SIZE_DEFAULT,
-                mxfp_format=ctx.mxfp_format,
+                mxfp_format=ctx.fp8_variant,
                 axis=-1,
                 is_2d_block=True,
                 use_sr=ctx.use_sr_grad,
@@ -401,7 +401,7 @@ class MXFP8LinearFunction(torch.autograd.Function):
             grad_lp, grad_scales = torch.ops.alto.convert_to_mxfp8(
                 grad_output_2d,
                 block_size=BLOCK_SIZE_DEFAULT,
-                mxfp_format=ctx.mxfp_format,
+                mxfp_format=ctx.fp8_variant,
                 axis=-1,
                 is_2d_block=False,
                 use_sr=ctx.use_sr_grad,
@@ -409,7 +409,7 @@ class MXFP8LinearFunction(torch.autograd.Function):
             grad_m_lp, grad_m_scales = torch.ops.alto.convert_to_mxfp8(
                 grad_output_2d,
                 block_size=BLOCK_SIZE_DEFAULT,
-                mxfp_format=ctx.mxfp_format,
+                mxfp_format=ctx.fp8_variant,
                 axis=0,
                 is_2d_block=False,
                 use_sr=ctx.use_sr_grad,
@@ -442,16 +442,15 @@ class MXFP8LinearFunction(torch.autograd.Function):
 def _to_mxfp8_then_scaled_mm(
     a: torch.Tensor,
     b: torch.Tensor,
-    mxfp_format: str = "e4m3",
+    fp8_variant: str = "e4m3",
     use_sr_grad: bool = False,
     use_2dblock_x: bool = False,
     use_2dblock_w: bool = False,
 ) -> torch.Tensor:
-    # Backward-compatible public wrapper around MXFP8LinearFunction.apply.
     return MXFP8LinearFunction.apply(
         a,
         b,
-        mxfp_format,
+        fp8_variant,
         use_sr_grad,
         use_2dblock_x,
         use_2dblock_w,

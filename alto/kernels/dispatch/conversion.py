@@ -29,7 +29,7 @@ def _get_tensor_cls_for_config(config: TrainingOpConfig) -> Type[torch.Tensor]:
 
     if config.precision == "mxfp4":
         return MXFP4TrainingWeightWrapperTensor
-    elif config.precision == "mxfp8":
+    elif config.precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
         return MXFP8TrainingWeightWrapperTensor
     elif config.precision == "nvfp4":
         return NVFP4TrainingWeightWrapperTensor

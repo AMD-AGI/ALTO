@@ -368,12 +368,17 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
 class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
     """Weight tensor subclass that routes linear calls through MXFP8LinearFunction."""
 
+    _PRECISION_TO_FP8_VARIANT = {
+        "mxfp8_e4m3": "e4m3",
+        "mxfp8_e5m2": "e5m2",
+    }
+
     @classmethod
     def __torch_function__(cls, func, types, args, kwargs={}):
         if func.__name__ == "_grouped_mm":
             raise NotImplementedError(
                 "MXFP8 _grouped_mm is not supported by this dispatch path; "
-                "restrict scheme='mxfp8' to Linear targets."
+                "restrict MXFP8 schemes to Linear targets."
             )
 
         if func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
@@ -392,8 +397,9 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             )
 
             config = B.config
-            assert config.precision == "mxfp8", (
-                f"expected TrainingOpConfig with precision=mxfp8, got {config.precision}"
+            assert config.precision in cls._PRECISION_TO_FP8_VARIANT, (
+                "expected TrainingOpConfig with precision in "
+                f"{tuple(cls._PRECISION_TO_FP8_VARIANT)}, got {config.precision}"
             )
             assert not config.use_hadamard and not config.use_dge, (
                 "MXFP8 dispatch does not support Hadamard or DGE options."
@@ -402,6 +408,7 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             Y = _to_mxfp8_then_scaled_mm(
                 A,
                 B if trans_b else B.T,
+                fp8_variant=cls._PRECISION_TO_FP8_VARIANT[config.precision],
                 use_sr_grad=config.use_sr_grad,
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,

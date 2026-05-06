@@ -76,14 +76,24 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
     ) -> torch.Tensor:
-        M_total = inputs.shape[0]
+        M_bufferlen = inputs.shape[0]
         original_dtype = inputs.dtype
         expert_weights = unwrap_weight_wrapper(expert_weights)
+        # Align weight dtype with activation so saved QDQ tensors share a
+        # common dtype across forward / backward under AMP autocast.
+        if expert_weights.dtype != original_dtype:
+            expert_weights = expert_weights.to(dtype=original_dtype)
         expert_indices = resolve_expert_indices(
-            expert_indices=expert_indices, offs=offs, M_total=M_total,
+            expert_indices=expert_indices, offs=offs, M_total=M_bufferlen,
         )
+        # M_total is the routed-token count (<= M_bufferlen when MoE wrappers
+        # pad the activation buffer); kernels output [M_bufferlen, N] with
+        # zeros in padding rows.
+        M_total = expert_indices.shape[0]
         num_experts = expert_weights.shape[0]
-        check_grouped_axis0_qdq_contract(M_total, location="NVFP4GroupedGEMM.forward")
+        # axis=0 QDQ runs on the full buffer, so its alignment check uses
+        # M_bufferlen; the loop fallback iterates only over routed rows.
+        check_grouped_axis0_qdq_contract(M_bufferlen, location="NVFP4GroupedGEMM.forward")
         num_groups: Optional[int] = None
         if not use_cdna4_grouped_backend():
             check_grouped_loop_contract(M_total, where="NVFP4GroupedGEMM.forward")
@@ -163,6 +173,13 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             x_bwd, w_bwd, expert_indices, w_raw_fp4, w_raw_scales = ctx.saved_tensors
         else:
             x_bwd, w_bwd, expert_indices = ctx.saved_tensors
+
+        # Saved QDQ tensors carry forward's dtype; align them with
+        # grad_output to avoid BF16 vs FP32 mismatches under AMP autocast.
+        if x_bwd.dtype != grad_output.dtype:
+            x_bwd = x_bwd.to(dtype=grad_output.dtype)
+        if w_bwd.dtype != grad_output.dtype:
+            w_bwd = w_bwd.to(dtype=grad_output.dtype)
 
         num_groups = ctx.num_groups
         if num_groups is None:

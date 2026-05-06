@@ -102,8 +102,11 @@ def resolve_expert_indices(
 ) -> torch.Tensor:
     """Normalize routing information to a contiguous int32 expert-index tensor.
 
-    Accepts either a pre-materialized ``expert_indices`` tensor or cumulative
-    offsets ``offs``.  If both are ``None`` the call fails fast.
+    Accepts either ``expert_indices`` or cumulative ``offs``.  ``M_total`` is
+    the activation buffer length (``inputs.shape[0]``); the returned tensor
+    has length equal to the number of routed tokens, which may be smaller
+    when callers pad the buffer (e.g. GPT-OSS ``indices_padding_wrapper``).
+    Trailing un-routed rows are treated as zeros by the grouped GEMM kernels.
     """
     if expert_indices is None:
         torch._check(offs is not None, lambda: "Either expert_indices or offs must be provided.")
@@ -113,10 +116,10 @@ def resolve_expert_indices(
     if not expert_indices.is_contiguous():
         expert_indices = expert_indices.contiguous()
     torch._check(
-        expert_indices.shape[0] == M_total,
+        expert_indices.shape[0] <= M_total,
         lambda: (
-            f"expert_indices.shape[0] ({expert_indices.shape[0]}) must match "
-            f"M_total ({M_total})."
+            f"expert_indices.shape[0] ({expert_indices.shape[0]}) must not "
+            f"exceed activation buffer length M_total ({M_total})."
         ),
     )
     return expert_indices

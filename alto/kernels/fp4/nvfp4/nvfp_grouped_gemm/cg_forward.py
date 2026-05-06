@@ -59,16 +59,24 @@ def _nvfp4_grouped_fprop(
         ).to(output_dtype)
 
     assert num_groups is not None, "_nvfp4_grouped_fprop: loop fallback requires num_groups"
-    M_total = inputs.shape[0]
+    # Only the first M_total rows are routed; trailing rows are buffer
+    # padding from the upstream MoE wrapper and must yield zero output rows.
+    M_bufferlen = inputs.shape[0]
+    M_total = num_groups * ALIGN_SIZE_M
     check_grouped_loop_contract(M_total, where="_nvfp4_grouped_fprop", align_size_m=ALIGN_SIZE_M)
     K = inputs.shape[1]
     N = expert_weights.shape[1]
     group_ids = group_ids_from_expert_indices(expert_indices, num_groups, align_size_m=ALIGN_SIZE_M)
-    x_groups = inputs.view(num_groups, ALIGN_SIZE_M, K)
+    x_groups = inputs[:M_total].view(num_groups, ALIGN_SIZE_M, K)
     y_groups = torch.zeros((num_groups, ALIGN_SIZE_M, N), dtype=output_dtype, device=inputs.device)
     for eid in range(expert_weights.shape[0]):
         mask = group_ids == eid
         # expert_weights[eid] is [N, K]; .T is a zero-copy strided view that
         # PyTorch's bf16 matmul handles natively, so no contiguous() needed.
         y_groups[mask] = x_groups[mask] @ expert_weights[eid].T
-    return y_groups.reshape(M_total, N)
+    y_routed = y_groups.reshape(M_total, N)
+    if M_bufferlen == M_total:
+        return y_routed
+    out = torch.zeros((M_bufferlen, N), dtype=output_dtype, device=inputs.device)
+    out[:M_total] = y_routed
+    return out

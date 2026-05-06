@@ -156,3 +156,12 @@ python ./alto/utils/exportation/export.py \
 
 - **Homepage** [github.com/AMD-AGI/ALTO](https://github.com/AMD-AGI/ALTO)
 - **TorchTitan submodule:** [github.com/AMD-AGI/torchtitan-amd](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto) (`3rdparty/torchtitan`)
+
+## Contact
+For questions, issues, or contributions, please reach out to the maintainers:
+- Guanchen Li — [@guanchenl](https://github.com/guanchenl) · GuanChen.Li@amd.com
+- Han Wang — [@hann-wang](https://github.com/hann-wang) · Han.Wang@amd.com
+- Yue Sun — [@ysa2215](https://github.com/ysa2215) · Yue.Sun2@amd.com
+- Zhitao Wang — [@zhitwang17](https://github.com/zhitwang17) · Zhitao.Wang@amd.com
+
+See [CODEOWNERS](.github/CODEOWNERS) for the full ownership list.

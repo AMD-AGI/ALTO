@@ -1,6 +1,6 @@
 ## MXFP8 `tl.dot_scaled` Repro
 
-Minimal reproducer for Triton's MXFP8 `tl.dot_scaled`.
+Minimal reproducer for the MXFP8 `tl.dot_scaled` multi-block accuracy issue.
 
 The script builds `e4m3` MXFP8 GEMM inputs, runs one Triton kernel that calls
 `tl.dot_scaled`, then compares the result with:
@@ -11,10 +11,14 @@ convert_from_mxfp8(a) @ convert_from_mxfp8(b)
 
 ### Cases
 
-The same `dot_scaled_kernel` covers both cases:
+The same `dot_scaled_kernel` covers three cases:
 
-1. `K=32`: one `tl.dot_scaled` call.
-2. `K=128`: four `tl.dot_scaled` calls accumulated with `BLOCK_K=32`.
+1. `K=32, DOT_K=32`: baseline, one `tl.dot_scaled` call over one quant block.
+2. `K=128, DOT_K=32`: safe path, four `tl.dot_scaled` calls, each over one quant block.
+3. `K=128, DOT_K=128`: problem path, one `tl.dot_scaled` call spanning four
+   32-wide quant blocks.
+
+The inputs include outlier-heavy 32-wide K blocks to make scale disparity visible.
 
 ### How to run
 
@@ -26,4 +30,5 @@ Run it in the same CDNA4 environment used for the MXFP8 kernel tests.
 
 ### Expected signal
 
-The script prints `allclose`, `max_diff`, and `mean_diff` for both cases.
+The problem path should show a noticeably larger error than the safe path. The script
+prints `allclose`, `max_diff`, `mean_diff`, and `relative_max_diff` for each case.

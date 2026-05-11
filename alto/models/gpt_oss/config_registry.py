@@ -93,7 +93,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 1
+    config.parallelism.tensor_parallel_degree = 2
     config.checkpoint.enable = False
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2
@@ -110,7 +110,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-mi308-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-blkscale-lr4e-4-outputs"
+    config.dump_folder = "gpt_oss_20b-mi308-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-skip12-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)

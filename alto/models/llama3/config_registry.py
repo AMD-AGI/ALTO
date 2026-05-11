@@ -23,6 +23,7 @@ __all__ = [
     "llama3_1b_opt",
     "llama3_1b_lpt",
     "llama3_8b",
+    "llama3_8b_pretrain",
     "llama3_8b_opt",
     "llama3_8b_lpt",
     "llama3_1b_gptq",
@@ -119,7 +120,7 @@ def llama3_1b_lpt() -> Trainer.Config:
     return config
 
 
-def llama3_8b() -> Trainer.Config:
+def llama3_8b_pretrain() -> Trainer.Config:
     config = llama3_8b_orig()
     config.hf_assets_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
     config.metrics.log_freq = 1
@@ -132,10 +133,10 @@ def llama3_8b() -> Trainer.Config:
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 8
     config.activation_checkpoint.mode = "none"
-    config.checkpoint.enable = True
+    config.checkpoint.enable = False
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
-    config.checkpoint.initial_load_in_hf = True
+    config.checkpoint.initial_load_in_hf = False
     config.validator.enable = True
     config.validator.dataloader.dataset = "wikitext_test"
     config.validator.freq = 10
@@ -154,7 +155,7 @@ def llama3_8b_opt() -> Trainer.Config:
 
 
 def llama3_8b_lpt() -> Trainer.Config:
-    config = llama3_8b()
+    config = llama3_8b_pretrain()
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)

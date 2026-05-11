@@ -62,6 +62,11 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_dge: bool = False,
     ):
         weight = unwrap_weight_wrapper(weight)
+        # Align weight dtype with activation so saved QDQ tensors share a
+        # common dtype across forward / backward under AMP autocast (matches
+        # the MXFP4 ``original_dtype = x.dtype`` contract).
+        if weight.dtype != x.dtype:
+            weight = weight.to(dtype=x.dtype)
 
         original_shape = x.shape
         x_2d = x.reshape(-1, original_shape[-1])
@@ -187,6 +192,12 @@ class NVFP4LinearFunction(torch.autograd.Function):
             x_dq, w_dq = ctx.saved_tensors
         original_shape = grad_output.shape
         grad_output = grad_output.reshape(-1, original_shape[-1])
+        # Saved QDQ tensors carry forward's dtype; align them with
+        # grad_output to avoid BF16 vs FP32 mismatches under AMP autocast.
+        if x_dq.dtype != grad_output.dtype:
+            x_dq = x_dq.to(dtype=grad_output.dtype)
+        if w_dq.dtype != grad_output.dtype:
+            w_dq = w_dq.to(dtype=grad_output.dtype)
 
         # Gradients are quantized once for each reduction-axis usage:
         #   - axis=-1 feeds the activation-gradient GEMM

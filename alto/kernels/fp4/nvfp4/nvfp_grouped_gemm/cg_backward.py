@@ -59,19 +59,26 @@ def _nvfp4_grouped_dgrad(
         ).to(output_dtype)
 
     assert num_groups is not None, "_nvfp4_grouped_dgrad: loop fallback requires num_groups"
-    M_total = grad_output.shape[0]
+    # Trailing buffer rows in grad_output are not routed; produce zeros.
+    M_bufferlen = grad_output.shape[0]
+    M_total = num_groups * ALIGN_SIZE_M
     check_grouped_loop_contract(M_total, where="_nvfp4_grouped_dgrad", align_size_m=ALIGN_SIZE_M)
     N = grad_output.shape[1]
     K = expert_weights.shape[2]
     group_ids = group_ids_from_expert_indices(expert_indices, num_groups, align_size_m=ALIGN_SIZE_M)
-    g_groups = grad_output.view(num_groups, ALIGN_SIZE_M, N)
+    g_groups = grad_output[:M_total].view(num_groups, ALIGN_SIZE_M, N)
     dx_groups = torch.zeros((num_groups, ALIGN_SIZE_M, K), dtype=output_dtype, device=grad_output.device)
     for eid in range(expert_weights.shape[0]):
         mask = group_ids == eid
         # expert_weights[eid] is already [N, K]; the natural (non-transposed)
         # matmul produces dX=[M,K].
         dx_groups[mask] = g_groups[mask] @ expert_weights[eid]
-    return dx_groups.reshape(M_total, K)
+    dx_routed = dx_groups.reshape(M_total, K)
+    if M_bufferlen == M_total:
+        return dx_routed
+    out = torch.zeros((M_bufferlen, K), dtype=output_dtype, device=grad_output.device)
+    out[:M_total] = dx_routed
+    return out
 
 
 def _nvfp4_grouped_wgrad(
@@ -116,10 +123,12 @@ def _nvfp4_grouped_wgrad(
     assert num_groups is not None, "_nvfp4_grouped_wgrad: loop fallback requires num_groups"
     N = g_m_dq.shape[1]
     K = x_bwd.shape[1]
-    check_grouped_loop_contract(grad_output.shape[0], where="_nvfp4_grouped_wgrad", align_size_m=ALIGN_SIZE_M)
+    # Trailing buffer rows are not routed and do not contribute to dW.
+    M_total = num_groups * ALIGN_SIZE_M
+    check_grouped_loop_contract(M_total, where="_nvfp4_grouped_wgrad", align_size_m=ALIGN_SIZE_M)
     group_ids = group_ids_from_expert_indices(expert_indices, num_groups, align_size_m=ALIGN_SIZE_M)
-    go_groups = g_m_dq.view(num_groups, ALIGN_SIZE_M, N)
-    x_groups = x_bwd.view(num_groups, ALIGN_SIZE_M, K)
+    go_groups = g_m_dq[:M_total].view(num_groups, ALIGN_SIZE_M, N)
+    x_groups = x_bwd[:M_total].view(num_groups, ALIGN_SIZE_M, K)
     dw = torch.zeros((num_experts, N, K), dtype=output_dtype, device=g_m_dq.device)
     for eid in range(num_experts):
         mask = group_ids == eid

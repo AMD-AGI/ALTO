@@ -483,3 +483,100 @@ def test_nvfp4_native_dispatch_forward():
     cossim = calc_cossim(y_loop, y_native)
     assert snr > 30, f"native-vs-loop SNR too low: {snr:.2f}"
     assert cossim > 0.9999, f"native-vs-loop CosSim too low: {cossim:.8f}"
+
+
+# ---------------------------------------------------------------------------
+# Test 7 – padded activation buffer (M_bufferlen > offs[-1])
+#
+# GPT-OSS's ``indices_padding_wrapper`` rounds tokens-per-expert up to
+# ALIGN_SIZE_M, so the activation buffer can be longer than the routed range.
+# The dispatch path must:
+#   * accept ``inputs.shape[0] > offs[-1]`` without raising,
+#   * produce an output of shape ``[M_bufferlen, N]`` with zeros in the
+#     trailing rows,
+#   * compute routed-row outputs and gradients independently of the padding
+#     rows (they get the same numerics whether or not padding is appended).
+# ---------------------------------------------------------------------------
+
+def test_nvfp4_grouped_gemm_accepts_padded_buffer():
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    M_routed, M_pad = 512, 256
+    M_bufferlen = M_routed + M_pad
+    num_experts, K, N = 4, 256, 256
+
+    torch.manual_seed(2026)
+    routed_rows = prepare_data((M_routed, K), dtype)
+    weights = prepare_data((num_experts, K, N), dtype)  # dispatch convention [E, K, N]
+    # Each expert receives one ALIGN_SIZE_M-sized group of routed tokens.
+    offs = torch.tensor(
+        [(i + 1) * (M_routed // num_experts) for i in range(num_experts)],
+        dtype=torch.int32, device=device,
+    )
+
+    inputs_pad = torch.zeros(M_bufferlen, K, dtype=dtype, device=device)
+    inputs_pad[:M_routed] = routed_rows
+    inputs_pad.requires_grad_(True)
+    weights_pad = weights.clone().requires_grad_(True)
+    y_pad = _quantize_then_nvfp4_scaled_grouped_mm(
+        inputs_pad, weights_pad, offs,
+        use_2dblock_x=False, use_2dblock_w=False, use_sr_grad=False,
+    )
+
+    inputs_ref = routed_rows.clone().requires_grad_(True)
+    weights_ref = weights.clone().requires_grad_(True)
+    y_ref = _quantize_then_nvfp4_scaled_grouped_mm(
+        inputs_ref, weights_ref, offs,
+        use_2dblock_x=False, use_2dblock_w=False, use_sr_grad=False,
+    )
+
+    assert y_pad.shape == (M_bufferlen, N)
+    assert torch.equal(y_pad[M_routed:], torch.zeros_like(y_pad[M_routed:])), \
+        "padding output rows must be zero"
+    assert torch.equal(y_pad[:M_routed], y_ref), \
+        "routed output rows must be unaffected by buffer padding"
+
+    y_pad.sum().backward()
+    y_ref.sum().backward()
+    assert inputs_pad.grad.shape == (M_bufferlen, K)
+    assert torch.equal(inputs_pad.grad[M_routed:], torch.zeros_like(inputs_pad.grad[M_routed:])), \
+        "padding rows must receive zero input gradient"
+    assert torch.equal(inputs_pad.grad[:M_routed], inputs_ref.grad), \
+        "routed-row input gradients must be unaffected by buffer padding"
+    assert torch.equal(weights_pad.grad, weights_ref.grad), \
+        "weight gradients must be unaffected by buffer padding"
+
+
+# ---------------------------------------------------------------------------
+# Test 8 – AMP / autocast dtype cross for grouped GEMM backward
+#
+# Mirrors ``test_nvfp4_linear_backward_handles_dtype_cross`` for the grouped
+# path: forward saves QDQ tensors in the activation dtype, backward must
+# tolerate a ``grad_output`` in either dtype without crashing the BF16/FP32
+# matmuls.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("x_dtype,w_dtype", [
+    (torch.bfloat16, torch.float32),
+    (torch.float32, torch.bfloat16),
+])
+def test_nvfp4_grouped_gemm_backward_handles_dtype_cross(x_dtype, w_dtype):
+    device = torch.device("cuda")
+    M_total = ALIGN_SIZE_M * 4
+    num_experts, K, N = 4, 256, 256
+
+    inputs = prepare_data((M_total, K), x_dtype).requires_grad_(True)
+    expert_weights = prepare_data((num_experts, N, K), w_dtype).requires_grad_(True)
+    expert_indices = _make_contiguous_expert_indices(M_total, M_total // ALIGN_SIZE_M, num_experts, device)
+
+    y = nvfp4_grouped_gemm(
+        inputs, expert_weights, expert_indices,
+        trans_weights=True,
+        use_2dblock_x=False, use_2dblock_w=False, use_sr_grad=False,
+    )
+    assert y.dtype == x_dtype
+    y.sum().backward()
+    assert inputs.grad is not None and torch.isfinite(inputs.grad).all()
+    assert expert_weights.grad is not None and torch.isfinite(expert_weights.grad).all()
+    assert inputs.grad.dtype == x_dtype
+    assert expert_weights.grad.dtype == w_dtype

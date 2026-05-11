@@ -280,3 +280,33 @@ def test_nvfp4_linear_rejects_unaligned_axis0_weight_view():
             False,
             False,
         )
+
+
+# ---------------------------------------------------------------------------
+# AMP / autocast dtype cross: forward sees BF16 activations + FP32 weights
+# (or vice versa).  Without explicit dtype alignment the saved QDQ tensors
+# end up in the weight's dtype while ``grad_output`` arrives in the
+# activation's dtype, so the backward matmul fails with
+# ``BFloat16 != float``.  This test pins down the contract.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("x_dtype,w_dtype", [
+    (torch.bfloat16, torch.float32),
+    (torch.float32, torch.bfloat16),
+])
+def test_nvfp4_linear_backward_handles_dtype_cross(x_dtype, w_dtype):
+    x = prepare_data((128, 64), x_dtype).requires_grad_(True)
+    w = prepare_data((64, 64), w_dtype).requires_grad_(True)
+    y = NVFP4LinearFunction.apply(
+        x, w,
+        False,  # use_2dblock_x
+        False,  # use_2dblock_w
+        False,  # use_sr_grad
+        False,  # use_per_tensor_scale
+    )
+    assert y.dtype == x_dtype
+    y.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert w.grad is not None and torch.isfinite(w.grad).all()
+    assert x.grad.dtype == x_dtype
+    assert w.grad.dtype == w_dtype

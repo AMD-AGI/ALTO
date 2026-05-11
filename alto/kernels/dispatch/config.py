@@ -9,7 +9,7 @@ import torch
 
 @dataclass(unsafe_hash=True, kw_only=True, slots=True)
 class TrainingOpConfig:
-    precision: Literal["mxfp4", "mxfp8", "nvfp4"]
+    precision: Literal["mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]
     use_2dblock_x: bool
     use_2dblock_w: bool
     use_hadamard: bool

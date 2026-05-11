@@ -51,7 +51,7 @@ class LowPrecisionTrainingModifier(Modifier):
 
     @field_validator("scheme", mode="before")
     def validate_scheme(cls, value: str | dict[str, str | list[str]]) -> str | dict[str, list[str]]:
-        if isinstance(value, str) and value not in ["mxfp4", "mxfp8", "nvfp4"]:
+        if isinstance(value, str) and value not in ["mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]:
             raise ValueError(f"Unsupported training op scheme: {value}")
 
         if isinstance(value, dict):

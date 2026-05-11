@@ -169,10 +169,10 @@ def _quantize_fp8(
             # Hardware may produce NaN/Inf; saturate to max finite, preserving sign bit
             y = (y & 0xFF).to(tl.uint8)
             if FP8_FORMAT == 0:
-                # e4m3fn: NaN is 0x7F/0xFF → clamp to 0x7E/0xFE
+                # e4m3fn: NaN is 0x7F/0xFF; clamp to 0x7E/0xFE
                 y = tl.where((y & 0x7F) == 0x7F, ((y & 0x80) | 0x7E).to(tl.uint8), y)
             else:
-                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF → clamp to 0x7B/0xFB
+                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF; clamp to 0x7B/0xFB
                 y = tl.where((y & 0x7C) == 0x7C, ((y & 0x80) | 0x7B).to(tl.uint8), y)
             if FP8_FORMAT == 0:
                 return y.to(tl.float8e4nv, bitcast=True)
@@ -248,11 +248,11 @@ def _quantize_fp8(
             y0 = (y & 0xFF).to(tl.uint8)
             y1 = ((y >> 8) & 0xFF).to(tl.uint8)
             if FP8_FORMAT == 0:
-                # e4m3fn: NaN is 0x7F/0xFF → clamp to 0x7E/0xFE
+                # e4m3fn: NaN is 0x7F/0xFF; clamp to 0x7E/0xFE
                 y0 = tl.where((y0 & 0x7F) == 0x7F, ((y0 & 0x80) | 0x7E).to(tl.uint8), y0)
                 y1 = tl.where((y1 & 0x7F) == 0x7F, ((y1 & 0x80) | 0x7E).to(tl.uint8), y1)
             else:
-                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF → clamp to 0x7B/0xFB
+                # e5m2: Inf/NaN are 0x7C-0x7F/0xFC-0xFF; clamp to 0x7B/0xFB
                 y0 = tl.where((y0 & 0x7C) == 0x7C, ((y0 & 0x80) | 0x7B).to(tl.uint8), y0)
                 y1 = tl.where((y1 & 0x7C) == 0x7C, ((y1 & 0x80) | 0x7B).to(tl.uint8), y1)
             qx = tl.join(y0, y1).reshape(BLOCK_M, BLOCK_N)
@@ -397,6 +397,8 @@ def _convert_to_mxfp8_kernel(
     stride_sn,
     philox_seed,
     philox_offset,
+    M,
+    N,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -432,18 +434,23 @@ def _convert_to_mxfp8_kernel(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_xn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_sn = pid_n * SCALE_BLOCK_N + tl.arange(0, SCALE_BLOCK_N)
+    mask_m = offs_m < M
+    mask_n = offs_xn < N
+    mask_sn = offs_sn < (N // QUANT_BLOCK_SIZE)
 
     if IS_2D_BLOCK:
         SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
         offs_sm = pid_m * SCALE_BLOCK_M + tl.arange(0, SCALE_BLOCK_M)
+        mask_sm = offs_sm < (M // QUANT_BLOCK_SIZE)
     else:
         offs_sm = offs_m
+        mask_sm = mask_m
 
     offs_x = offs_m[:, None] * stride_xm + offs_xn[None, :] * stride_xn
     offs_y = offs_m[:, None] * stride_ym + offs_xn[None, :] * stride_yn
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
 
-    x = tl.load(x_ptr + offs_x)
+    x = tl.load(x_ptr + offs_x, mask=mask_m[:, None] & mask_n[None, :], other=0.0)
     scales = _calculate_scales(
         x,
         BLOCK_M=BLOCK_M,
@@ -468,8 +475,8 @@ def _convert_to_mxfp8_kernel(
         USE_SR=USE_SR,
     )
 
-    tl.store(y_ptr + offs_y, y)
-    tl.store(s_ptr + offs_s, scales)
+    tl.store(y_ptr + offs_y, y, mask=mask_m[:, None] & mask_n[None, :])
+    tl.store(s_ptr + offs_s, scales, mask=mask_sm[:, None] & mask_sn[None, :])
 
 
 @triton_op("alto::convert_to_mxfp8", mutates_args={})
@@ -497,7 +504,7 @@ def convert_to_mxfp8(
         use_asm: If True, use CDNA4 ASM instructions. None=auto-detect.
         philox_seed: Random seed for stochastic rounding. None=auto-generate.
         philox_offset: Random offset for stochastic rounding. None=auto-generate.
-    
+
     Returns:
         Tuple[data_lp, scales]: Quantized FP8 tensor and uint8 scale factors.
     """
@@ -563,6 +570,8 @@ def convert_to_mxfp8(
         stride_sn,
         philox_seed,
         philox_offset,
+        M,
+        N,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
@@ -598,7 +607,7 @@ def convert_from_mxfp8(
         axis: Axis that was quantized along.
         is_2d_block: If True, use 2D block quantization.
         use_asm: If True, use CDNA4 ASM instructions. None=auto-detect.
-    
+
     Returns:
         Dequantized high-precision tensor.
     """
@@ -641,6 +650,8 @@ def convert_from_mxfp8(
         stride_yn,
         stride_sm,
         stride_sn,
+        M,
+        N,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
@@ -663,6 +674,8 @@ def _convert_from_mxfp8_kernel(
     stride_yn,
     stride_sm,
     stride_sn,
+    M,
+    N,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -678,19 +691,24 @@ def _convert_from_mxfp8_kernel(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_sn = pid_n * SCALE_BLOCK_N + tl.arange(0, SCALE_BLOCK_N)
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+    mask_sn = offs_sn < (N // QUANT_BLOCK_SIZE)
 
     if IS_2D_BLOCK:
         SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
         offs_sm = pid_m * SCALE_BLOCK_M + tl.arange(0, SCALE_BLOCK_M)
+        mask_sm = offs_sm < (M // QUANT_BLOCK_SIZE)
     else:
         offs_sm = offs_m
+        mask_sm = mask_m
 
     offs_x = offs_m[:, None] * stride_xm + offs_n[None, :] * stride_xn
     offs_y = offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
 
-    x = tl.load(x_ptr + offs_x)
-    scales = tl.load(s_ptr + offs_s)
+    x = tl.load(x_ptr + offs_x, mask=mask_m[:, None] & mask_n[None, :], other=0.0)
+    scales = tl.load(s_ptr + offs_s, mask=mask_sm[:, None] & mask_sn[None, :], other=1)
 
     y = _dequantize_fp8(
         x,
@@ -704,7 +722,7 @@ def _convert_from_mxfp8_kernel(
         USE_ASM=USE_ASM,
     )
 
-    tl.store(y_ptr + offs_y, y)
+    tl.store(y_ptr + offs_y, y, mask=mask_m[:, None] & mask_n[None, :])
 
 
 @triton.jit
@@ -715,6 +733,8 @@ def _calculate_scales_kernel(
     stride_xn,
     stride_sm,
     stride_sn,
+    M,
+    N,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -729,9 +749,11 @@ def _calculate_scales_kernel(
     SCALE_BLOCK_N: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_xn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_m = offs_m < M
+    mask_n = offs_xn < N
 
     offs_x = offs_m[:, None] * stride_xm + offs_xn[None, :] * stride_xn
-    x = tl.load(x_ptr + offs_x)
+    x = tl.load(x_ptr + offs_x, mask=mask_m[:, None] & mask_n[None, :], other=0.0)
 
     scales = _calculate_scales(
         x,
@@ -746,11 +768,14 @@ def _calculate_scales_kernel(
     if IS_2D_BLOCK:
         SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
         offs_sm = pid_m * SCALE_BLOCK_M + tl.arange(0, SCALE_BLOCK_M)
+        mask_sm = offs_sm < (M // QUANT_BLOCK_SIZE)
     else:
         offs_sm = offs_m
+        mask_sm = mask_m
     offs_sn = pid_n * SCALE_BLOCK_N + tl.arange(0, SCALE_BLOCK_N)
+    mask_sn = offs_sn < (N // QUANT_BLOCK_SIZE)
     offs_s = offs_sm[:, None] * stride_sm + offs_sn[None, :] * stride_sn
-    tl.store(s_ptr + offs_s, scales)
+    tl.store(s_ptr + offs_s, scales, mask=mask_sm[:, None] & mask_sn[None, :])
 
 
 @triton_op("alto::calculate_mxfp8_scales", mutates_args={})
@@ -814,6 +839,8 @@ def calculate_mxfp8_scales(
         stride_xn,
         stride_sm,
         stride_sn,
+        M,
+        N,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,

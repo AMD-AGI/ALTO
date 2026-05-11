@@ -4,22 +4,20 @@
 
 """Dispatch-layer guard tests for the NVFP4 weight-wrapper tensor.
 
-These tests pin down two behaviours that, if regressed, would cause a silent
-downgrade to BF16 under a ``scheme=nvfp4`` configuration (see review items
-B1 and B2):
-
-* ``torch._grouped_mm`` on an NVFP4-wrapped weight must raise
-  ``NotImplementedError``, not quietly fall through to the default BF16 kernel.
-* ``F.linear`` / ``mm`` / ``addmm`` on an NVFP4-wrapped weight must refuse
-  configs with ``use_hadamard=True`` or ``use_dge=True`` — neither is
-  implemented on the NVFP4 linear path yet.
+These tests pin down behaviour that would otherwise silently change the active
+low-precision recipe under ``scheme=nvfp4``.  The op-level tests verify the
+math of ``NVFP4LinearFunction`` and ``nvfp4_grouped_gemm``; this file verifies
+that the production wrapper / dispatch path preserves the user's config and
+still routes gradients to the wrapper leaf.
 """
 
 import pytest
 import torch
 
+import alto.kernels.dispatch.tensor as dispatch_tensor
 from alto.kernels.dispatch.config import TrainingOpConfig
 from alto.kernels.dispatch.tensor import NVFP4TrainingWeightWrapperTensor
+from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import ALIGN_SIZE_M
 
 
 def _make_config(**overrides) -> TrainingOpConfig:
@@ -48,22 +46,111 @@ def _make_wrapper(config: TrainingOpConfig, shape=(32, 32), device="cuda"):
 
 
 # ---------------------------------------------------------------------------
-# B1 — grouped_mm must hard-fail rather than silently fall back to BF16
+# grouped_mm smoke — scheme='nvfp4' on a 2D × 3D grouped_mm (MoE routed
+# experts layout) must reach the NVFP4 grouped-GEMM path, produce a BF16
+# output with the expected shape, and actually execute a matmul (not a silent
+# all-zero fallback on non-native platforms).
 # ---------------------------------------------------------------------------
 
-def test_grouped_mm_raises_not_implemented(device):
-    """B1: applying scheme='nvfp4' to a module that issues torch._grouped_mm
-    (e.g. MoE GroupedExperts) must raise, not silently run BF16."""
+def test_grouped_mm_smoke(device):
     cfg = _make_config()
-    # 2D × 3D grouped-matmul signature (MoE routed-experts shape).
-    num_experts, K, N, M = 2, 16, 16, 16
+    num_experts, K, N, M = 2, 16, 16, ALIGN_SIZE_M
     A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
     W = torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device)
     W_wrapped = NVFP4TrainingWeightWrapperTensor(W, cfg)
     offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
 
-    with pytest.raises(NotImplementedError, match="grouped"):
-        torch._grouped_mm(A, W_wrapped, offs=offs)
+    y = torch._grouped_mm(A, W_wrapped, offs=offs)
+    assert y.shape == (M, N)
+    assert y.dtype == torch.bfloat16
+    assert y.abs().max().item() > 0, "grouped_mm smoke must exercise a real matmul"
+
+
+def test_grouped_mm_routes_to_nvfp4_grouped_kernel(monkeypatch, device):
+    """Dispatch must route NVFP4-wrapped grouped_mm to the NVFP4 grouped path.
+
+    This is intentionally a lightweight mock-based test: it verifies routing
+    and argument propagation without launching the Triton grouped kernels.
+    """
+    calls = []
+
+    def _mock_grouped(A, B, *, offs, use_2dblock_x, use_2dblock_w,
+                      use_sr_grad, use_per_tensor_scale, use_hadamard, use_dge):
+        calls.append({
+            "A": A,
+            "B": B,
+            "offs": offs,
+            "use_2dblock_x": use_2dblock_x,
+            "use_2dblock_w": use_2dblock_w,
+            "use_sr_grad": use_sr_grad,
+            "use_per_tensor_scale": use_per_tensor_scale,
+            "use_hadamard": use_hadamard,
+            "use_dge": use_dge,
+        })
+        return A.new_full((A.shape[0], B.shape[-1]), 7.0)
+
+    monkeypatch.setattr(dispatch_tensor, "_quantize_then_nvfp4_scaled_grouped_mm", _mock_grouped)
+
+    cfg = _make_config(
+        use_2dblock_x=True,
+        use_2dblock_w=True,
+        use_sr_grad=True,
+        use_hadamard=True,
+        use_dge=True,
+        two_level_scaling="tensorwise",
+    )
+    num_experts, K, N, M = 2, 16, 32, ALIGN_SIZE_M
+    A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    W_wrapped = NVFP4TrainingWeightWrapperTensor(
+        torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device),
+        cfg,
+    )
+    offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
+
+    y = torch._grouped_mm(A, W_wrapped, offs=offs)
+
+    assert y.shape == (M, N)
+    assert torch.all(y == 7)
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["A"] is A
+    assert call["B"] is W_wrapped
+    assert call["offs"] is offs
+    assert call["use_2dblock_x"] is True
+    assert call["use_2dblock_w"] is True
+    assert call["use_sr_grad"] is True
+    assert call["use_per_tensor_scale"] is True
+    assert call["use_hadamard"] is True
+    assert call["use_dge"] is True
+
+
+@pytest.mark.parametrize("use_hadamard,use_dge", [
+    (True, False),
+    (False, True),
+    (True, True),
+])
+def test_grouped_mm_recipe_surface_smoke(device, use_hadamard, use_dge):
+    """Grouped-GEMM must accept the same recipe knobs as the dense NVFP4 linear
+    path once the implementation is present.  This is a lightweight smoke test:
+    grouped recipe variants should produce a BF16 output with the expected
+    shape and should not silently fall back to BF16 or zero-output behaviour."""
+    cfg = _make_config(
+        use_2dblock_x=False,  # Hadamard is defined only on the 1D-x path
+        use_2dblock_w=True,
+        use_sr_grad=True,
+        use_hadamard=use_hadamard,
+        use_dge=use_dge,
+    )
+    num_experts, K, N, M = 2, 16, 16, ALIGN_SIZE_M
+    A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    W = torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device)
+    W_wrapped = NVFP4TrainingWeightWrapperTensor(W, cfg)
+    offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
+
+    y = torch._grouped_mm(A, W_wrapped, offs=offs)
+    assert y.shape == (M, N)
+    assert y.dtype == torch.bfloat16
+    assert y.abs().max().item() > 0
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +183,53 @@ def test_linear_supported_knobs_still_work(
     y = torch.nn.functional.linear(x, W_wrapped)
     assert y.shape == (64, 32)
     assert y.dtype == torch.bfloat16
+
+
+def test_linear_routes_to_nvfp4_linear_kernel(monkeypatch, device):
+    """Dispatch must route NVFP4-wrapped F.linear to the NVFP4 linear path."""
+    calls = []
+
+    def _mock_linear(A, B, *, use_2dblock_x, use_2dblock_w, use_sr_grad,
+                     use_per_tensor_scale, use_hadamard, use_dge):
+        calls.append({
+            "A": A,
+            "B": B,
+            "use_2dblock_x": use_2dblock_x,
+            "use_2dblock_w": use_2dblock_w,
+            "use_sr_grad": use_sr_grad,
+            "use_per_tensor_scale": use_per_tensor_scale,
+            "use_hadamard": use_hadamard,
+            "use_dge": use_dge,
+        })
+        return A.new_full((A.shape[0], B.shape[0]), 5.0)
+
+    monkeypatch.setattr(dispatch_tensor, "_to_nvfp4_then_scaled_mm", _mock_linear)
+
+    cfg = _make_config(
+        use_2dblock_x=True,
+        use_2dblock_w=True,
+        use_sr_grad=True,
+        use_hadamard=True,
+        use_dge=True,
+        two_level_scaling="tensorwise",
+    )
+    W_wrapped = _make_wrapper(cfg, device=device, shape=(32, 16))
+    x = torch.randn(8, 16, dtype=torch.bfloat16, device=device)
+
+    y = torch.nn.functional.linear(x, W_wrapped)
+
+    assert y.shape == (8, 32)
+    assert torch.all(y == 5)
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["A"] is x
+    assert call["B"] is W_wrapped
+    assert call["use_2dblock_x"] is True
+    assert call["use_2dblock_w"] is True
+    assert call["use_sr_grad"] is True
+    assert call["use_per_tensor_scale"] is True
+    assert call["use_hadamard"] is True
+    assert call["use_dge"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,13 @@ import pytest
 from tabulate import tabulate
 import torch
 
-from alto.kernels.fp4.nvfp4.nvfp_linear import NVFP4LinearFunction, _qdq
+from alto.kernels.fp4.testing_utils import check_nvfp4_autograd_snr
+from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.fp4.nvfp4.nvfp_linear import (
+    NVFP4LinearFunction,
+    _qdq,
+    _to_nvfp4_then_scaled_mm,
+)
 from .utils import prepare_data, calc_snr, calc_cossim
 
 
@@ -77,6 +83,9 @@ def test_nvfp4_qdq_roundtrip(
     # 2D + SR is the weakest combination (E4M3 block-scale rounding plus
     # stochastic-rounding variance), so its cossim floor is the loosest.
     min_snr = 8 if not is_2d_block else 5
+    # 2D block + SR case: E4M3 block scale rounding reduces precision slightly
+    # compared to float32 scales.  The SNR threshold (5 dB) is the binding
+    # criterion here; cosine similarity is set conservatively at 0.94.
     min_cossim = 0.99 if not is_2d_block else (0.94 if use_sr else 0.99)
     assert snr > min_snr, f"QDQ SNR too low: {snr:.2f}"
     assert cossim > min_cossim, f"QDQ cosine similarity too low: {cossim:.6f}"
@@ -104,8 +113,10 @@ def test_nvfp4_linear_autograd_function(
 ):
     """Forward + dX + dW must match a BF16 nn.Linear reference in SNR.
 
-    The SR-on-grad path is slightly noisier than RNE (unbiased but higher
-    variance), so the threshold is 3 dB with SR and 4 dB without.
+    The check is K-aware: large reduction dimensions amplify stochastic
+    rounding noise roughly as sqrt(K), so K=2048 stress cases get a lower
+    per-tensor hard floor while small/medium cases keep tighter aggregate
+    quality checks.
     """
     B, M, N, K = shape
     inputs = prepare_data((B, M, K), data_type).requires_grad_(True)
@@ -152,7 +163,150 @@ def test_nvfp4_linear_autograd_function(
         headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github",
     ))
 
-    min_snr = 3 if use_sr_grad else 4
-    assert output_snr > min_snr, f"Output SNR too low: {output_snr:.2f}"
-    assert dx_snr     > min_snr, f"dX SNR too low: {dx_snr:.2f}"
-    assert dw_snr     > min_snr, f"dW SNR too low: {dw_snr:.2f}"
+    check_nvfp4_autograd_snr(
+        {"O": output_snr, "dX": dx_snr, "dW": dw_snr},
+        K=K,
+        use_sr_grad=use_sr_grad,
+        kind="nvfp4_linear",
+        context=(
+            f"NVFP4Linear shape={shape} dtype={data_type} "
+            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w}"
+        ),
+    )
+
+
+@pytest.mark.parametrize("shape,use_2dblock_x,use_2dblock_w", [
+    # Shared with both NVFP4 and MXFP4 linear-autograd test matrices.
+    ((1, 512, 384, 128), False, False),
+    ((1, 512, 384, 128), False, True),
+    ((4, 1024, 1024, 2048), False, False),
+])
+def test_nvfp4_linear_forward_compares_with_mxfp4_on_shared_cases(
+    shape, use_2dblock_x, use_2dblock_w,
+):
+    """NVFP4 and MXFP4 forward paths should both stay close to BF16 reference.
+
+    This is not an equality test between formats: NVFP4 uses E4M3 block scales
+    and MXFP4 uses E8M0 scales, so their quantization errors differ.  The goal
+    is to make sure both format families run on representative dense-linear
+    cases that already exist in both original test suites and remain in a
+    reasonable SNR band versus the same BF16 reference.
+    """
+    B, M, N, K = shape
+    dtype = torch.bfloat16
+    x = prepare_data((B, M, K), dtype)
+    w = prepare_data((N, K), dtype)
+    # Use one BF16 reference for both formats.  The comparison is therefore
+    # "NVFP4 vs BF16" and "MXFP4 vs BF16", not "NVFP4 vs MXFP4".
+    y_ref = torch.nn.functional.linear(x, w)
+
+    # Keep both recipes deliberately minimal and analogous: 1D block scales,
+    # deterministic rounding on the forward path, no clipping, no Hadamard,
+    # no DGE, no macro/outer scaling.  This keeps the test focused on whether
+    # each format family can run the same dense-linear shape and produce a
+    # finite output with reasonable forward error.
+    y_nv = _to_nvfp4_then_scaled_mm(
+        x,
+        w,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=False,
+        use_per_tensor_scale=False,
+    )
+    y_mx = _to_mxfp4_then_scaled_mm(
+        x,
+        w,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=False,
+        use_dge=False,
+        clip_mode="none",
+        use_hadamard=False,
+        use_macro_block_scaling=False,
+    )
+
+    nv_snr = calc_snr(y_ref, y_nv)
+    mx_snr = calc_snr(y_ref, y_mx)
+    print()
+    print(tabulate(
+        [
+            ["NVFP4", f"{nv_snr:.2f}", f"{calc_cossim(y_ref, y_nv):.6f}"],
+            ["MXFP4", f"{mx_snr:.2f}", f"{calc_cossim(y_ref, y_mx):.6f}"],
+        ],
+        headers=["Format", "SNR", "Cosine Sim"], tablefmt="github",
+    ))
+
+    assert torch.isfinite(y_nv).all()
+    assert torch.isfinite(y_mx).all()
+    # The two formats use different scale encodings (NVFP4: E4M3 block scale;
+    # MXFP4: E8M0 block scale), so bitwise equality is neither expected nor
+    # useful.  A 10 dB forward-SNR floor is intentionally loose enough to avoid
+    # making this test a recipe-quality benchmark, but tight enough to catch
+    # routing or catastrophic quantization regressions.
+    assert nv_snr > 10, f"NVFP4 forward SNR too low: {nv_snr:.2f}"
+    assert mx_snr > 10, f"MXFP4 forward SNR too low: {mx_snr:.2f}"
+
+
+def test_nvfp4_linear_rejects_unaligned_axis0_activation_view():
+    """1D wgrad activation QDQ must fail fast when the leading dim is not
+    divisible by the NVFP4 block size, rather than silently reusing the fprop
+    axis=-1 view and changing the recipe."""
+    # Use a non-multiple of 16 that is still > 64 so the Triton tile size stays
+    # at BLOCK_M=64 (power-of-2) and the test reaches our runtime guard rather
+    # than failing earlier in Triton's shape checks.
+    x = prepare_data((150, 32), torch.bfloat16)
+    w = prepare_data((32, 32), torch.bfloat16)
+    with pytest.raises(RuntimeError, match="activation QDQ requires"):
+        _ = NVFP4LinearFunction.apply(
+            x, w,
+            False,  # use_2dblock_x
+            True,   # use_2dblock_w -> keep the weight side aligned so x trips first
+            False,
+            False,
+        )
+
+
+def test_nvfp4_linear_rejects_unaligned_axis0_weight_view():
+    """1D wgrad weight QDQ must fail fast when the leading dim is not
+    divisible by the NVFP4 block size, rather than silently reusing the fprop
+    axis=-1 view and changing the recipe."""
+    x = prepare_data((16, 32), torch.bfloat16)
+    w = prepare_data((150, 32), torch.bfloat16)
+    with pytest.raises(RuntimeError, match="weight QDQ requires"):
+        _ = NVFP4LinearFunction.apply(
+            x, w,
+            True,   # use_2dblock_x -> keep activation side aligned so w trips first
+            False,  # use_2dblock_w
+            False,
+            False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# AMP / autocast dtype cross: forward sees BF16 activations + FP32 weights
+# (or vice versa).  Without explicit dtype alignment the saved QDQ tensors
+# end up in the weight's dtype while ``grad_output`` arrives in the
+# activation's dtype, so the backward matmul fails with
+# ``BFloat16 != float``.  This test pins down the contract.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("x_dtype,w_dtype", [
+    (torch.bfloat16, torch.float32),
+    (torch.float32, torch.bfloat16),
+])
+def test_nvfp4_linear_backward_handles_dtype_cross(x_dtype, w_dtype):
+    x = prepare_data((128, 64), x_dtype).requires_grad_(True)
+    w = prepare_data((64, 64), w_dtype).requires_grad_(True)
+    y = NVFP4LinearFunction.apply(
+        x, w,
+        False,  # use_2dblock_x
+        False,  # use_2dblock_w
+        False,  # use_sr_grad
+        False,  # use_per_tensor_scale
+    )
+    assert y.dtype == x_dtype
+    y.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    assert w.grad is not None and torch.isfinite(w.grad).all()
+    assert x.grad.dtype == x_dtype
+    assert w.grad.dtype == w_dtype

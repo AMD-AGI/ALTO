@@ -21,10 +21,16 @@ def _get_tensor_cls_for_config(config: TrainingOpConfig) -> Type[torch.Tensor]:
     """
     Returns the appropriate tensor class for the given config.
     """
-    from .tensor import MXFP4TrainingWeightWrapperTensor, NVFP4TrainingWeightWrapperTensor
+    from .tensor import (
+        MXFP4TrainingWeightWrapperTensor,
+        MXFP8TrainingWeightWrapperTensor,
+        NVFP4TrainingWeightWrapperTensor,
+    )
 
     if config.precision == "mxfp4":
         return MXFP4TrainingWeightWrapperTensor
+    elif config.precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
+        return MXFP8TrainingWeightWrapperTensor
     elif config.precision == "nvfp4":
         return NVFP4TrainingWeightWrapperTensor
     else:

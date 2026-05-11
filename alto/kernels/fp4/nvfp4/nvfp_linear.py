@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import torch
 
@@ -10,63 +10,10 @@ from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
 from alto.kernels.hadamard_transform import HadamardFactory, HadamardTransform
 from alto.kernels.dge import dge_bwd
 from .nvfp_quantization import (
-    convert_to_nvfp4,
+    BLOCK_SIZE_DEFAULT,
+    _qdq,  # noqa: F401 (re-exported for backward compatibility)
     convert_from_nvfp4,
 )
-
-
-def _qdq(
-    tensor: torch.Tensor,
-    *,
-    axis: int,
-    is_2d_block: bool,
-    use_per_tensor_scale: bool,
-    use_sr: bool = False,
-    block_size: int = 16,
-    return_raw: bool = False,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-    """Quantize to NVFP4 then immediately dequantize back (QDQ round-trip).
-
-    This helper is the core building block used to emulate the numerical effect
-    of a future pure-NVFP4 GEMM path. Even though the current implementation
-    executes the final matrix multiplications in BF16, every operand first goes
-    through an explicit NVFP4 round-trip so the surrounding autograd code can
-    model how a native FP4 kernel would see its inputs.
-
-    When ``return_raw=True``, the packed FP4 data tensor (``uint8``) and the
-    per-block scales (``float32`` held as E4M3-round-tripped values) are also
-    returned alongside the dequantized BF16 view. This is used by the DGE
-    backward path to recover the exact FP4 bin each weight element fell into
-    without paying a second quantization pass.
-    """
-    pts = (
-        torch.empty(1, dtype=torch.float32, device=tensor.device)
-        if use_per_tensor_scale
-        else None
-    )
-    data_lp, scales = convert_to_nvfp4(
-        tensor,
-        block_size=block_size,
-        axis=axis,
-        is_2d_block=is_2d_block,
-        per_tensor_scale=pts,
-        # With pts provided, refresh it in-place from tensor.amax(); without
-        # pts, skip tensor-wise scaling entirely.
-        update_per_tensor_scale=use_per_tensor_scale,
-        use_sr=use_sr,
-    )
-    dq = convert_from_nvfp4(
-        data_lp,
-        scales,
-        output_dtype=tensor.dtype,
-        block_size=block_size,
-        axis=axis,
-        is_2d_block=is_2d_block,
-        per_tensor_scale=pts,
-    )
-    if return_raw:
-        return dq, data_lp, scales
-    return dq
 
 
 @torch.compiler.allow_in_graph
@@ -115,6 +62,11 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_dge: bool = False,
     ):
         weight = unwrap_weight_wrapper(weight)
+        # Align weight dtype with activation so saved QDQ tensors share a
+        # common dtype across forward / backward under AMP autocast (matches
+        # the MXFP4 ``original_dtype = x.dtype`` contract).
+        if weight.dtype != x.dtype:
+            weight = weight.to(dtype=x.dtype)
 
         original_shape = x.shape
         x_2d = x.reshape(-1, original_shape[-1])
@@ -142,9 +94,24 @@ class NVFP4LinearFunction(torch.autograd.Function):
         # For DGE we additionally retain the packed FP4 view + scales of the
         # weight's wgrad-axis quantization so the backward pass can recover the
         # exact FP4 bin each weight fell into, without a second quantize pass.
+        #
+        # The wgrad reduction-axis view is mathematically different from the
+        # fprop view whenever 1D block scaling is used.  Do not silently reuse
+        # the fprop view for misaligned shapes: fail fast so callers learn that
+        # the current QDQ kernel requires axis-0 dimensions to be block-aligned.
         w_raw_fp4 = None
         w_raw_scales = None
         if not use_2dblock_w:
+            torch._check(
+                weight.shape[0] % BLOCK_SIZE_DEFAULT == 0,
+                lambda: (
+                    "NVFP4LinearFunction wgrad-axis weight QDQ requires "
+                    f"weight.shape[0] ({weight.shape[0]}) divisible by "
+                    f"BLOCK_SIZE_DEFAULT ({BLOCK_SIZE_DEFAULT}) when "
+                    "use_2dblock_w=False.  Silent fallback to the fprop "
+                    "axis=-1 view is not mathematically valid for 1D blocks."
+                ),
+            )
             if use_dge:
                 w_dq_axis0, w_raw_fp4, w_raw_scales = _qdq(
                     weight, axis=0,
@@ -159,26 +126,39 @@ class NVFP4LinearFunction(torch.autograd.Function):
                     use_per_tensor_scale=use_per_tensor_scale,
                 )
         else:
-            # 2D scaling: fprop quantization already matches wgrad axis layout.
+            # 2D block scaling is axis-invariant, so the fprop quantized view is
+            # also the correct wgrad-axis view.
             if use_dge:
                 # Re-run the fprop-axis QDQ with return_raw to grab the raw FP4
                 # view. The dequantized output is identical to w_dq by
                 # construction, so we discard it and reuse w_dq for the matmul.
                 _, w_raw_fp4, w_raw_scales = _qdq(
                     weight, axis=-1,
-                    is_2d_block=True,
+                    is_2d_block=use_2dblock_w,
                     use_per_tensor_scale=use_per_tensor_scale,
                     return_raw=True,
                 )
             w_dq_axis0 = w_dq
 
+        # Same reasoning for x on the wgrad reduction axis: with 1D block
+        # scaling, axis=0 and axis=-1 encode different block layouts, so
+        # misaligned shapes must fail fast instead of silently changing the
+        # recipe.  Hadamard decorrelates outliers along the batch axis before
+        # axis=0 QDQ so the wgrad matmul sees FP4 inputs with more uniform
+        # per-block ranges; because the same orthogonal H is applied to
+        # grad_output in backward, ``(Hx)ᵀ(Hg) = xᵀg`` is preserved in high
+        # precision and only the FP4 rounding sees the decorrelated blocks.
         if not use_2dblock_x:
-            # Hadamard decorrelates outliers along the batch axis before axis=0
-            # QDQ so the wgrad matmul sees FP4 inputs with more uniform per-
-            # block ranges. Because the same orthogonal H is also applied to
-            # grad_output in backward, ``(Hx)ᵀ(Hg) = xᵀg`` is preserved in
-            # high precision — the rotation only changes how the FP4 rounding
-            # clips outliers within a block.
+            torch._check(
+                x_2d.shape[0] % BLOCK_SIZE_DEFAULT == 0,
+                lambda: (
+                    "NVFP4LinearFunction wgrad-axis activation QDQ requires "
+                    f"x.shape[0] ({x_2d.shape[0]}) divisible by "
+                    f"BLOCK_SIZE_DEFAULT ({BLOCK_SIZE_DEFAULT}) when "
+                    "use_2dblock_x=False.  Silent fallback to the fprop "
+                    "axis=-1 view is not mathematically valid for 1D blocks."
+                ),
+            )
             if hadamard_transform is not None:
                 x_for_axis0 = hadamard_transform(x_2d, left_mul=True)
             else:
@@ -212,6 +192,12 @@ class NVFP4LinearFunction(torch.autograd.Function):
             x_dq, w_dq = ctx.saved_tensors
         original_shape = grad_output.shape
         grad_output = grad_output.reshape(-1, original_shape[-1])
+        # Saved QDQ tensors carry forward's dtype; align them with
+        # grad_output to avoid BF16 vs FP32 mismatches under AMP autocast.
+        if x_dq.dtype != grad_output.dtype:
+            x_dq = x_dq.to(dtype=grad_output.dtype)
+        if w_dq.dtype != grad_output.dtype:
+            w_dq = w_dq.to(dtype=grad_output.dtype)
 
         # Gradients are quantized once for each reduction-axis usage:
         #   - axis=-1 feeds the activation-gradient GEMM

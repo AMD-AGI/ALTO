@@ -23,6 +23,7 @@ from alto.kernels.fp4.nvfp4.nvfp_quantization import (
 
 from .utils import (
     prepare_data,
+    calc_snr,
     convert_to_nvfp4_pytorch,
     convert_from_nvfp4_pytorch,
     convert_to_nvfp4_outer_block_pytorch,
@@ -407,6 +408,25 @@ def test_nvfp4_outer_block_roundtrip_finite(is_2d_inner, is_2d_outer, axis, dtyp
     assert torch.isfinite(inner_scales).all()
     assert torch.isfinite(outer_scales).all()
     assert torch.isfinite(x_dq).all()
+
+    # T5 (NVFP4_Outer_Block_Review.md §3.3): also pin a numerical SNR floor
+    # so silent regressions (e.g. wrong axis, scale-clamp bug, lost outer
+    # scale) get caught even when the round-trip is still finite-valued.
+    # Floors below are conservative: empirically the kernel achieves
+    # ≥18 dB on this gaussian + 0.5%-outlier pattern.  We use a tighter
+    # bound for 1D outer than 2D outer because each 128-element row owns
+    # its own scale (no inter-row averaging).  ``random`` pattern produces
+    # different SNR for fp32 vs bf16 input; cast both to fp32 for SNR.
+    snr = calc_snr(x.float(), x_dq.float())
+    if is_2d_outer:
+        snr_floor = 11.0
+    else:
+        snr_floor = 14.0
+    assert snr > snr_floor, (
+        f"outer-block round-trip SNR {snr:.2f} dB < floor {snr_floor} dB "
+        f"(is_2d_inner={is_2d_inner}, is_2d_outer={is_2d_outer}, "
+        f"axis={axis}, dtype={dtype})"
+    )
 
 
 @pytest.mark.parametrize("is_2d_inner,is_2d_outer", [

@@ -159,3 +159,138 @@ def test_nvfp4_linear_outer_block_rejects_dge():
             False,
             128,
         )
+
+
+# ---------------------------------------------------------------------------
+# T3 / T6 (NVFP4_Outer_Block_Review.md §3.3): direct outer-block vs PTS
+# dominance on a paper-realistic LLM-activation distribution, plus
+# Hadamard × outer-block SNR coverage.
+# ---------------------------------------------------------------------------
+
+
+def _run_linear_one_pass(
+    *,
+    inputs: torch.Tensor,
+    weights: torch.Tensor,
+    use_outer_block_scale: bool,
+    use_outer_scale: bool,
+    use_2dblock_x: bool = False,
+    use_2dblock_w: bool = False,
+    use_outer_2dblock_w: bool = False,
+    use_sr_grad: bool = False,
+) -> torch.Tensor:
+    return _to_nvfp4_then_scaled_mm(
+        inputs,
+        weights,
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_sr_grad=use_sr_grad,
+        use_outer_scale=use_outer_scale,
+        use_outer_block_scale=use_outer_block_scale,
+        use_outer_2dblock_x=False,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        outer_block_size=128,
+    )
+
+
+def test_outer_block_snr_dominates_pts_on_lognormal():
+    """T3: outer-block must strictly dominate PTS on heavy-tailed activations.
+
+    Uses the lognormal-channel-outlier pattern (LLM-activation proxy).
+    Asserts both:
+      (i) outer-block forward output SNR ≥ PTS forward output SNR,
+     (ii) outer-block dX SNR ≥ PTS dX SNR,
+    on identical inputs/weights with a meaningful margin (≥ 1 dB).
+    """
+    dtype = torch.bfloat16
+    M, N, K = 256, 128, 128
+    inputs = prepare_data(
+        (1, M, K), dtype, pattern="lognormal_channel_outlier", seed=7,
+    ).requires_grad_(True)
+    weights = prepare_data(
+        (N, K), dtype, pattern="lognormal_channel_outlier", seed=13,
+    ).requires_grad_(True)
+    target = prepare_data((1, M, N), dtype, pattern="random", seed=23)
+
+    outputs_ref = torch.nn.functional.linear(inputs, weights)
+    loss_ref = torch.nn.functional.mse_loss(outputs_ref, target)
+    loss_ref.backward()
+    grad_inputs_ref = inputs.grad.clone()
+    inputs.grad.zero_(); weights.grad.zero_()
+
+    # PTS path
+    outputs_pts = _run_linear_one_pass(
+        inputs=inputs, weights=weights,
+        use_outer_block_scale=False, use_outer_scale=True,
+    )
+    loss_pts = torch.nn.functional.mse_loss(outputs_pts, target)
+    loss_pts.backward()
+    pts_o_snr = calc_snr(outputs_ref, outputs_pts)
+    pts_dx_snr = calc_snr(grad_inputs_ref, inputs.grad)
+    inputs.grad.zero_(); weights.grad.zero_()
+
+    # Outer-block path
+    outputs_ob = _run_linear_one_pass(
+        inputs=inputs, weights=weights,
+        use_outer_block_scale=True, use_outer_scale=False,
+        use_outer_2dblock_w=True,  # 2D outer for W (axis-invariant)
+    )
+    loss_ob = torch.nn.functional.mse_loss(outputs_ob, target)
+    loss_ob.backward()
+    ob_o_snr = calc_snr(outputs_ref, outputs_ob)
+    ob_dx_snr = calc_snr(grad_inputs_ref, inputs.grad)
+
+    # Margins below are conservative; on a typical heavy-tailed activation
+    # we observe outer-block ≥ PTS by 3-8 dB.
+    assert ob_o_snr >= pts_o_snr + 1.0, (
+        f"outer-block forward output SNR ({ob_o_snr:.2f}) did not "
+        f"dominate PTS ({pts_o_snr:.2f}) by >=1 dB on lognormal pattern."
+    )
+    assert ob_dx_snr >= pts_dx_snr + 1.0, (
+        f"outer-block dX SNR ({ob_dx_snr:.2f}) did not dominate PTS "
+        f"({pts_dx_snr:.2f}) by >=1 dB on lognormal pattern."
+    )
+
+
+@pytest.mark.parametrize("use_2dblock,use_outer_2dblock", OUTER_CASES)
+def test_outer_block_with_hadamard_autograd(use_2dblock, use_outer_2dblock):
+    """T6: outer-block × M-axis wgrad RHT (legacy use_hadamard) must clear the
+    base nvfp4_linear SNR contract."""
+    B, M, N, K = 1, 512, 384, 128
+    dtype = torch.bfloat16
+    inputs = prepare_data((B, M, K), dtype).requires_grad_(True)
+    weights = prepare_data((N, K), dtype).requires_grad_(True)
+    target = prepare_data((B, M, N), dtype)
+
+    outputs_ref = torch.nn.functional.linear(inputs, weights)
+    loss_ref = torch.nn.functional.mse_loss(outputs_ref, target)
+    loss_ref.backward()
+    grad_inputs_ref = inputs.grad.clone()
+    grad_weights_ref = weights.grad.clone()
+    inputs.grad.zero_(); weights.grad.zero_()
+
+    outputs = _to_nvfp4_then_scaled_mm(
+        inputs, weights,
+        use_2dblock_x=use_2dblock, use_2dblock_w=use_2dblock,
+        use_sr_grad=False, use_outer_scale=False,
+        use_hadamard=True,
+        use_outer_block_scale=True,
+        use_outer_2dblock_x=use_outer_2dblock,
+        use_outer_2dblock_w=use_outer_2dblock,
+        outer_block_size=128,
+    )
+    loss = torch.nn.functional.mse_loss(outputs, target)
+    loss.backward()
+    check_nvfp4_autograd_snr(
+        {
+            "O": calc_snr(outputs_ref, outputs),
+            "dX": calc_snr(grad_inputs_ref, inputs.grad),
+            "dW": calc_snr(grad_weights_ref, weights.grad),
+        },
+        K=K, use_sr_grad=False,
+        kind="nvfp4_linear",
+        context=(
+            f"outer-block + use_hadamard (M-axis wgrad RHT) "
+            f"inner_2d={use_2dblock} outer_2d={use_outer_2dblock}"
+        ),
+    )

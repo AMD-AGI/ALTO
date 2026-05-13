@@ -54,3 +54,57 @@ def test_outer_block_mode_accepts_nvfp4_recipe():
         outer_block_size=128,
     )
     assert modifier.two_level_scaling == "outer_block"
+
+
+# ---------------------------------------------------------------------------
+# Outer-block scaling does not support MoE / GroupedExperts modules (the
+# dispatch wrapper raises ``NotImplementedError`` on grouped_mm).  Reject
+# such recipes at construction time so the failure points at the yaml.
+# ---------------------------------------------------------------------------
+
+
+def test_outer_block_rejects_targets_with_grouped_experts():
+    with pytest.raises(ValueError, match="grouped-experts"):
+        LowPrecisionTrainingModifier(
+            scheme="nvfp4",
+            targets=["Linear", "GptOssGroupedExperts"],
+            two_level_scaling="outer_block",
+        )
+
+
+def test_outer_block_rejects_dict_scheme_with_moe_targets():
+    with pytest.raises(ValueError, match="grouped-experts"):
+        LowPrecisionTrainingModifier(
+            scheme={"nvfp4": ["Linear", "DeepseekV3GroupedExperts"]},
+            two_level_scaling="outer_block",
+        )
+
+
+def test_outer_block_rejects_regex_matching_grouped_experts():
+    with pytest.raises(ValueError, match="grouped-experts"):
+        LowPrecisionTrainingModifier(
+            scheme="nvfp4",
+            targets=["Linear", "re:.*GroupedExperts$"],
+            two_level_scaling="outer_block",
+        )
+
+
+def test_outer_block_accepts_targets_without_moe():
+    """Sanity: dense-only targets are still accepted under outer-block."""
+    modifier = LowPrecisionTrainingModifier(
+        scheme="nvfp4",
+        targets=["Linear"],
+        two_level_scaling="outer_block",
+        use_outer_2dblock_w=True,
+    )
+    assert modifier.two_level_scaling == "outer_block"
+
+
+def test_pts_recipe_is_unchanged_by_p0_4_validator():
+    """tensorwise / none recipes must keep accepting MoE targets unchanged."""
+    modifier = LowPrecisionTrainingModifier(
+        scheme="nvfp4",
+        targets=["Linear", "GptOssGroupedExperts"],
+        two_level_scaling="tensorwise",
+    )
+    assert modifier.two_level_scaling == "tensorwise"

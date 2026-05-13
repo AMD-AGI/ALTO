@@ -21,7 +21,7 @@ F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
 
 
-def prepare_data(tensor_shape, data_type, pattern="random"):
+def prepare_data(tensor_shape, data_type, pattern="random", seed: int = 1234):
     """Prepare test data with specified pattern.
 
     Args:
@@ -33,8 +33,19 @@ def prepare_data(tensor_shape, data_type, pattern="random"):
                          stored block scale.
             "large"    : All 5000.0 — exceeds F8E4M3_MAX * F4_E2M1_MAX (2688),
                          tests FP4 saturation and scale clamp to F8E4M3_MAX.
+            "lognormal_channel_outlier" : Log-normal background with a small
+                         fraction of channels (along the last axis) scaled by
+                         ~1e3.  Approximates LLM activation distributions
+                         (Sun et al. 2024 "massive activations"), which are
+                         the worst case for tensor-wise scaling and the best
+                         case for outer-block scaling.  See
+                         NVFP4_Outer_Block_Review.md §3.3 T1.
+        seed: Per-call seed override.  Defaults to 1234 for backward
+              compatibility; tests that mix multiple patterns / shapes in
+              a single file should pass distinct seeds to avoid sharing the
+              same RNG state across parametrised cases.
     """
-    torch.manual_seed(1234)
+    torch.manual_seed(seed)
     device = torch.device("cuda")
 
     if pattern == "random":
@@ -45,6 +56,20 @@ def prepare_data(tensor_shape, data_type, pattern="random"):
         x = torch.zeros(tensor_shape, dtype=data_type, device=device)
     elif pattern == "large":
         x = torch.ones(tensor_shape, dtype=data_type, device=device) * 5000.0
+    elif pattern == "lognormal_channel_outlier":
+        # Log-normal-style background (heavy-tailed, mean ≈ 0).  We take
+        # ``randn ** 2 * 0.1 * sign(randn)`` so the marginal is approximately
+        # ``±X^2 / 10`` with X ~ N(0, 1), a heavy-tailed proxy.
+        base = torch.randn(tensor_shape, dtype=torch.float32, device=device)
+        x = (base.abs() ** 2) * 0.1 * base.sign()
+        if len(tensor_shape) >= 1 and tensor_shape[-1] >= 8:
+            # Promote ~1% of the last-axis channels to massive activations.
+            num_channels = tensor_shape[-1]
+            num_outlier = max(1, num_channels // 100)
+            generator = torch.Generator(device="cpu").manual_seed(seed + 1)
+            outlier_idx = torch.randperm(num_channels, generator=generator)[:num_outlier]
+            x[..., outlier_idx] = x[..., outlier_idx] * 1000.0
+        x = x.to(data_type)
     else:
         raise ValueError(f"Unknown pattern: {pattern}")
 

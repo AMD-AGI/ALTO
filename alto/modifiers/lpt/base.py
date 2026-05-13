@@ -99,7 +99,41 @@ class LowPrecisionTrainingModifier(Modifier):
                     'two_level_scaling="outer_block" is only defined for '
                     f"scheme='nvfp4', got {invalid_schemes}"
                 )
+            # Outer-block scaling only supports the dense Linear path; the
+            # NVFP4 grouped-GEMM dispatch raises ``NotImplementedError`` on
+            # MoE forward.  Reject the recipe here so the failure points at
+            # the offending yaml entry instead of a deep runtime crash.
+            offending = self._collect_moe_like_targets()
+            if offending:
+                raise ValueError(
+                    'two_level_scaling="outer_block" does not support MoE / '
+                    f"grouped-experts modules; offending targets: {offending}. "
+                    "Drop these from `targets` or set two_level_scaling to "
+                    '"tensorwise" / "none".'
+                )
         return self
+
+    def _collect_moe_like_targets(self) -> list[str]:
+        """Return targets whose name looks like an MoE / GroupedExperts module.
+
+        Match is a case-insensitive substring check on ``"groupedexperts"`` or
+        ``"moe"``, so regex patterns such as ``re:.*GroupedExperts`` are
+        matched literally without parsing them.
+        """
+        target_groups: list[list[str]] = []
+        if isinstance(self.scheme, dict):
+            target_groups.extend(list(self.scheme.values()))
+        else:
+            target_groups.append(
+                self.targets if isinstance(self.targets, list) else [self.targets]
+            )
+        offending: list[str] = []
+        for group in target_groups:
+            for entry in group:
+                lowered = entry.lower()
+                if "groupedexperts" in lowered or "moe" in lowered:
+                    offending.append(entry)
+        return offending
 
     @model_validator(mode="after")
     def validate_lora_rank_alignment(self):

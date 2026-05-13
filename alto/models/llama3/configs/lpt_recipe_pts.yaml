@@ -1,0 +1,12 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "nvfp4"
+      targets: ["Linear"]
+      ignore: ["output"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: false
+      use_sr_grad: false
+      use_dge: false
+      two_level_scaling: "tensorwise"

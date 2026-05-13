@@ -1,0 +1,21 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "nvfp4"
+      targets: ["Linear"]
+      ignore: ["output"]
+      # (C+rht): (C+sr) + N-axis RHT in the dX path.  Note this is the
+      # paper-recipe "dX RHT" column from TetraJet-v2 Tab. 8(c), NOT the
+      # M-axis wgrad RHT (use_hadamard, which is mutually exclusive with
+      # align_x_forward_wgrad).  See NVFP4_Outer_Block_Review.md §6.3 P0-4.
+      use_2dblock_x: false
+      use_2dblock_w: false
+      use_hadamard: false
+      use_sr_grad: true
+      use_dge: false
+      two_level_scaling: "outer_block"
+      use_outer_2dblock_x: false
+      use_outer_2dblock_w: true
+      outer_block_size: 128
+      align_x_forward_wgrad: true
+      use_dx_rht: true

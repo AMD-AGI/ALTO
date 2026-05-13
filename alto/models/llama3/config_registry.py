@@ -19,6 +19,15 @@ __all__ = [
     "llama3_debugmodel",
     "llama3_debugmodel_opt",
     "llama3_debugmodel_lpt",
+    # Outer-block E2E ablation arms (see NVFP4_Outer_Block_Review.md §6.7).
+    "llama3_debugmodel_lpt_outer_block_bf16",       # (A) BF16 baseline
+    "llama3_debugmodel_lpt_outer_block_pts",        # (B) PTS, 16x16 W
+    "llama3_debugmodel_lpt_outer_block_pts_w1x16",  # (B') PTS, 1x16 W
+    "llama3_debugmodel_lpt_outer_block_w16x16",     # (C-N) outer, 16x16 W
+    "llama3_debugmodel_lpt_outer_block",            # (C) outer, 1x16 W
+    "llama3_debugmodel_lpt_outer_block_align",      # (C+align)
+    "llama3_debugmodel_lpt_outer_block_align_sr",   # (C+sr)
+    "llama3_debugmodel_lpt_outer_block_align_sr_rht",  # (C+rht): dX RHT
     "llama3_1b",
     "llama3_1b_opt",
     "llama3_1b_lpt",
@@ -76,6 +85,100 @@ def llama3_debugmodel_lpt() -> Trainer.Config:
     config.training.steps = 10
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+# ----------------------------------------------------------------------------
+# Outer-block scaling E2E experiment arms
+# (see NVFP4_Outer_Block_Review.md §4 + §6.7).
+#
+# All arms share the same llama3_debugmodel base (8L / 256H / seq=2048 /
+# global_bs=16) and run 2000 training steps with c4_test data, so the BF16
+# baseline takes ~15 min single-GPU and the NVFP4-emulation arms take
+# 2-4× longer.  See tests/integration/llama3_debugmodel_outer_block_*.sh.
+# ----------------------------------------------------------------------------
+
+
+def _outer_block_arm_base(steps: int = 2000) -> Trainer.Config:
+    """Common base for all outer-block ablation arms."""
+    config = llama3_debugmodel()
+    config.training.steps = steps
+    # Periodic validation so we can plot validation curves between arms.
+    config.validator.enable = True
+    config.validator.freq = 100
+    config.validator.steps = 20
+    return config
+
+
+def llama3_debugmodel_lpt_outer_block_bf16() -> Trainer.Config:
+    """(A) BF16 gold reference: no LPT modifier."""
+    return _outer_block_arm_base()
+
+
+def llama3_debugmodel_lpt_outer_block_pts() -> Trainer.Config:
+    """(B) NVFP4 + per-tensor scale, 16x16 weight inner block."""
+    config = _outer_block_arm_base()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_pts.yaml"),
+    ])
+    return config
+
+
+def llama3_debugmodel_lpt_outer_block_pts_w1x16() -> Trainer.Config:
+    """(B') NVFP4 + per-tensor scale, 1x16 weight inner block.
+
+    Strips the "1x16 weight" effect from the PTS baseline so we can attribute
+    PPL deltas between (B) and (C) cleanly to outer-block scaling.
+    """
+    config = _outer_block_arm_base()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_pts_w1x16.yaml"),
+    ])
+    return config
+
+
+def llama3_debugmodel_lpt_outer_block_w16x16() -> Trainer.Config:
+    """(C-N) NVFP4 + outer-block scale, 16x16 weight inner block ("NVIDIA recipe")."""
+    config = _outer_block_arm_base()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_outer_block_w16x16.yaml"),
+    ])
+    return config
+
+
+def llama3_debugmodel_lpt_outer_block() -> Trainer.Config:
+    """(C) NVFP4 + outer-block scale, 1x16 weight inner block (paper recipe)."""
+    config = _outer_block_arm_base()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_outer_block.yaml"),
+    ])
+    return config
+
+
+def llama3_debugmodel_lpt_outer_block_align() -> Trainer.Config:
+    """(C+align) (C) + X̂ forward-wgrad alignment."""
+    config = _outer_block_arm_base()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_outer_block_align.yaml"),
+    ])
+    return config
+
+
+def llama3_debugmodel_lpt_outer_block_align_sr() -> Trainer.Config:
+    """(C+sr) (C+align) + stochastic rounding on gradient QDQ."""
+    config = _outer_block_arm_base()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_outer_block_align_sr.yaml"),
+    ])
+    return config
+
+
+def llama3_debugmodel_lpt_outer_block_align_sr_rht() -> Trainer.Config:
+    """(C+rht) (C+sr) + N-axis RHT in the dX path (paper "dX RHT")."""
+    config = _outer_block_arm_base()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_outer_block_align_sr_rht.yaml"),
+    ])
     return config
 
 

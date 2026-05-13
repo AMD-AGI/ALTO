@@ -40,6 +40,14 @@ class LowPrecisionTrainingModifier(Modifier):
     use_outer_2dblock_w: bool = False
     outer_block_size: int = 128
 
+    # Paper-recipe knobs for TetraJet-v2 (arXiv 2510.27527) NVFP4 linear:
+    #   - align_x_forward_wgrad: reuse forward X̂ in wgrad-axis QDQ
+    #     (Tab. 8(b) "X̂ align" → -0.31 PPL on OLMo-2-150M / 52B tokens).
+    #   - use_dx_rht: N-axis RHT in dX backward
+    #     (Tab. 8(c) "dX RHT" → -0.05 PPL on top of dW RHT).
+    align_x_forward_wgrad: bool = False
+    use_dx_rht: bool = False
+
     lora_rank: int = 0
     """
     Lora rank for the decomposed linear layer.
@@ -111,6 +119,41 @@ class LowPrecisionTrainingModifier(Modifier):
                     "Drop these from `targets` or set two_level_scaling to "
                     '"tensorwise" / "none".'
                 )
+
+        # Paper-recipe knob compatibility checks.
+        if self.align_x_forward_wgrad:
+            if self.two_level_scaling != "outer_block":
+                raise ValueError(
+                    'align_x_forward_wgrad=True requires '
+                    'two_level_scaling="outer_block" (paper recipe).'
+                )
+            if self.use_2dblock_x:
+                raise ValueError(
+                    "align_x_forward_wgrad=True only makes sense with the "
+                    "1D inner block on X (use_2dblock_x=False).  With 2D "
+                    "inner blocks the fprop axis=-1 view is already aliased "
+                    "to the wgrad axis=0 view."
+                )
+            if self.use_hadamard:
+                raise ValueError(
+                    "align_x_forward_wgrad=True is incompatible with "
+                    "use_hadamard=True: M-axis Hadamard rotates X before the "
+                    "axis=0 QDQ; reusing the unrotated forward X̂ would break "
+                    "the (Hx)ᵀ(Hg) = xᵀg invariance.  Pick one."
+                )
+            if self.use_dge:
+                raise ValueError(
+                    "align_x_forward_wgrad=True is not supported with "
+                    "use_dge=True (DGE relies on the wgrad-axis weight raw "
+                    "FP4 view, not exercised on this code path)."
+                )
+
+        if self.use_dx_rht and self.two_level_scaling != "outer_block":
+            raise ValueError(
+                'use_dx_rht=True requires two_level_scaling="outer_block" '
+                "(paper recipe; outside this scope the dX path has not been "
+                "audited for invariance)."
+            )
         return self
 
     def _collect_moe_like_targets(self) -> list[str]:
@@ -179,6 +222,8 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_outer_2dblock_x=self.use_outer_2dblock_x,
                     use_outer_2dblock_w=self.use_outer_2dblock_w,
                     outer_block_size=self.outer_block_size,
+                    align_x_forward_wgrad=self.align_x_forward_wgrad,
+                    use_dx_rht=self.use_dx_rht,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

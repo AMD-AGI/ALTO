@@ -65,6 +65,8 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_outer_2dblock_x: bool = False,
         use_outer_2dblock_w: bool = False,
         outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
+        align_x_forward_wgrad: bool = False,
+        dx_rht_transform: Optional[HadamardTransform] = None,
     ):
         weight = unwrap_weight_wrapper(weight)
         torch._check(
@@ -76,6 +78,37 @@ class NVFP4LinearFunction(torch.autograd.Function):
             lambda: (
                 "NVFP4 outer-block scaling does not yet support DGE because "
                 "DGE needs the raw packed FP4 values and inner scales."
+            ),
+        )
+        # Paper-recipe X̂ alignment requires 1D inner X and no M-axis
+        # Hadamard.  The pydantic LPT validator catches misuse at yaml
+        # construction time, but the autograd entry-point is also exposed to
+        # callers that bypass the modifier (e.g. unit tests), so we re-check.
+        torch._check(
+            not (align_x_forward_wgrad and use_2dblock_x),
+            lambda: (
+                "align_x_forward_wgrad is only meaningful with 1D inner X "
+                "(use_2dblock_x=False); with 2D inner X the axis=0 view is "
+                "already aliased to the fprop view."
+            ),
+        )
+        torch._check(
+            not (align_x_forward_wgrad and hadamard_transform is not None),
+            lambda: (
+                "align_x_forward_wgrad is incompatible with M-axis Hadamard: "
+                "the unrotated forward X̂ would break the (Hx)ᵀ(Hg)=xᵀg "
+                "invariance.  Disable use_hadamard or align_x_forward_wgrad."
+            ),
+        )
+        torch._check(
+            not (align_x_forward_wgrad and use_dge),
+            lambda: "align_x_forward_wgrad is not supported with DGE.",
+        )
+        torch._check(
+            not (dx_rht_transform is not None and not use_outer_block_scale),
+            lambda: (
+                "dx_rht_transform requires use_outer_block_scale=True (paper "
+                "recipe is only audited within outer-block linear)."
             ),
         )
         # Align weight dtype with activation so saved QDQ tensors share a
@@ -224,38 +257,76 @@ class NVFP4LinearFunction(torch.autograd.Function):
         # per-block ranges; because the same orthogonal H is applied to
         # grad_output in backward, ``(Hx)ᵀ(Hg) = xᵀg`` is preserved in high
         # precision and only the FP4 rounding sees the decorrelated blocks.
+        #
+        # X̂ alignment (paper recipe): when align_x_forward_wgrad is on and
+        # we are in the supported configuration (outer-block, 1D inner X, no
+        # Hadamard), reuse the forward x_dq for the wgrad-axis view.  This
+        # gives up the optimal axis=0 per-block scale grid in exchange for
+        # numerically identical X̂ in both fprop and wgrad GEMMs (see
+        # TetraJet-v2 Tab. 8(b)).
         if not use_2dblock_x:
-            torch._check(
-                x_2d.shape[0] % BLOCK_SIZE_DEFAULT == 0,
-                lambda: (
-                    "NVFP4LinearFunction wgrad-axis activation QDQ requires "
-                    f"x.shape[0] ({x_2d.shape[0]}) divisible by "
-                    f"BLOCK_SIZE_DEFAULT ({BLOCK_SIZE_DEFAULT}) when "
-                    "use_2dblock_x=False.  Silent fallback to the fprop "
-                    "axis=-1 view is not mathematically valid for 1D blocks."
-                ),
-            )
-            if hadamard_transform is not None:
-                x_for_axis0 = hadamard_transform(x_2d, left_mul=True)
+            if align_x_forward_wgrad and use_outer_block_scale:
+                # No per-axis divisibility constraint on M: we never compute a
+                # 1D axis=0 inner block.  Reuse the fprop FP4 round of X.
+                x_dq_axis0 = x_dq
             else:
-                x_for_axis0 = x_2d
-            # ``x_outer_scale_cache`` is only set when the wgrad-axis input is
-            # the same tensor (no Hadamard); otherwise it stays None and the
-            # axis=0 QDQ recomputes the outer scale from ``x_for_axis0``.
-            x_dq_axis0 = _qdq(
-                x_for_axis0, axis=0,
-                is_2d_block=False,
-                use_outer_scale=use_outer_scale,
-                use_outer_block_scale=use_outer_block_scale,
-                is_2d_outer=use_outer_2dblock_x,
-                outer_block_size=outer_block_size,
-                precomputed_outer_scale=x_outer_scale_cache,
-            )
+                torch._check(
+                    x_2d.shape[0] % BLOCK_SIZE_DEFAULT == 0,
+                    lambda: (
+                        "NVFP4LinearFunction wgrad-axis activation QDQ requires "
+                        f"x.shape[0] ({x_2d.shape[0]}) divisible by "
+                        f"BLOCK_SIZE_DEFAULT ({BLOCK_SIZE_DEFAULT}) when "
+                        "use_2dblock_x=False.  Silent fallback to the fprop "
+                        "axis=-1 view is not mathematically valid for 1D blocks."
+                    ),
+                )
+                if hadamard_transform is not None:
+                    x_for_axis0 = hadamard_transform(x_2d, left_mul=True)
+                else:
+                    x_for_axis0 = x_2d
+                # ``x_outer_scale_cache`` is only set when the wgrad-axis input
+                # is the same tensor (no Hadamard); otherwise it stays None and
+                # the axis=0 QDQ recomputes the outer scale from
+                # ``x_for_axis0``.
+                x_dq_axis0 = _qdq(
+                    x_for_axis0, axis=0,
+                    is_2d_block=False,
+                    use_outer_scale=use_outer_scale,
+                    use_outer_block_scale=use_outer_block_scale,
+                    is_2d_outer=use_outer_2dblock_x,
+                    outer_block_size=outer_block_size,
+                    precomputed_outer_scale=x_outer_scale_cache,
+                )
         else:
             x_dq_axis0 = x_dq
 
+        # dX RHT (paper recipe, TetraJet-v2 Tab. 8(c) "dX RHT" column).
+        # Forward GEMM still uses the unrotated ``w_dq``.  We produce an
+        # additional axis=-1 weight QDQ of ``H^T @ W`` on the N axis to be
+        # consumed by the dX GEMM in backward.  Math: with H acting on N
+        # (the dX reduction axis), ``(grad_y @ H) @ (H^T @ W) = grad_y @ W``
+        # for any orthogonal H, so the rotation only redistributes outliers
+        # before NVFP4 quantization without biasing the gradient.
+        w_dq_dx_rht: Optional[torch.Tensor] = None
+        if dx_rht_transform is not None:
+            # ``weight`` has shape (N, K); ``left_mul=True, inverse=True``
+            # gives ``H^T @ weight`` on the first (N) axis.
+            w_rotated_n = dx_rht_transform(weight, left_mul=True, inverse=True)
+            w_dq_dx_rht = _qdq(
+                w_rotated_n, axis=-1,
+                is_2d_block=use_2dblock_w,
+                use_outer_scale=use_outer_scale,
+                use_outer_block_scale=use_outer_block_scale,
+                is_2d_outer=use_outer_2dblock_w,
+                outer_block_size=outer_block_size,
+            )
+
         if use_dge:
             ctx.save_for_backward(x_dq_axis0, w_dq_axis0, w_raw_fp4, w_raw_scales)
+        elif w_dq_dx_rht is not None:
+            # Stash the rotated-weight view alongside the unrotated one so
+            # backward can consume both without re-quantizing the weight.
+            ctx.save_for_backward(x_dq_axis0, w_dq_axis0, w_dq, w_dq_dx_rht)
         else:
             ctx.save_for_backward(x_dq_axis0, w_dq_axis0)
         ctx.use_2dblock_x = use_2dblock_x
@@ -267,13 +338,22 @@ class NVFP4LinearFunction(torch.autograd.Function):
         ctx.outer_block_size = outer_block_size
         ctx.hadamard_transform = hadamard_transform
         ctx.use_dge = use_dge
+        ctx.dx_rht_transform = dx_rht_transform
+        ctx.align_x_forward_wgrad = align_x_forward_wgrad
 
         return y.view(*original_shape[:-1], -1)
 
     @staticmethod
     def backward(ctx, grad_output):
+        w_dq_fprop: Optional[torch.Tensor] = None
+        w_dq_dx_rht: Optional[torch.Tensor] = None
         if ctx.use_dge:
             x_dq, w_dq, w_raw_fp4, w_raw_scales = ctx.saved_tensors
+        elif ctx.dx_rht_transform is not None:
+            # x_dq is the wgrad-axis X̂; w_dq is the (unused-in-bwd) wgrad-axis
+            # W̃; w_dq_fprop is the fprop axis=-1 W̃ (kept for symmetry / future
+            # use); w_dq_dx_rht is the N-axis-rotated W̃ for the dX GEMM.
+            x_dq, w_dq, w_dq_fprop, w_dq_dx_rht = ctx.saved_tensors
         else:
             x_dq, w_dq = ctx.saved_tensors
         original_shape = grad_output.shape
@@ -284,15 +364,33 @@ class NVFP4LinearFunction(torch.autograd.Function):
             x_dq = x_dq.to(dtype=grad_output.dtype)
         if w_dq.dtype != grad_output.dtype:
             w_dq = w_dq.to(dtype=grad_output.dtype)
+        if w_dq_dx_rht is not None and w_dq_dx_rht.dtype != grad_output.dtype:
+            w_dq_dx_rht = w_dq_dx_rht.to(dtype=grad_output.dtype)
 
         # Gradients are quantized once for each reduction-axis usage:
         #   - axis=-1 feeds the activation-gradient GEMM
         #   - axis=0  feeds the weight-gradient GEMM
         # Stochastic rounding is kept on for gradients because unbiased
         # quantization matters most on the backward path.
+        #
+        # dX RHT (paper recipe): when ``ctx.dx_rht_transform`` is set, the
+        # axis=-1 QDQ consumes the N-axis-rotated grad_output, and the dX
+        # GEMM uses ``w_dq_dx_rht = QDQ(H^T @ W)`` saved in forward.  The
+        # rotation invariance ``(grad_y @ H) @ (H^T @ W) = grad_y @ W`` is
+        # preserved in high precision; FP4 only sees the decorrelated tiles.
+        # ``grad_output_dq`` therefore replaces the unrotated path entirely
+        # when dx_rht is enabled, with no inverse rotation needed afterwards
+        # since both operands of the GEMM are rotated by the same H.
+        if ctx.dx_rht_transform is not None:
+            # grad_output has shape (M, N); right-mul by H rotates the last
+            # axis (= N axis = dX reduction axis).
+            grad_output_for_dx = ctx.dx_rht_transform(grad_output, left_mul=False)
+        else:
+            grad_output_for_dx = grad_output
+
         if ctx.use_2dblock_x:
             grad_output_dq = _qdq(
-                grad_output, axis=-1,
+                grad_output_for_dx, axis=-1,
                 is_2d_block=True,
                 use_outer_scale=ctx.use_outer_scale,
                 use_sr=ctx.use_sr_grad,
@@ -310,9 +408,13 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 and ctx.use_outer_2dblock_x
                 and ctx.hadamard_transform is None
             )
+            # dX-RHT disables the outer-scale share with the wgrad axis: the
+            # rotated grad_output has a different outer-amax map than the
+            # unrotated one consumed by the wgrad-axis QDQ.
+            share_grad_outer = share_grad_outer and ctx.dx_rht_transform is None
             if share_grad_outer:
                 grad_output_dq, grad_outer_scale_cache = _qdq(
-                    grad_output, axis=-1,
+                    grad_output_for_dx, axis=-1,
                     is_2d_block=False,
                     use_outer_scale=ctx.use_outer_scale,
                     use_sr=ctx.use_sr_grad,
@@ -323,7 +425,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 )
             else:
                 grad_output_dq = _qdq(
-                    grad_output, axis=-1,
+                    grad_output_for_dx, axis=-1,
                     is_2d_block=False,
                     use_outer_scale=ctx.use_outer_scale,
                     use_sr=ctx.use_sr_grad,
@@ -351,7 +453,17 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 precomputed_outer_scale=grad_outer_scale_cache,
             )
 
-        grad_inputs = grad_output_dq @ w_dq
+        # dX path: rotated grad_output ⨯ rotated weight when dx_rht is on;
+        # unrotated grad_output ⨯ fprop weight otherwise.  ``w_dq`` is the
+        # wgrad-axis weight view (axis=0 or aliased to fprop in 2D mode);
+        # for dX we deliberately use ``w_dq_fprop`` (the fprop axis=-1 view)
+        # to preserve the existing recipe — backward-compatible when
+        # dx_rht_transform is None (``w_dq_fprop`` was not saved, so we fall
+        # back to ``w_dq`` which is identical in non-DGE 2D mode).
+        if w_dq_dx_rht is not None:
+            grad_inputs = grad_output_dq @ w_dq_dx_rht
+        else:
+            grad_inputs = grad_output_dq @ w_dq
         grad_weights = grad_output_m_dq.T @ x_dq
 
         if ctx.use_dge:
@@ -378,6 +490,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
             grad_inputs.view(*original_shape[:-1], w_dq.shape[-1]),
             grad_weights,
             None, None, None, None, None, None, None, None, None, None,
+            None, None,
         )
 
 
@@ -394,6 +507,8 @@ def _to_nvfp4_then_scaled_mm(
     use_outer_2dblock_x: bool = False,
     use_outer_2dblock_w: bool = False,
     outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
+    align_x_forward_wgrad: bool = False,
+    use_dx_rht: bool = False,
 ) -> torch.Tensor:
     """Build the optional Hadamard transform and apply ``NVFP4LinearFunction``.
 
@@ -403,11 +518,22 @@ def _to_nvfp4_then_scaled_mm(
     ``HadamardTransform`` is built lazily here (outside the autograd
     function) so the opaque transform object flows through ``apply`` as a
     non-Tensor argument, matching what MXFP4 does.
+
+    ``use_hadamard`` builds the M-axis wgrad RHT (existing behaviour).
+    ``use_dx_rht`` builds a separate N-axis RHT consumed only by the dX
+    GEMM in backward and the additional axis=-1 weight QDQ in forward.
+    Two independent transform instances are constructed so the M and N
+    rotations are statistically independent (matching the paper's "RHT
+    in both dW and dX" recipe in Table 8(c)).
     """
     hadamard_transform: Optional[HadamardTransform] = None
     if use_hadamard:
         with torch.no_grad():
             hadamard_transform = HadamardFactory.create_transform(device=b.device)
+    dx_rht_transform: Optional[HadamardTransform] = None
+    if use_dx_rht:
+        with torch.no_grad():
+            dx_rht_transform = HadamardFactory.create_transform(device=b.device)
     return NVFP4LinearFunction.apply(
         a, b,
         use_2dblock_x,
@@ -420,4 +546,6 @@ def _to_nvfp4_then_scaled_mm(
         use_outer_2dblock_x,
         use_outer_2dblock_w,
         outer_block_size,
+        align_x_forward_wgrad,
+        dx_rht_transform,
     )

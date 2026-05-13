@@ -38,5 +38,25 @@ class TrainingOpConfig:
     use_outer_2dblock_w: bool = False
     outer_block_size: int = 128
 
+    align_x_forward_wgrad: bool = False
+    """
+    paper-recipe X̂ alignment: when ``True`` and outer-block scaling is active
+    on a 1D inner-block X (``use_2dblock_x=False``), reuse the forward's
+    axis=-1 QDQ of X as the wgrad-axis view instead of running an independent
+    axis=0 QDQ.  Matches TetraJet-v2 (arXiv 2510.27527, §D.1-(b)) and is
+    mutually exclusive with ``use_hadamard`` (Hadamard rotates X on the M
+    axis before axis=0 QDQ — reusing the unrotated forward view would break
+    the rotation invariance ``(Hx)ᵀ(Hg) = xᵀg``).
+    """
+    use_dx_rht: bool = False
+    """
+    paper-recipe dX RHT: when ``True``, apply a Random Hadamard Transform on
+    the N axis to both ``grad_output`` and ``weight`` before the dX GEMM in
+    backward (``dX = grad_output @ weight``).  Forward keeps the unrotated
+    weight QDQ; an *additional* axis=-1 weight QDQ on ``H^T @ W`` is saved
+    for the rotated dX path.  Independent of ``use_hadamard`` (which is the
+    M-axis wgrad RHT).  Cf. TetraJet-v2 Table 8(c) "dX RHT" column.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

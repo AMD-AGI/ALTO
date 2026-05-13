@@ -392,6 +392,8 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_outer_2dblock_x=config.use_outer_2dblock_x,
                 use_outer_2dblock_w=config.use_outer_2dblock_w,
                 outer_block_size=config.outer_block_size,
+                align_x_forward_wgrad=config.align_x_forward_wgrad,
+                use_dx_rht=config.use_dx_rht,
             )
             if bias is not None:
                 Y = Y + bias

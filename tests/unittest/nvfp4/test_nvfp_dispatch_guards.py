@@ -190,7 +190,9 @@ def test_linear_routes_to_nvfp4_linear_kernel(monkeypatch, device):
     calls = []
 
     def _mock_linear(A, B, *, use_2dblock_x, use_2dblock_w, use_sr_grad,
-                     use_outer_scale, use_hadamard, use_dge):
+                     use_outer_scale, use_hadamard, use_dge,
+                     use_outer_block_scale, use_outer_2dblock_x,
+                     use_outer_2dblock_w, outer_block_size):
         calls.append({
             "A": A,
             "B": B,
@@ -200,6 +202,10 @@ def test_linear_routes_to_nvfp4_linear_kernel(monkeypatch, device):
             "use_outer_scale": use_outer_scale,
             "use_hadamard": use_hadamard,
             "use_dge": use_dge,
+            "use_outer_block_scale": use_outer_block_scale,
+            "use_outer_2dblock_x": use_outer_2dblock_x,
+            "use_outer_2dblock_w": use_outer_2dblock_w,
+            "outer_block_size": outer_block_size,
         })
         return A.new_full((A.shape[0], B.shape[0]), 5.0)
 
@@ -230,6 +236,68 @@ def test_linear_routes_to_nvfp4_linear_kernel(monkeypatch, device):
     assert call["use_outer_scale"] is True
     assert call["use_hadamard"] is True
     assert call["use_dge"] is True
+    assert call["use_outer_block_scale"] is False
+    assert call["use_outer_2dblock_x"] is False
+    assert call["use_outer_2dblock_w"] is False
+    assert call["outer_block_size"] == 128
+
+
+def test_linear_routes_outer_block_config_to_nvfp4_linear_kernel(monkeypatch, device):
+    """Dispatch must translate two_level_scaling='outer_block' into kernel kwargs."""
+    calls = []
+
+    def _mock_linear(A, B, *, use_2dblock_x, use_2dblock_w, use_sr_grad,
+                     use_outer_scale, use_hadamard, use_dge,
+                     use_outer_block_scale, use_outer_2dblock_x,
+                     use_outer_2dblock_w, outer_block_size):
+        calls.append({
+            "A": A,
+            "B": B,
+            "use_2dblock_x": use_2dblock_x,
+            "use_2dblock_w": use_2dblock_w,
+            "use_sr_grad": use_sr_grad,
+            "use_outer_scale": use_outer_scale,
+            "use_hadamard": use_hadamard,
+            "use_dge": use_dge,
+            "use_outer_block_scale": use_outer_block_scale,
+            "use_outer_2dblock_x": use_outer_2dblock_x,
+            "use_outer_2dblock_w": use_outer_2dblock_w,
+            "outer_block_size": outer_block_size,
+        })
+        return A.new_full((A.shape[0], B.shape[0]), 11.0)
+
+    monkeypatch.setattr(dispatch_tensor, "_to_nvfp4_then_scaled_mm", _mock_linear)
+
+    cfg = _make_config(
+        use_2dblock_x=False,
+        use_2dblock_w=True,
+        use_sr_grad=True,
+        two_level_scaling="outer_block",
+        use_outer_2dblock_x=False,
+        use_outer_2dblock_w=True,
+        outer_block_size=128,
+    )
+    W_wrapped = _make_wrapper(cfg, device=device, shape=(32, 16))
+    x = torch.randn(8, 16, dtype=torch.bfloat16, device=device)
+
+    y = torch.nn.functional.linear(x, W_wrapped)
+
+    assert y.shape == (8, 32)
+    assert torch.all(y == 11)
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["A"] is x
+    assert call["B"] is W_wrapped
+    assert call["use_2dblock_x"] is False
+    assert call["use_2dblock_w"] is True
+    assert call["use_sr_grad"] is True
+    assert call["use_outer_scale"] is False
+    assert call["use_hadamard"] is False
+    assert call["use_dge"] is False
+    assert call["use_outer_block_scale"] is True
+    assert call["use_outer_2dblock_x"] is False
+    assert call["use_outer_2dblock_w"] is True
+    assert call["outer_block_size"] == 128
 
 
 # ---------------------------------------------------------------------------

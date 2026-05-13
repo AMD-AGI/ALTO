@@ -382,6 +382,10 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_outer_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
+                use_outer_block_scale=config.two_level_scaling == "outer_block",
+                use_outer_2dblock_x=config.use_outer_2dblock_x,
+                use_outer_2dblock_w=config.use_outer_2dblock_w,
+                outer_block_size=config.outer_block_size,
             )
             if bias is not None:
                 Y = Y + bias

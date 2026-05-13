@@ -17,6 +17,7 @@ from alto.kernels.fp4.fp4_common import (
 
 
 BLOCK_SIZE_DEFAULT = 16
+OUTER_BLOCK_SIZE_DEFAULT = 128
 F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
@@ -436,6 +437,128 @@ def compute_dynamic_outer_scale(
     return outer_scale.to(dtype=torch.float32).reshape(1)
 
 
+def compute_outer_block_scale_shape(
+    shape: tuple[int, ...],
+    *,
+    is_2d_inner: bool,
+    is_2d_outer: bool,
+    inner_block_size: int = BLOCK_SIZE_DEFAULT,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return ``(inner_scale_shape, outer_scale_shape)`` for axis-last input.
+
+    ``shape`` is expected to be the logical high-precision tensor shape after
+    transposing the quantization axis to the last dimension.  The outer scale
+    covers ``1×outer`` / ``inner×outer`` / ``outer×outer`` tiles depending on
+    the requested inner/outer 2D modes.
+    """
+    if len(shape) < 2:
+        raise ValueError(f"outer-block scaling expects at least 2D input, got {shape}")
+    if outer_block_size < inner_block_size or outer_block_size % inner_block_size != 0:
+        raise ValueError(
+            f"outer_block_size ({outer_block_size}) must be a multiple of "
+            f"inner_block_size ({inner_block_size})"
+        )
+    m, n = shape[-2], shape[-1]
+    if n % inner_block_size != 0 or n % outer_block_size != 0:
+        raise ValueError(
+            f"last dimension ({n}) must be divisible by both inner block "
+            f"({inner_block_size}) and outer block ({outer_block_size})"
+        )
+    if is_2d_inner and m % inner_block_size != 0:
+        raise ValueError(
+            f"2D inner block requires dim -2 ({m}) divisible by {inner_block_size}"
+        )
+    if is_2d_outer and m % outer_block_size != 0:
+        raise ValueError(
+            f"2D outer block requires dim -2 ({m}) divisible by {outer_block_size}"
+        )
+
+    prefix = shape[:-2]
+    inner_shape = (
+        *prefix,
+        m // inner_block_size if is_2d_inner else m,
+        n // inner_block_size,
+    )
+    outer_shape = (
+        *prefix,
+        m // outer_block_size if is_2d_outer else m,
+        n // outer_block_size,
+    )
+    return inner_shape, outer_shape
+
+
+def _outer_scale_and_expanded_axis_last(
+    data_hp: torch.Tensor,
+    *,
+    is_2d_inner: bool,
+    is_2d_outer: bool,
+    inner_block_size: int,
+    outer_block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute FP32 outer scales and expand them to ``data_hp`` shape.
+
+    ``data_hp`` must already have the quantization axis in the last dimension.
+    """
+    shape = tuple(data_hp.shape)
+    compute_outer_block_scale_shape(
+        shape,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        inner_block_size=inner_block_size,
+        outer_block_size=outer_block_size,
+    )
+    m, n = shape[-2], shape[-1]
+    prefix = shape[:-2]
+    x = data_hp.float()
+
+    if is_2d_outer:
+        grouped = x.reshape(
+            *prefix,
+            m // outer_block_size,
+            outer_block_size,
+            n // outer_block_size,
+            outer_block_size,
+        )
+        outer_amax = grouped.abs().amax(dim=-1).amax(dim=-2)
+        outer_scale = (outer_amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=E4M3_EPS)
+        expanded = outer_scale.unsqueeze(-2).unsqueeze(-1).expand_as(grouped).reshape(shape)
+    else:
+        grouped = x.reshape(*prefix, m, n // outer_block_size, outer_block_size)
+        outer_amax = grouped.abs().amax(dim=-1)
+        outer_scale = (outer_amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=E4M3_EPS)
+        expanded = outer_scale.unsqueeze(-1).expand_as(grouped).reshape(shape)
+
+    return outer_scale.to(torch.float32), expanded.to(torch.float32)
+
+
+def _expand_outer_scale_axis_last(
+    outer_scale: torch.Tensor,
+    hp_shape: tuple[int, ...],
+    *,
+    is_2d_inner: bool,
+    is_2d_outer: bool,
+    inner_block_size: int,
+    outer_block_size: int,
+) -> torch.Tensor:
+    """Broadcast stored outer scales back to an axis-last high-precision shape."""
+    compute_outer_block_scale_shape(
+        hp_shape,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        inner_block_size=inner_block_size,
+        outer_block_size=outer_block_size,
+    )
+    m, n = hp_shape[-2], hp_shape[-1]
+    prefix = hp_shape[:-2]
+    if is_2d_outer:
+        grouped_shape = (*prefix, m // outer_block_size, outer_block_size,
+                         n // outer_block_size, outer_block_size)
+        return outer_scale.unsqueeze(-2).unsqueeze(-1).expand(grouped_shape).reshape(hp_shape)
+    grouped_shape = (*prefix, m, n // outer_block_size, outer_block_size)
+    return outer_scale.unsqueeze(-1).expand(grouped_shape).reshape(hp_shape)
+
+
 @triton_op("alto::convert_to_nvfp4", mutates_args={})
 def convert_to_nvfp4(
     data_hp: torch.Tensor,
@@ -659,6 +782,98 @@ def convert_from_nvfp4(
     return data_hp.reshape(orig_shape_hp).transpose(axis, -1)
 
 
+def convert_to_nvfp4_outer_block(
+    data_hp: torch.Tensor,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
+    axis: int = -1,
+    is_2d_inner: bool = False,
+    is_2d_outer: bool = False,
+    use_sr: bool = False,
+    philox_seed: Optional[int] = None,
+    philox_offset: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize using FP32 outer-block scale + NVFP4 E4M3 inner scales.
+
+    This implements the M2 functional path for the double-block NVFP4 scheme:
+    values are first normalized by a per-outer-block FP32 scale
+    ``amax_outer / (F8E4M3_MAX * F4_E2M1_MAX)`` and then quantized by the
+    existing per-inner-block NVFP4 kernel with tensor-wise scaling disabled.
+    """
+    assert data_hp.dtype in [torch.float32, torch.bfloat16]
+    data_axis_last = data_hp.transpose(axis, -1)
+    original_shape = data_axis_last.shape
+    compute_outer_block_scale_shape(
+        tuple(original_shape),
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        inner_block_size=block_size,
+        outer_block_size=outer_block_size,
+    )
+    outer_scale, outer_expanded = _outer_scale_and_expanded_axis_last(
+        data_axis_last,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        inner_block_size=block_size,
+        outer_block_size=outer_block_size,
+    )
+    normalized = (data_axis_last.float() / outer_expanded).to(data_hp.dtype)
+    data_lp, inner_scales = convert_to_nvfp4(
+        normalized,
+        block_size=block_size,
+        axis=-1,
+        is_2d_block=is_2d_inner,
+        outer_scale=None,
+        update_outer_scale=False,
+        use_sr=use_sr,
+        philox_seed=philox_seed,
+        philox_offset=philox_offset,
+    )
+    return (
+        data_lp.transpose(axis, -1),
+        inner_scales.transpose(axis, -1),
+        outer_scale.transpose(axis, -1),
+    )
+
+
+def convert_from_nvfp4_outer_block(
+    data_lp: torch.Tensor,
+    inner_scales: torch.Tensor,
+    outer_scales: torch.Tensor,
+    output_dtype: torch.dtype = torch.float32,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
+    axis: int = -1,
+    is_2d_inner: bool = False,
+    is_2d_outer: bool = False,
+) -> torch.Tensor:
+    """Dequantize data produced by :func:`convert_to_nvfp4_outer_block`."""
+    normalized = convert_from_nvfp4(
+        data_lp,
+        inner_scales,
+        output_dtype=output_dtype,
+        block_size=block_size,
+        axis=axis,
+        is_2d_block=is_2d_inner,
+        outer_scale=None,
+    )
+    normalized_axis_last = normalized.transpose(axis, -1)
+    outer_axis_last = outer_scales.transpose(axis, -1).to(
+        device=normalized.device,
+        dtype=torch.float32,
+    )
+    outer_expanded = _expand_outer_scale_axis_last(
+        outer_axis_last,
+        tuple(normalized_axis_last.shape),
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        inner_block_size=block_size,
+        outer_block_size=outer_block_size,
+    )
+    result = (normalized_axis_last.float() * outer_expanded).to(output_dtype)
+    return result.transpose(axis, -1)
+
+
 @convert_to_nvfp4.register_fake
 def _fake_convert_to_nvfp4(
     data_hp: torch.Tensor,
@@ -712,6 +927,9 @@ def _qdq(
     use_sr: bool = False,
     block_size: int = 16,
     return_raw: bool = False,
+    use_outer_block_scale: bool = False,
+    is_2d_outer: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Quantize to NVFP4 then immediately dequantize back (QDQ round-trip).
 
@@ -727,6 +945,40 @@ def _qdq(
     backward path to recover the exact FP4 bin each weight element fell into
     without paying a second quantization pass.
     """
+    torch._check(
+        not (use_outer_scale and use_outer_block_scale),
+        lambda: "NVFP4 tensor-wise scale and outer-block scale are mutually exclusive.",
+    )
+
+    if use_outer_block_scale:
+        torch._check(
+            not return_raw,
+            lambda: (
+                "NVFP4 outer-block QDQ does not yet support return_raw=True; "
+                "DGE integration for outer-block scaling needs a separate raw-scale path."
+            ),
+        )
+        data_lp, inner_scales, outer_scales = convert_to_nvfp4_outer_block(
+            tensor,
+            block_size=block_size,
+            outer_block_size=outer_block_size,
+            axis=axis,
+            is_2d_inner=is_2d_block,
+            is_2d_outer=is_2d_outer,
+            use_sr=use_sr,
+        )
+        return convert_from_nvfp4_outer_block(
+            data_lp,
+            inner_scales,
+            outer_scales,
+            output_dtype=tensor.dtype,
+            block_size=block_size,
+            outer_block_size=outer_block_size,
+            axis=axis,
+            is_2d_inner=is_2d_block,
+            is_2d_outer=is_2d_outer,
+        )
+
     outer_scale = (
         torch.empty(1, dtype=torch.float32, device=tensor.device)
         if use_outer_scale

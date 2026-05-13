@@ -34,9 +34,12 @@ class LowPrecisionTrainingModifier(Modifier):
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
-    two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
+    two_level_scaling: Literal["none", "tensorwise", "blockwise", "outer_block"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
-    
+    use_outer_2dblock_x: bool = False
+    use_outer_2dblock_w: bool = False
+    outer_block_size: int = 128
+
     lora_rank: int = 0
     """
     Lora rank for the decomposed linear layer.
@@ -69,6 +72,15 @@ class LowPrecisionTrainingModifier(Modifier):
                 value[key] = cls.validate_targets(target)
 
         return value
+
+    @model_validator(mode="after")
+    def validate_outer_block_scaling(self):
+        if self.outer_block_size < 16 or self.outer_block_size % 16 != 0:
+            raise ValueError(
+                "outer_block_size must be a positive multiple of the NVFP4 "
+                f"inner block size (16), got {self.outer_block_size}"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_lora_rank_alignment(self):
@@ -111,6 +123,9 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_dge=self.use_dge,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
+                    use_outer_2dblock_x=self.use_outer_2dblock_x,
+                    use_outer_2dblock_w=self.use_outer_2dblock_w,
+                    outer_block_size=self.outer_block_size,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

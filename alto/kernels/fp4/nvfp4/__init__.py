@@ -30,8 +30,11 @@ from .nvfp_quantization import (
     _pack_fp4,
     _unpack_fp4,
     compute_dynamic_outer_scale,
+    compute_outer_block_scale_shape,
     convert_from_nvfp4,
+    convert_from_nvfp4_outer_block,
     convert_to_nvfp4,
+    convert_to_nvfp4_outer_block,
     is_cdna4,
 )
 
@@ -40,7 +43,10 @@ __all__ = (
     "NVFP4LinearFunction",
     "SUPPORTED_SCALE_FORMATS",
     "compute_dynamic_outer_scale",
+    "compute_outer_block_scale_shape",
     "convert_from_nvfp4",
+    "convert_from_nvfp4_outer_block",
     "convert_to_nvfp4",
+    "convert_to_nvfp4_outer_block",
     "is_cdna4",
 )

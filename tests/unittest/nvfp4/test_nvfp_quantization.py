@@ -9,6 +9,10 @@ from alto.kernels.fp4.nvfp4.nvfp_quantization import (
     convert_to_nvfp4,
     convert_from_nvfp4,
     compute_dynamic_outer_scale,
+    compute_outer_block_scale_shape,
+    convert_to_nvfp4_outer_block,
+    convert_from_nvfp4_outer_block,
+    _qdq,
     is_cdna4,
 )
 
@@ -291,3 +295,250 @@ def test_nvfp4_non_aligned_m_no_nan_inf(data_type):
     )
     assert torch.isfinite(scales).all(), "non-aligned M produced Inf/NaN scales"
     assert torch.isfinite(x_dq).all(), "non-aligned M produced Inf/NaN dequant output"
+
+
+@pytest.mark.parametrize("is_2d_inner,is_2d_outer,expected_inner,expected_outer,label", [
+    (False, False, (128, 16), (128, 2), "inner=1x16 outer=1x128"),
+    (False, True,  (128, 16), (1, 2),   "inner=1x16 outer=128x128"),
+    (True,  False, (8, 16),   (128, 2), "inner=16x16 outer=1x128"),
+    (True,  True,  (8, 16),   (1, 2),   "inner=16x16 outer=128x128"),
+])
+def test_nvfp4_outer_block_scale_shapes(
+    is_2d_inner, is_2d_outer, expected_inner, expected_outer, label
+):
+    """Outer-scale shape helper must match the requested four layouts."""
+    inner_shape, outer_shape = compute_outer_block_scale_shape(
+        (128, 256),
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        inner_block_size=16,
+        outer_block_size=128,
+    )
+    assert inner_shape == expected_inner, label
+    assert outer_shape == expected_outer, label
+
+
+@pytest.mark.parametrize("is_2d_inner,is_2d_outer", [
+    pytest.param(False, False, id="inner_1x16_outer_1x128"),
+    pytest.param(False, True,  id="inner_1x16_outer_128x128"),
+    pytest.param(True,  False, id="inner_16x16_outer_1x128"),
+    pytest.param(True,  True,  id="inner_16x16_outer_128x128"),
+])
+@pytest.mark.parametrize("axis", [-1, -2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_nvfp4_outer_block_roundtrip_finite(is_2d_inner, is_2d_outer, axis, dtype):
+    """All four outer-scale layouts should round-trip with finite outputs."""
+    x = prepare_data((128, 256), dtype)
+    data_lp, inner_scales, outer_scales = convert_to_nvfp4_outer_block(
+        x,
+        block_size=16,
+        outer_block_size=128,
+        axis=axis,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        use_sr=False,
+    )
+    x_dq = convert_from_nvfp4_outer_block(
+        data_lp,
+        inner_scales,
+        outer_scales,
+        output_dtype=x.dtype,
+        block_size=16,
+        outer_block_size=128,
+        axis=axis,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+    )
+    assert x_dq.shape == x.shape
+    assert x_dq.dtype == dtype
+    assert torch.isfinite(inner_scales).all()
+    assert torch.isfinite(outer_scales).all()
+    assert torch.isfinite(x_dq).all()
+
+
+@pytest.mark.parametrize("is_2d_inner,is_2d_outer", [
+    pytest.param(False, False, id="inner_1x16_outer_1x128"),
+    pytest.param(False, True,  id="inner_1x16_outer_128x128"),
+    pytest.param(True,  False, id="inner_16x16_outer_1x128"),
+    pytest.param(True,  True,  id="inner_16x16_outer_128x128"),
+])
+def test_nvfp4_qdq_routes_to_outer_block(is_2d_inner, is_2d_outer):
+    """The shared QDQ helper should expose the outer-block round-trip path."""
+    x = prepare_data((128, 256), torch.bfloat16)
+    x_qdq = _qdq(
+        x,
+        axis=-1,
+        is_2d_block=is_2d_inner,
+        use_outer_scale=False,
+        use_outer_block_scale=True,
+        is_2d_outer=is_2d_outer,
+        outer_block_size=128,
+    )
+    assert x_qdq.shape == x.shape
+    assert x_qdq.dtype == x.dtype
+    assert torch.isfinite(x_qdq).all()
+
+
+def test_nvfp4_qdq_rejects_pts_and_outer_block_together():
+    """Tensor-wise and outer-block scaling are alternative second-level scales."""
+    x = prepare_data((128, 256), torch.bfloat16)
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        _qdq(
+            x,
+            axis=-1,
+            is_2d_block=False,
+            use_outer_scale=True,
+            use_outer_block_scale=True,
+        )
+
+
+def test_nvfp4_qdq_rejects_outer_block_return_raw():
+    """DGE needs raw FP4 plus scales; outer-block raw support is not wired yet."""
+    x = prepare_data((128, 256), torch.bfloat16)
+    with pytest.raises(RuntimeError, match="return_raw=True"):
+        _qdq(
+            x,
+            axis=-1,
+            is_2d_block=False,
+            use_outer_scale=False,
+            use_outer_block_scale=True,
+            return_raw=True,
+        )
+
+
+def _qdq_with_tensorwise_and_outer(
+    x: torch.Tensor,
+    *,
+    is_2d_inner: bool,
+    is_2d_outer: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    pts = compute_dynamic_outer_scale(x)
+    data_lp_pts, scales_pts = convert_to_nvfp4(
+        x,
+        block_size=16,
+        axis=-1,
+        is_2d_block=is_2d_inner,
+        outer_scale=pts,
+        update_outer_scale=False,
+        use_sr=False,
+    )
+    x_pts = convert_from_nvfp4(
+        data_lp_pts,
+        scales_pts,
+        output_dtype=x.dtype,
+        block_size=16,
+        axis=-1,
+        is_2d_block=is_2d_inner,
+        outer_scale=pts,
+    )
+    data_lp_ob, inner_scales_ob, outer_scales = convert_to_nvfp4_outer_block(
+        x,
+        block_size=16,
+        outer_block_size=128,
+        axis=-1,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+        use_sr=False,
+    )
+    x_ob = convert_from_nvfp4_outer_block(
+        data_lp_ob,
+        inner_scales_ob,
+        outer_scales,
+        output_dtype=x.dtype,
+        block_size=16,
+        outer_block_size=128,
+        axis=-1,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+    )
+    return x_pts, x_ob
+
+
+@pytest.mark.parametrize("is_2d_inner,is_2d_outer", [
+    pytest.param(False, False, id="inner_1x16_outer_1x128"),
+    pytest.param(False, True,  id="inner_1x16_outer_128x128"),
+    pytest.param(True,  False, id="inner_16x16_outer_1x128"),
+    pytest.param(True,  True,  id="inner_16x16_outer_128x128"),
+])
+def test_nvfp4_outer_block_improves_heterogeneous_regions_vs_pts(is_2d_inner, is_2d_outer):
+    """Outer scale should preserve low-energy regions in mixed-energy tensors.
+
+    The 256×256 tensor is built from four 128×128 regions with different
+    magnitudes.  Tensor-wise scaling is dominated by the high-energy quadrant,
+    while outer-block scaling gives each 1×128 or 128×128 region its own FP32
+    range scale.  We do not require bitwise equality between layouts; we only
+    require the low-energy regions to improve without hurting total error.
+    """
+    dtype = torch.bfloat16
+    torch.manual_seed(2026)
+    low_a = (torch.randn((128, 128), device="cuda") * 0.05).to(dtype)
+    high = (torch.randn((128, 128), device="cuda") * 5000.0).to(dtype)
+    medium = (torch.randn((128, 128), device="cuda") * 5.0).to(dtype)
+    low_b = (torch.randn((128, 128), device="cuda") * 0.05).to(dtype)
+    x = torch.cat([
+        torch.cat([low_a, high], dim=-1),
+        torch.cat([medium, low_b], dim=-1),
+    ], dim=0)
+
+    x_pts, x_ob = _qdq_with_tensorwise_and_outer(
+        x,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+    )
+
+    low_ref = torch.cat([x[:128, :128].reshape(-1), x[128:, 128:].reshape(-1)]).float()
+    low_pts = torch.cat([x_pts[:128, :128].reshape(-1), x_pts[128:, 128:].reshape(-1)]).float()
+    low_ob = torch.cat([x_ob[:128, :128].reshape(-1), x_ob[128:, 128:].reshape(-1)]).float()
+    low_pts_err = (low_ref - low_pts).pow(2).mean()
+    low_ob_err = (low_ref - low_ob).pow(2).mean()
+
+    total_pts_err = (x.float() - x_pts.float()).pow(2).mean()
+    total_ob_err = (x.float() - x_ob.float()).pow(2).mean()
+    assert low_ob_err < low_pts_err * 0.5, (
+        f"outer-block low-region MSE ({low_ob_err.item():.4e}) should be "
+        f"lower than tensor-wise MSE ({low_pts_err.item():.4e})"
+    )
+    assert total_ob_err < total_pts_err * 1.1, (
+        f"outer-block total MSE ({total_ob_err.item():.4e}) should not "
+        f"regress vs tensor-wise MSE ({total_pts_err.item():.4e})"
+    )
+
+
+@pytest.mark.parametrize("is_2d_inner,is_2d_outer", [
+    pytest.param(False, False, id="inner_1x16_outer_1x128"),
+    pytest.param(False, True,  id="inner_1x16_outer_128x128"),
+    pytest.param(True,  False, id="inner_16x16_outer_1x128"),
+    pytest.param(True,  True,  id="inner_16x16_outer_128x128"),
+])
+def test_nvfp4_outer_block_improves_clean_blocks_with_sparse_outlier(is_2d_inner, is_2d_outer):
+    """Outer scale should help clean regions when a sparse outlier sets PTS.
+
+    This is closer to a localized-outlier pattern: most values are low-energy,
+    but one column in the right outer block contains large values.  The clean
+    left outer block should reconstruct better with its own outer scale, while
+    total error should remain in the same ballpark.
+    """
+    dtype = torch.bfloat16
+    torch.manual_seed(2027)
+    x = (torch.randn((128, 256), device="cuda") * 0.05).to(dtype)
+    x[:, 192] = (torch.randn((128,), device="cuda") * 5000.0).to(dtype)
+
+    x_pts, x_ob = _qdq_with_tensorwise_and_outer(
+        x,
+        is_2d_inner=is_2d_inner,
+        is_2d_outer=is_2d_outer,
+    )
+
+    low_ref = x[:, :128].float()
+    low_pts_err = (low_ref - x_pts[:, :128].float()).pow(2).mean()
+    low_ob_err = (low_ref - x_ob[:, :128].float()).pow(2).mean()
+    total_pts_err = (x.float() - x_pts.float()).pow(2).mean()
+    total_ob_err = (x.float() - x_ob.float()).pow(2).mean()
+    assert low_ob_err < low_pts_err * 0.75, (
+        f"outer-block clean-region MSE ({low_ob_err.item():.4e}) should be "
+        f"lower than tensor-wise MSE ({low_pts_err.item():.4e})"
+    )
+    assert total_ob_err < total_pts_err * 1.25, (
+        f"outer-block total MSE ({total_ob_err.item():.4e}) should stay close "
+        f"to tensor-wise MSE ({total_pts_err.item():.4e})"
+    )

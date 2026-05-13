@@ -87,24 +87,68 @@ class NVFP4LinearFunction(torch.autograd.Function):
         original_shape = x.shape
         x_2d = x.reshape(-1, original_shape[-1])
 
+        # 2D outer-block scale grids are axis-invariant: an axis=-1 QDQ and
+        # an axis=0 QDQ on the same tensor produce identical outer scales
+        # (modulo a transpose).  Capture the axis=-1 scale and feed it into
+        # the axis=0 path to skip a full outer-amax reduction.  Activations
+        # cannot share when Hadamard is on, since ``H @ x`` has a different
+        # outer-amax map.  Weights have no Hadamard rotation, so 2D outer is
+        # always shareable on weights.
+        share_outer_x = (
+            use_outer_block_scale
+            and use_outer_2dblock_x
+            and not use_2dblock_x
+            and hadamard_transform is None
+        )
+        share_outer_w = (
+            use_outer_block_scale
+            and use_outer_2dblock_w
+            and not use_2dblock_w
+        )
+
         # Prepare the quantized views used by forward. These are the tensors
         # consumed by the simulated Fprop GEMM.
-        x_dq = _qdq(
-            x_2d, axis=-1,
-            is_2d_block=use_2dblock_x,
-            use_outer_scale=use_outer_scale,
-            use_outer_block_scale=use_outer_block_scale,
-            is_2d_outer=use_outer_2dblock_x,
-            outer_block_size=outer_block_size,
-        )
-        w_dq = _qdq(
-            weight, axis=-1,
-            is_2d_block=use_2dblock_w,
-            use_outer_scale=use_outer_scale,
-            use_outer_block_scale=use_outer_block_scale,
-            is_2d_outer=use_outer_2dblock_w,
-            outer_block_size=outer_block_size,
-        )
+        x_outer_scale_cache: Optional[torch.Tensor] = None
+        if share_outer_x:
+            x_dq, x_outer_scale_cache = _qdq(
+                x_2d, axis=-1,
+                is_2d_block=use_2dblock_x,
+                use_outer_scale=use_outer_scale,
+                use_outer_block_scale=use_outer_block_scale,
+                is_2d_outer=use_outer_2dblock_x,
+                outer_block_size=outer_block_size,
+                return_outer_scale=True,
+            )
+        else:
+            x_dq = _qdq(
+                x_2d, axis=-1,
+                is_2d_block=use_2dblock_x,
+                use_outer_scale=use_outer_scale,
+                use_outer_block_scale=use_outer_block_scale,
+                is_2d_outer=use_outer_2dblock_x,
+                outer_block_size=outer_block_size,
+            )
+
+        w_outer_scale_cache: Optional[torch.Tensor] = None
+        if share_outer_w:
+            w_dq, w_outer_scale_cache = _qdq(
+                weight, axis=-1,
+                is_2d_block=use_2dblock_w,
+                use_outer_scale=use_outer_scale,
+                use_outer_block_scale=use_outer_block_scale,
+                is_2d_outer=use_outer_2dblock_w,
+                outer_block_size=outer_block_size,
+                return_outer_scale=True,
+            )
+        else:
+            w_dq = _qdq(
+                weight, axis=-1,
+                is_2d_block=use_2dblock_w,
+                use_outer_scale=use_outer_scale,
+                use_outer_block_scale=use_outer_block_scale,
+                is_2d_outer=use_outer_2dblock_w,
+                outer_block_size=outer_block_size,
+            )
 
         y = x_dq @ w_dq.T
 
@@ -152,6 +196,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                     use_outer_block_scale=use_outer_block_scale,
                     is_2d_outer=use_outer_2dblock_w,
                     outer_block_size=outer_block_size,
+                    precomputed_outer_scale=w_outer_scale_cache,
                 )
         else:
             # 2D block scaling is axis-invariant, so the fprop quantized view is
@@ -194,6 +239,9 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 x_for_axis0 = hadamard_transform(x_2d, left_mul=True)
             else:
                 x_for_axis0 = x_2d
+            # ``x_outer_scale_cache`` is only set when the wgrad-axis input is
+            # the same tensor (no Hadamard); otherwise it stays None and the
+            # axis=0 QDQ recomputes the outer scale from ``x_for_axis0``.
             x_dq_axis0 = _qdq(
                 x_for_axis0, axis=0,
                 is_2d_block=False,
@@ -201,6 +249,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 use_outer_block_scale=use_outer_block_scale,
                 is_2d_outer=use_outer_2dblock_x,
                 outer_block_size=outer_block_size,
+                precomputed_outer_scale=x_outer_scale_cache,
             )
         else:
             x_dq_axis0 = x_dq
@@ -253,15 +302,37 @@ class NVFP4LinearFunction(torch.autograd.Function):
             )
             grad_output_m_dq = grad_output_dq
         else:
-            grad_output_dq = _qdq(
-                grad_output, axis=-1,
-                is_2d_block=False,
-                use_outer_scale=ctx.use_outer_scale,
-                use_sr=ctx.use_sr_grad,
-                use_outer_block_scale=ctx.use_outer_block_scale,
-                is_2d_outer=ctx.use_outer_2dblock_x,
-                outer_block_size=ctx.outer_block_size,
+            # Mirror the forward outer-scale-sharing rule: with 2D outer and
+            # no Hadamard rotation, grad_output's axis=-1 and axis=0 outer
+            # scales are identical, so compute it once and reuse.
+            share_grad_outer = (
+                ctx.use_outer_block_scale
+                and ctx.use_outer_2dblock_x
+                and ctx.hadamard_transform is None
             )
+            if share_grad_outer:
+                grad_output_dq, grad_outer_scale_cache = _qdq(
+                    grad_output, axis=-1,
+                    is_2d_block=False,
+                    use_outer_scale=ctx.use_outer_scale,
+                    use_sr=ctx.use_sr_grad,
+                    use_outer_block_scale=ctx.use_outer_block_scale,
+                    is_2d_outer=ctx.use_outer_2dblock_x,
+                    outer_block_size=ctx.outer_block_size,
+                    return_outer_scale=True,
+                )
+            else:
+                grad_output_dq = _qdq(
+                    grad_output, axis=-1,
+                    is_2d_block=False,
+                    use_outer_scale=ctx.use_outer_scale,
+                    use_sr=ctx.use_sr_grad,
+                    use_outer_block_scale=ctx.use_outer_block_scale,
+                    is_2d_outer=ctx.use_outer_2dblock_x,
+                    outer_block_size=ctx.outer_block_size,
+                )
+                grad_outer_scale_cache = None
+
             # Apply the same Hadamard rotation that was used on x in forward,
             # to grad_output before axis=0 QDQ. See the forward-side comment
             # for the invariance argument.
@@ -277,6 +348,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 use_outer_block_scale=ctx.use_outer_block_scale,
                 is_2d_outer=ctx.use_outer_2dblock_x,
                 outer_block_size=ctx.outer_block_size,
+                precomputed_outer_scale=grad_outer_scale_cache,
             )
 
         grad_inputs = grad_output_dq @ w_dq

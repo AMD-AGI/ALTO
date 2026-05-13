@@ -124,6 +124,25 @@ def test_grouped_mm_routes_to_nvfp4_grouped_kernel(monkeypatch, device):
     assert call["use_dge"] is True
 
 
+def test_grouped_mm_rejects_outer_block_config(device):
+    """Grouped GEMM must not silently ignore dense-only outer-block config."""
+    cfg = _make_config(
+        two_level_scaling="outer_block",
+        use_outer_2dblock_x=False,
+        use_outer_2dblock_w=True,
+    )
+    num_experts, K, N, M = 2, 16, 16, ALIGN_SIZE_M
+    A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    W_wrapped = NVFP4TrainingWeightWrapperTensor(
+        torch.randn(num_experts, K, N, dtype=torch.bfloat16, device=device),
+        cfg,
+    )
+    offs = torch.tensor([M // num_experts, M], dtype=torch.int32, device=device)
+
+    with pytest.raises(NotImplementedError, match="outer-block.*grouped GEMM"):
+        torch._grouped_mm(A, W_wrapped, offs=offs)
+
+
 @pytest.mark.parametrize("use_hadamard,use_dge", [
     (True, False),
     (False, True),

@@ -107,6 +107,27 @@ def test_nvfp4_linear_outer_block_autograd(use_2dblock, use_outer_2dblock, use_s
     )
 
 
+@pytest.mark.parametrize("use_2dblock_x", [False, True])
+@pytest.mark.parametrize("use_2dblock_w", [False, True])
+@pytest.mark.parametrize("use_outer_2dblock_x", [False, True])
+@pytest.mark.parametrize("use_outer_2dblock_w", [False, True])
+def test_nvfp4_linear_outer_block_independent_xw_layouts(
+    use_2dblock_x,
+    use_2dblock_w,
+    use_outer_2dblock_x,
+    use_outer_2dblock_w,
+):
+    """X and W inner/outer layout knobs must be independently usable."""
+    _run_linear_autograd_case(
+        shape=(1, 128, 128, 128),
+        use_2dblock_x=use_2dblock_x,
+        use_2dblock_w=use_2dblock_w,
+        use_outer_2dblock_x=use_outer_2dblock_x,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        use_sr_grad=False,
+    )
+
+
 def test_nvfp4_linear_outer_block_large_k_sr_stress():
     """Keep one K=2048 SR stress case without exploding the test matrix."""
     _run_linear_autograd_case(

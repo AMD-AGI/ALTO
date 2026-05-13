@@ -335,6 +335,12 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert config.precision == "nvfp4", (
                 f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}"
             )
+            if config.two_level_scaling == "outer_block":
+                raise NotImplementedError(
+                    "NVFP4 outer-block scaling is currently supported only for "
+                    "dense Linear/mm paths; grouped GEMM outer-block support "
+                    "must be implemented separately to avoid recipe mismatch."
+                )
 
             return _quantize_then_nvfp4_scaled_grouped_mm(
                 A,

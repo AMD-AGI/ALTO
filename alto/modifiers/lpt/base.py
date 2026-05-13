@@ -80,6 +80,25 @@ class LowPrecisionTrainingModifier(Modifier):
                 "outer_block_size must be a positive multiple of the NVFP4 "
                 f"inner block size (16), got {self.outer_block_size}"
             )
+        outer_fields_are_active = (
+            self.use_outer_2dblock_x
+            or self.use_outer_2dblock_w
+            or self.outer_block_size != 128
+        )
+        if self.two_level_scaling != "outer_block" and outer_fields_are_active:
+            raise ValueError(
+                "use_outer_2dblock_x, use_outer_2dblock_w, and non-default "
+                "outer_block_size are only meaningful when "
+                'two_level_scaling="outer_block".'
+            )
+        if self.two_level_scaling == "outer_block":
+            schemes = [self.scheme] if isinstance(self.scheme, str) else list(self.scheme)
+            invalid_schemes = [scheme for scheme in schemes if scheme != "nvfp4"]
+            if invalid_schemes:
+                raise ValueError(
+                    'two_level_scaling="outer_block" is only defined for '
+                    f"scheme='nvfp4', got {invalid_schemes}"
+                )
         return self
 
     @model_validator(mode="after")

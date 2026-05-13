@@ -4,7 +4,11 @@
 
 import torch
 from torch import Tensor
-from alto.kernels.fp4.nvfp4.nvfp_quantization import BLOCK_SIZE_DEFAULT
+from alto.kernels.fp4.nvfp4.nvfp_quantization import (
+    BLOCK_SIZE_DEFAULT,
+    OUTER_BLOCK_SIZE_DEFAULT,
+    OUTER_SCALE_EPS,
+)
 
 # Re-exported so existing ``from .utils import calc_snr, calc_cossim``
 # call-sites keep working; the single source of truth lives in
@@ -326,3 +330,140 @@ def convert_from_nvfp4_pytorch(
     s_expanded = scales.reshape(scale_shape)
     result = (f32 * s_expanded).to(output_dtype).reshape(orig_hp_shape)
     return result.transpose(axis, -1)
+
+
+# ---------------------------------------------------------------------------
+# NVFP4 outer-block PyTorch reference
+#
+# These mirror the structure of ``convert_to_nvfp4_outer_block`` /
+# ``convert_from_nvfp4_outer_block`` in the production kernel, but go through
+# pure-tensor amax + ``convert_to_nvfp4_pytorch`` so they can be used as a
+# trustworthy bit-level reference for tests.
+# ---------------------------------------------------------------------------
+
+
+def _outer_scale_axis_last_pytorch(
+    data_axis_last: torch.Tensor,
+    *,
+    is_2d_outer: bool,
+    inner_block_size: int,
+    outer_block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reference outer scale + expanded scale on an axis-last tensor.
+
+    Mirrors ``_outer_scale_and_expanded_axis_last`` in the production kernel,
+    including the FP32-floor clamp.  Returns ``(outer_scale, outer_expanded)``
+    both in axis-last layout.
+    """
+    del inner_block_size  # outer scale doesn't depend on inner block size
+    shape = tuple(data_axis_last.shape)
+    m, n = shape[-2], shape[-1]
+    prefix = shape[:-2]
+    x = data_axis_last.float()
+    if is_2d_outer:
+        grouped = x.reshape(
+            *prefix,
+            m // outer_block_size, outer_block_size,
+            n // outer_block_size, outer_block_size,
+        )
+        outer_amax = grouped.abs().amax(dim=-1).amax(dim=-2)
+        outer_scale = (outer_amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=OUTER_SCALE_EPS)
+        expanded = outer_scale.unsqueeze(-2).unsqueeze(-1).expand_as(grouped).reshape(shape)
+    else:
+        grouped = x.reshape(*prefix, m, n // outer_block_size, outer_block_size)
+        outer_amax = grouped.abs().amax(dim=-1)
+        outer_scale = (outer_amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=OUTER_SCALE_EPS)
+        expanded = outer_scale.unsqueeze(-1).expand_as(grouped).reshape(shape)
+    return outer_scale.to(torch.float32), expanded.to(torch.float32)
+
+
+def convert_to_nvfp4_outer_block_pytorch(
+    data_hp: torch.Tensor,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
+    axis: int = -1,
+    is_2d_inner: bool = False,
+    is_2d_outer: bool = False,
+    scale_format: str = "e4m3",
+):
+    """Pure-PyTorch reference for ``convert_to_nvfp4_outer_block``.
+
+    Forward path: outer amax → FP32 outer scale → normalize → inner NVFP4 QDQ
+    via :func:`convert_to_nvfp4_pytorch` with ``outer_scale=None``.
+    Returns ``(data_lp, inner_scales, outer_scale)`` all in **original axis
+    layout** (matching the production kernel's return convention).
+
+    Note: this reference does **not** support stochastic rounding (the
+    production kernel exposes ``use_sr`` only when called from
+    ``convert_to_nvfp4``).  Tests that need bit-equality must therefore run
+    with deterministic rounding (``use_sr=False``).
+    """
+    assert data_hp.dtype in [torch.float32, torch.bfloat16]
+    data_axis_last = data_hp.transpose(axis, -1).contiguous()
+    outer_scale_axis_last, outer_expanded = _outer_scale_axis_last_pytorch(
+        data_axis_last,
+        is_2d_outer=is_2d_outer,
+        inner_block_size=block_size,
+        outer_block_size=outer_block_size,
+    )
+    normalized = (data_axis_last.float() / outer_expanded).to(data_hp.dtype)
+    data_lp_axis_last, inner_scales_axis_last = convert_to_nvfp4_pytorch(
+        normalized,
+        block_size=block_size,
+        axis=-1,
+        is_2d_block=is_2d_inner,
+        outer_scale=None,
+        scale_format=scale_format,
+    )
+    # Ensure the inner-scale shape matches the production kernel's contract.
+    return (
+        data_lp_axis_last.transpose(axis, -1).contiguous(),
+        inner_scales_axis_last.transpose(axis, -1).contiguous(),
+        outer_scale_axis_last.transpose(axis, -1).contiguous(),
+    )
+
+
+def convert_from_nvfp4_outer_block_pytorch(
+    data_lp: torch.Tensor,
+    inner_scales: torch.Tensor,
+    outer_scales: torch.Tensor,
+    output_dtype: torch.dtype = torch.float32,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
+    axis: int = -1,
+    is_2d_inner: bool = False,
+    is_2d_outer: bool = False,
+    scale_format: str = "e4m3",
+):
+    """Pure-PyTorch reference for ``convert_from_nvfp4_outer_block``."""
+    inner_dq = convert_from_nvfp4_pytorch(
+        data_lp,
+        inner_scales,
+        output_dtype=output_dtype,
+        block_size=block_size,
+        axis=axis,
+        is_2d_block=is_2d_inner,
+        outer_scale=None,
+        scale_format=scale_format,
+    )
+    inner_dq_axis_last = inner_dq.transpose(axis, -1).contiguous()
+    outer_axis_last = outer_scales.transpose(axis, -1).to(
+        device=inner_dq.device, dtype=torch.float32,
+    ).contiguous()
+    shape = tuple(inner_dq_axis_last.shape)
+    m, n = shape[-2], shape[-1]
+    prefix = shape[:-2]
+    if is_2d_outer:
+        grouped_shape = (
+            *prefix,
+            m // outer_block_size, outer_block_size,
+            n // outer_block_size, outer_block_size,
+        )
+        outer_expanded = outer_axis_last.unsqueeze(-2).unsqueeze(-1).expand(
+            grouped_shape).reshape(shape)
+    else:
+        grouped_shape = (*prefix, m, n // outer_block_size, outer_block_size)
+        outer_expanded = outer_axis_last.unsqueeze(-1).expand(
+            grouped_shape).reshape(shape)
+    result = (inner_dq_axis_last.float() * outer_expanded).to(output_dtype)
+    return result.transpose(axis, -1).contiguous()

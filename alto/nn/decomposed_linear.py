@@ -15,7 +15,7 @@ class DecomposedLinear(nn.Module):
 
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
-        self.u = nn.Parameter(torch.empty(lora_rank, out_features))  # permuted
+        self.u = nn.Parameter(torch.empty(lora_rank, out_features))  # transposed
         self.v = nn.Parameter(torch.empty(in_features, lora_rank))
         self.sigma = nn.Parameter(torch.empty(lora_rank))
 
@@ -28,7 +28,11 @@ class DecomposedLinear(nn.Module):
     @classmethod
     def from_linear(cls, linear: nn.Linear, lora_rank: int = 32):
         new_layer = cls(linear.in_features, linear.out_features, linear.bias is not None, lora_rank)
-        new_layer.weight.data.copy_(linear.weight.data)
-        if linear.bias is not None:
-            new_layer.bias.data.copy_(linear.bias.data)
+        new_layer.weight = linear.weight
+        new_layer.bias = linear.bias
         return new_layer
+    
+    def init_lora_weights(self, init_std: float = 0.02):
+        nn.init.normal_(self.u, mean=0.0, std=init_std)
+        nn.init.zeros_(self.v)
+        nn.init.ones_(self.sigma)

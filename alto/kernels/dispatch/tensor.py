@@ -41,6 +41,8 @@ _ops_to_preserve_subclass = {
     torch.ops.aten.t.default,
 }
 
+gemm_ops = ("linear", "mm.default", "matmul.default", "addmm.default", "matmul")
+
 
 class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
     """
@@ -247,7 +249,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             )
 
         # linear op override
-        elif func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
+        elif func.__name__ in gemm_ops:
             trans_b = func.__name__ == "linear"
             if func.__name__ == "addmm.default":
                 bias, A, B = args[0], args[1], args[2]
@@ -347,7 +349,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             )
 
         # linear / mm overrides
-        elif func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
+        elif func.__name__ in gemm_ops:
             trans_b = func.__name__ == "linear"
             if func.__name__ == "addmm.default":
                 bias, A, B = args[0], args[1], args[2]
@@ -406,7 +408,7 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 "restrict MXFP8 schemes to Linear targets."
             )
 
-        if func.__name__ in ("linear", "mm.default", "matmul.default", "addmm.default"):
+        if func.__name__ in gemm_ops:
             trans_b = func.__name__ == "linear"
             if func.__name__ == "addmm.default":
                 bias, A, B = args[0], args[1], args[2]

@@ -4,7 +4,9 @@ training_stage:
       scheme: "mxfp4"
       targets: ["Linear", "GptOssGroupedExperts"]
       # targets: ["Linear"]
-      ignore: ["output", "re:.*\\.router\\.gate", "re:layers\\.0.*", "re:layers\\.22.*", "re:layers\\.23.*"]
+      # ignore: ["output", "re:.*\\.router\\.gate", "re:layers\\.0.*", "re:layers\\.22.*", "re:layers\\.23.*"]
+      # ignore: ["output", "re:.*\\.router\\.gate"]
+      ignore: ["output", "re:.*\\.router\\.gate", "re:layers\\.\\d+\\.attention.wq", "re:layers\\.\\d+\\.attention.wk", "re:layers\\.\\d+\\.attention.wv", "re:layers\\.\\d+\\.attention.wo"]
       use_2dblock_x: false
       use_2dblock_w: true
       use_hadamard: true

@@ -18,6 +18,7 @@ from alto.kernels.dispatch import (
     LPScaledDotProductAttentionWrapper,
 )
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
+from alto.nn import DecomposedLinear
 
 __all__ = ["LowPrecisionTrainingModifier"]
 
@@ -35,6 +36,12 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
+    
+    lora_rank: int = 0
+    """
+    Lora rank for the decomposed linear layer.
+    If 0, use the original linear layer.
+    """
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
 
@@ -95,7 +102,16 @@ class LowPrecisionTrainingModifier(Modifier):
                 if isinstance(module, BaseAttention):
                     assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
                     module.inner_attention = LPScaledDotProductAttentionWrapper(config=scheme_obj)
-                elif isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
+                elif isinstance(module, torch.nn.Linear):
+                    if self.lora_rank > 0:
+                        module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)
+                        swap_params(module, config=scheme_obj, target_parameter_name="weight")
+                        swap_params(module, config=scheme_obj, target_parameter_name="u")
+                        swap_params(module, config=scheme_obj, target_parameter_name="v")
+                        model.set_submodule(name, module, strict=True)
+                    else:
+                        swap_params(module, config=scheme_obj, module_name=name)
+                elif module.__class__.__name__.endswith("GroupedExperts"):
                     swap_params(module, config=scheme_obj, module_name=name)
                 else:
                     raise ValueError(f"Unsupported module type: {type(module)}")
@@ -104,6 +120,10 @@ class LowPrecisionTrainingModifier(Modifier):
         return True
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
+        for model_part in model_parts:
+            for child in model_part.modules():
+                if isinstance(child, DecomposedLinear):
+                    child.init_lora_weights(init_std=0.02)
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:

@@ -168,7 +168,8 @@ def test_nvfp4_dynamic_per_tensor_scale(tensor_shape, axis, data_type):
 @pytest.mark.parametrize("pattern", ["zeros", "large"])
 def test_nvfp4_special_values(tensor_shape, axis, data_type, pattern):
     """Verify quantization correctness on edge-case inputs.
-    - zeros: all-zero tensor, exercises scale clamping to E4M3_EPS.
+    - zeros: all-zero tensor, exercises the E4M3 lower clamp on the
+             stored block scale.
     - large: 5000.0 everywhere, exceeds F8E4M3_MAX * F4_E2M1_MAX (2688),
              exercises FP4 saturation and scale clamp to F8E4M3_MAX.
     """

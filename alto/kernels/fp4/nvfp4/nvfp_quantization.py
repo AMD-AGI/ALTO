@@ -20,6 +20,15 @@ BLOCK_SIZE_DEFAULT = 16
 F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
+# Per spec, PTS lives in FP32; this floor is a div-by-zero guard for the
+# downstream ``max_abs / pts`` when ``amax == 0``.  We pick ``1e-30`` (well
+# above FP32 denormal range and ~22 orders below any natural training-time
+# PTS) so that the *effective* per-block divisor
+#   quant_scale = out_scale * pts
+# is still an FP32 *normal* in the worst case (``out_scale == E4M3_EPS``,
+# ``pts == _PTS_DIVZERO_FLOOR``):
+#   1e-30 * 2**-6 ≈ 1.56e-32  >  FP32 smallest normal (~1.18e-38)
+_PTS_DIVZERO_FLOOR = 1.0e-30
 
 SUPPORTED_SCALE_FORMATS = ("e4m3",)
 
@@ -177,18 +186,16 @@ def _calculate_nvfp4_scales(
 ):
     """Compute per-block E4M3-quantised scales for NVFP4 quantization.
 
-    This follows the NVFP4 hardware specification: block scales are stored in
-    FP8 E4M3 format, not as raw float32 values.  Rounding the block scale to
-    the nearest E4M3 representable value at quantisation time ensures that
-    quant and dequant use *identical* scales, producing a consistent round-trip.
+    Per spec, the only value stored as FP8 E4M3 is the per-block scale
+    written next to the packed FP4 data; PTS and intermediates stay in FP32.
+    With ``USE_PER_TENSOR_SCALE=True`` the spec order is::
 
-    The procedure:
-    1. Compute raw float32 block scale: amax_block / F4_E2M1_MAX
-    2. **Round to the nearest E4M3 value** by casting to float8_e4m3fn and
-       back to float32.  This is the key step missing from the old code.
-    3. Return the E4M3-rounded scale as ``out_scale`` (stored next to the
-       packed FP4 data) and compute the matching ``quant_scale`` used to
-       divide input values during encoding.
+        out_scale_raw = block_amax(x) / pts / F4_E2M1_MAX
+        out_scale     = round_e4m3(clamp(out_scale_raw, [E4M3_EPS, F8E4M3_MAX]))
+        quant_scale   = out_scale * pts
+
+    i.e. clamp + E4M3 round are applied exactly once, on the final stored
+    block scale.
 
     When ``IS_2D_BLOCK`` is True, one scale covers a
     ``QUANT_BLOCK_SIZE x QUANT_BLOCK_SIZE`` tile, yielding output shapes
@@ -206,27 +213,16 @@ def _calculate_nvfp4_scales(
         x_grouped = x.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
         max_abs = tl.max(tl.abs(x_grouped), axis=-1).to(tl.float32)
 
-    # Raw float32 scale: clamp to the representable E4M3 range *before* rounding
-    # so that neither zero nor overflow can corrupt the cast.
-    block_scale_f32 = max_abs / F4_E2M1_MAX
-    block_scale_f32 = tl.minimum(tl.maximum(block_scale_f32, E4M3_EPS), F8E4M3_MAX)
-
-    # Round to the nearest E4M3 representable value (hardware storage format).
-    # Cast chain: float32 -> float8_e4m3fn -> float32.
-    block_scale_e4m3 = block_scale_f32.to(tl.float8e4nv)
-    block_scale = block_scale_e4m3.to(tl.float32)
-
     if USE_PER_TENSOR_SCALE:
         per_tensor_scale = tl.load(per_tensor_scale_ptr)
-        # The normalised block scale (stored as out_scale) is also rounded so
-        # that the dequant path can reproduce the same effective scale.
-        out_scale_f32 = block_scale / per_tensor_scale
+        out_scale_f32 = max_abs / per_tensor_scale / F4_E2M1_MAX
         out_scale_f32 = tl.minimum(tl.maximum(out_scale_f32, E4M3_EPS), F8E4M3_MAX)
-        out_scale_e4m3 = out_scale_f32.to(tl.float8e4nv)
-        out_scale = out_scale_e4m3.to(tl.float32)
+        out_scale = out_scale_f32.to(tl.float8e4nv).to(tl.float32)
         quant_scale = out_scale * per_tensor_scale
     else:
-        out_scale = block_scale
+        block_scale_f32 = max_abs / F4_E2M1_MAX
+        block_scale_f32 = tl.minimum(tl.maximum(block_scale_f32, E4M3_EPS), F8E4M3_MAX)
+        out_scale = block_scale_f32.to(tl.float8e4nv).to(tl.float32)
         quant_scale = out_scale
 
     return out_scale, quant_scale
@@ -402,16 +398,17 @@ def compute_dynamic_per_tensor_scale(
     data_hp: torch.Tensor,
     scale_format: str = "e4m3",
 ) -> torch.Tensor:
-    """Compute per_tensor_scale dynamically so that the tensor's full range
-    maps into the representable range of block scales * FP4-E2M1 values,
-    i.e. ``per_tensor_scale = amax / (F8E4M3_MAX * F4_E2M1_MAX)``.
+    """Compute the FP32 per-tensor scale ``amax / (F8E4M3_MAX * F4_E2M1_MAX)``
+    so the tensor's full range maps into the block-scale * FP4-E2M1
+    representable range.  Per spec, PTS stays in FP32 with only a
+    ``_PTS_DIVZERO_FLOOR`` div-by-zero guard.
 
     The *scale_format* parameter is reserved for future scale representations
     (e.g. ``"e5m3"``).  Currently only ``"e4m3"`` is supported.
     """
     _check_scale_format(scale_format)
     amax = data_hp.float().abs().max()
-    per_tensor_scale = (amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=E4M3_EPS)
+    per_tensor_scale = (amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=_PTS_DIVZERO_FLOOR)
     return per_tensor_scale.to(dtype=torch.float32).reshape(1)
 
 

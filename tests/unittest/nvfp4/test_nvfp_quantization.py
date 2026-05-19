@@ -5,6 +5,7 @@
 import pytest
 import torch
 from alto.kernels.fp4.nvfp4.nvfp_quantization import (
+    _PTS_DIVZERO_FLOOR,
     convert_to_nvfp4,
     convert_from_nvfp4,
     compute_dynamic_per_tensor_scale,
@@ -168,7 +169,8 @@ def test_nvfp4_dynamic_per_tensor_scale(tensor_shape, axis, data_type):
 @pytest.mark.parametrize("pattern", ["zeros", "large"])
 def test_nvfp4_special_values(tensor_shape, axis, data_type, pattern):
     """Verify quantization correctness on edge-case inputs.
-    - zeros: all-zero tensor, exercises scale clamping to E4M3_EPS.
+    - zeros: all-zero tensor, exercises the E4M3 lower clamp on the
+             stored block scale.
     - large: 5000.0 everywhere, exceeds F8E4M3_MAX * F4_E2M1_MAX (2688),
              exercises FP4 saturation and scale clamp to F8E4M3_MAX.
     """
@@ -210,6 +212,53 @@ def test_nvfp4_special_values(tensor_shape, axis, data_type, pattern):
     assert torch.equal(x_dq_ref, x_dq), (
         f"Dequant mismatch for pattern={pattern}"
     )
+
+
+@pytest.mark.parametrize("is_2d_block", [False, True])
+def test_nvfp4_zero_tensor_with_pts(is_2d_block):
+    """All-zero tensor on the PTS branch must round-trip to 0 with no
+    NaN/Inf, and the effective per-block divisor ``out_scale * pts`` must
+    stay in FP32 normal range.
+
+    Complements ``test_nvfp4_special_values["zeros"]`` which only covers
+    the non-PTS branch.
+    """
+    block_size = 16
+    axis = -1
+    data_type = torch.bfloat16
+    x = prepare_data((128, 64), data_type, pattern="zeros")
+
+    pts_buf = torch.empty(1, dtype=torch.float32, device=x.device)
+    data_lp, scales = convert_to_nvfp4(
+        x, block_size=block_size, axis=axis, is_2d_block=is_2d_block,
+        per_tensor_scale=pts_buf, update_per_tensor_scale=True,
+    )
+
+    expected_pts_fp32 = torch.tensor(
+        _PTS_DIVZERO_FLOOR, dtype=torch.float32
+    ).item()
+    pts = pts_buf.item()
+    assert pts == expected_pts_fp32, (
+        f"Zero-tensor PTS must be floored to _PTS_DIVZERO_FLOOR "
+        f"(FP32-rounded {expected_pts_fp32:.6e}), got {pts:.6e}"
+    )
+
+    fp32_min_normal = torch.finfo(torch.float32).tiny
+    eff_min = scales.min().item() * pts
+    assert eff_min >= fp32_min_normal, (
+        f"Effective quant_scale ({eff_min:.6e}) fell into FP32 subnormal range; "
+        f"PTS_DIVZERO_FLOOR * E4M3_EPS would be flushed to zero under FTZ."
+    )
+
+    x_dq = convert_from_nvfp4(
+        data_lp, scales, output_dtype=data_type,
+        block_size=block_size, axis=axis, is_2d_block=is_2d_block,
+        per_tensor_scale=pts_buf,
+    )
+    assert torch.isfinite(scales).all(), "stored block scale has NaN/Inf"
+    assert torch.isfinite(x_dq).all(), "PTS+zero dequant produced NaN/Inf"
+    assert (x_dq == 0).all(), "PTS+zero dequant must be exactly 0"
+    assert (data_lp == 0).all(), "PTS+zero packed FP4 must be all zero bins"
 
 
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])

@@ -25,7 +25,8 @@ def prepare_data(tensor_shape, data_type, pattern="random"):
         data_type: Data type (torch.float32 or torch.bfloat16).
         pattern: Data pattern -
             "random"   : Gaussian with sparse outliers (default).
-            "zeros"    : All zeros — tests scale clamping to E4M3_EPS.
+            "zeros"    : All zeros — exercises the E4M3 lower clamp on the
+                         stored block scale.
             "large"    : All 5000.0 — exceeds F8E4M3_MAX * F4_E2M1_MAX (2688),
                          tests FP4 saturation and scale clamp to F8E4M3_MAX.
     """
@@ -262,20 +263,16 @@ def convert_to_nvfp4_pytorch(
         grouped = data_hp_2d.reshape(M, num_blocks, block_size).float()
         max_abs = grouped.abs().amax(dim=-1)
 
-    # Raw float32 block scale, clamped to E4M3 representable range.
-    block_scale_f32 = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
-
-    # Round to nearest E4M3 value (mirrors the NVFP4 hardware spec and the
-    # Triton kernel). Cast float32 -> float8_e4m3fn -> float32.
-    block_scale = block_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
-
+    # NVFP4 spec order: PTS-normalise first, then derive the block scale,
+    # with clamp + E4M3 round applied exactly once on the final stored value.
     if per_tensor_scale is not None:
         pts = per_tensor_scale.float().to(data_hp.device)
-        out_scale_f32 = (block_scale / pts).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        out_scale_f32 = (max_abs / pts / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
         out_scale = out_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
         quant_scale = out_scale * pts
     else:
-        out_scale = block_scale
+        block_scale_f32 = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        out_scale = block_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
         quant_scale = out_scale
 
     if is_2d_block:

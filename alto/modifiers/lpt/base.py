@@ -6,7 +6,7 @@ from typing import Literal
 import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
-from pydantic import PrivateAttr, Field, field_validator
+from pydantic import PrivateAttr, Field, field_validator, model_validator
 from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
@@ -18,6 +18,7 @@ from alto.kernels.dispatch import (
     LPScaledDotProductAttentionWrapper,
 )
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
+from alto.nn import DecomposedLinear
 
 __all__ = ["LowPrecisionTrainingModifier"]
 
@@ -35,6 +36,12 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
+    
+    lora_rank: int = 0
+    """
+    Lora rank for the decomposed linear layer.
+    If 0, use the original linear layer.
+    """
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
 
@@ -62,6 +69,25 @@ class LowPrecisionTrainingModifier(Modifier):
                 value[key] = cls.validate_targets(target)
 
         return value
+
+    @model_validator(mode="after")
+    def validate_lora_rank_alignment(self):
+        if self.lora_rank <= 0:
+            return self
+
+        schemes = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
+        for scheme_name in schemes:
+            if scheme_name == "nvfp4":
+                if self.lora_rank % 16 != 0:
+                    raise ValueError(
+                        f"lora_rank must be divisible by 16 for nvfp4, got {self.lora_rank}"
+                    )
+            elif scheme_name in ("mxfp4", "mxfp8_e4m3", "mxfp8_e5m2"):
+                if self.lora_rank % 32 != 0:
+                    raise ValueError(
+                        f"lora_rank must be divisible by 32 for {scheme_name}, got {self.lora_rank}"
+                    )
+        return self
 
     @property
     def requires_training_mode(self) -> bool:
@@ -95,7 +121,16 @@ class LowPrecisionTrainingModifier(Modifier):
                 if isinstance(module, BaseAttention):
                     assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
                     module.inner_attention = LPScaledDotProductAttentionWrapper(config=scheme_obj)
-                elif isinstance(module, torch.nn.Linear) or module.__class__.__name__.endswith("GroupedExperts"):
+                elif isinstance(module, torch.nn.Linear):
+                    if self.lora_rank > 0:
+                        module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)
+                        swap_params(module, config=scheme_obj, target_parameter_name="weight")
+                        swap_params(module, config=scheme_obj, target_parameter_name="u")
+                        swap_params(module, config=scheme_obj, target_parameter_name="v")
+                        model.set_submodule(name, module, strict=True)
+                    else:
+                        swap_params(module, config=scheme_obj, module_name=name)
+                elif module.__class__.__name__.endswith("GroupedExperts"):
                     swap_params(module, config=scheme_obj, module_name=name)
                 else:
                     raise ValueError(f"Unsupported module type: {type(module)}")
@@ -104,6 +139,10 @@ class LowPrecisionTrainingModifier(Modifier):
         return True
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
+        for model_part in model_parts:
+            for child in model_part.modules():
+                if isinstance(child, DecomposedLinear):
+                    child.init_lora_weights(init_std=0.02)
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:

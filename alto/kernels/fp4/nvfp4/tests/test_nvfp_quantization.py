@@ -5,7 +5,6 @@
 import pytest
 import torch
 from alto.kernels.fp4.nvfp4.nvfp_quantization import (
-    E4M3_EPS,
     _PTS_DIVZERO_FLOOR,
     convert_to_nvfp4,
     convert_from_nvfp4,

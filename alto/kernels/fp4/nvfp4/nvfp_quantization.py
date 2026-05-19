@@ -20,8 +20,14 @@ BLOCK_SIZE_DEFAULT = 16
 F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
-# Per spec, PTS lives in FP32; this floor is purely a div-by-zero guard for
-# the downstream ``max_abs / pts`` when ``amax == 0``.
+# Per spec, PTS lives in FP32; this floor is a div-by-zero guard for the
+# downstream ``max_abs / pts`` when ``amax == 0``.  We pick ``1e-30`` (well
+# above FP32 denormal range and ~22 orders below any natural training-time
+# PTS) so that the *effective* per-block divisor
+#   quant_scale = out_scale * pts
+# is still an FP32 *normal* in the worst case (``out_scale == E4M3_EPS``,
+# ``pts == _PTS_DIVZERO_FLOOR``):
+#   1e-30 * 2**-6 ≈ 1.56e-32  >  FP32 smallest normal (~1.18e-38)
 _PTS_DIVZERO_FLOOR = 1.0e-30
 
 SUPPORTED_SCALE_FORMATS = ("e4m3",)

@@ -20,7 +20,8 @@ class DecomposedLinear(nn.Module):
         self.sigma = nn.Parameter(torch.empty(lora_rank))
 
     def forward(self, input):
-        y = F.linear(input, self.weight) + input @ self.v @ torch.diag(self.sigma) @ self.u
+        lora_update = (input @ self.v) * self.sigma
+        y = F.linear(input, self.weight) + lora_update @ self.u
         if self.bias is not None:
             y += self.bias
         return y

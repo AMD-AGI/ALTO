@@ -240,7 +240,7 @@ def convert_to_nvfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: torch.Tensor = None,
+    outer_scale: torch.Tensor = None,
     scale_format: str = "e4m3",
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
@@ -263,13 +263,14 @@ def convert_to_nvfp4_pytorch(
         grouped = data_hp_2d.reshape(M, num_blocks, block_size).float()
         max_abs = grouped.abs().amax(dim=-1)
 
-    # NVFP4 spec order: PTS-normalise first, then derive the block scale,
-    # with clamp + E4M3 round applied exactly once on the final stored value.
-    if per_tensor_scale is not None:
-        pts = per_tensor_scale.float().to(data_hp.device)
-        out_scale_f32 = (max_abs / pts / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+    # NVFP4 spec order: outer_scale-normalise first, then derive the block
+    # scale, with clamp + E4M3 round applied exactly once on the final
+    # stored value.
+    if outer_scale is not None:
+        outer_scale = outer_scale.float().to(data_hp.device)
+        out_scale_f32 = (max_abs / outer_scale / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
         out_scale = out_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
-        quant_scale = out_scale * pts
+        quant_scale = out_scale * outer_scale
     else:
         block_scale_f32 = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
         out_scale = block_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
@@ -296,7 +297,7 @@ def convert_from_nvfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: torch.Tensor = None,
+    outer_scale: torch.Tensor = None,
     scale_format: str = "e4m3",
 ):
     data_lp = data_lp.transpose(axis, -1)
@@ -307,8 +308,8 @@ def convert_from_nvfp4_pytorch(
     f32 = f4_unpacked_to_f32(f4_unpacked)
     orig_hp_shape = (*orig_lp_shape[:-1], orig_lp_shape[-1] * 2)
 
-    if per_tensor_scale is not None:
-        scales = scales * per_tensor_scale.float().to(scales.device)
+    if outer_scale is not None:
+        scales = scales * outer_scale.float().to(scales.device)
 
     if is_2d_block:
         new_shape = (*orig_hp_shape[:-2],

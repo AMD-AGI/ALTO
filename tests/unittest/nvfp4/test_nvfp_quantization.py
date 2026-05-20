@@ -219,7 +219,7 @@ def test_nvfp4_special_values(tensor_shape, axis, data_type, pattern):
 def test_nvfp4_zero_tensor_with_outer_scale(is_2d_block):
     """All-zero tensor on the outer-scale branch must round-trip to 0 with
     no NaN/Inf, and the effective per-block divisor
-    ``out_scale * outer_scale`` must stay in FP32 normal range.
+    ``inner_scale * outer_scale`` must stay in FP32 normal range.
 
     Complements ``test_nvfp4_special_values["zeros"]`` which only covers
     the non-outer-scale branch.

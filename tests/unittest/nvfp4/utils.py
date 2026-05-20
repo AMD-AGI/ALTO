@@ -263,18 +263,18 @@ def convert_to_nvfp4_pytorch(
         grouped = data_hp_2d.reshape(M, num_blocks, block_size).float()
         max_abs = grouped.abs().amax(dim=-1)
 
-    # NVFP4 spec order: outer_scale-normalise first, then derive the block
-    # scale, with clamp + E4M3 round applied exactly once on the final
-    # stored value.
+    # NVFP4 spec order: outer_scale-normalise first, then derive the inner
+    # block scale, with clamp + E4M3 round applied exactly once on the
+    # final stored value.
     if outer_scale is not None:
         outer_scale = outer_scale.float().to(data_hp.device)
-        out_scale_f32 = (max_abs / outer_scale / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
-        out_scale = out_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
-        quant_scale = out_scale * outer_scale
+        inner_scale_raw = (max_abs / outer_scale / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        quant_scale = inner_scale * outer_scale
     else:
-        block_scale_f32 = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
-        out_scale = block_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
-        quant_scale = out_scale
+        inner_scale_raw = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        quant_scale = inner_scale
 
     if is_2d_block:
         quant_scale_expanded = quant_scale.unsqueeze(-2).unsqueeze(-1).expand_as(grouped)
@@ -282,12 +282,12 @@ def convert_to_nvfp4_pytorch(
     else:
         quant_scale_expanded = quant_scale.unsqueeze(-1).expand_as(grouped)
         scaled = (grouped / quant_scale_expanded).reshape(M, N).reshape(ori_shape)
-        out_scale = out_scale.reshape(*ori_shape[:-1], num_blocks)
+        inner_scale = inner_scale.reshape(*ori_shape[:-1], num_blocks)
 
     data_lp_unpacked = f32_to_f4_unpacked(scaled)
     data_lp = pack_uint4(data_lp_unpacked)
 
-    return data_lp.transpose(axis, -1), out_scale.transpose(axis, -1)
+    return data_lp.transpose(axis, -1), inner_scale.transpose(axis, -1)
 
 
 def convert_from_nvfp4_pytorch(

@@ -22,11 +22,11 @@ F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
 
 # Naming convention for the NVFP4 scale hierarchy:
-#   out_scale   -- per-block scale stored alongside the packed FP4 data
+#   inner_scale -- per-block scale stored alongside the packed FP4 data
 #                  (NVFP4 spec ``s_block``).  Value lives on the E4M3 grid
-#                  in an FP32 container (see PTS-side notes below).
+#                  in an FP32 container (see outer-side notes below).
 #   outer_scale -- the outer-level scale factor that sits above
-#                  ``out_scale`` (NVFP4 spec ``s_global``).  Currently a
+#                  ``inner_scale`` (NVFP4 spec ``s_global``).  Currently a
 #                  per-tensor FP32 scalar; the name is intentionally
 #                  agnostic so the same API can later carry an
 #                  outer-blockwise layout (e.g. one scale per 128x128
@@ -36,8 +36,8 @@ E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
 # guard for the downstream ``max_abs / outer_scale`` when ``amax == 0``.
 # We pick ``1e-30`` (well above FP32 denormal range and ~22 orders below
 # any natural training-time outer scale) so that the effective per-block
-# divisor ``quant_scale = out_scale * outer_scale`` stays an FP32 *normal*
-# in the worst case (``out_scale == E4M3_EPS``,
+# divisor ``quant_scale = inner_scale * outer_scale`` stays an FP32
+# *normal* in the worst case (``inner_scale == E4M3_EPS``,
 # ``outer_scale == _OUTER_SCALE_DIVZERO_FLOOR``):
 #   1e-30 * 2**-6 ≈ 1.56e-32  >  FP32 smallest normal (~1.18e-38)
 _OUTER_SCALE_DIVZERO_FLOOR = 1.0e-30
@@ -202,12 +202,13 @@ def _calculate_nvfp4_scales(
     written next to the packed FP4 data; the outer scale and intermediates
     stay in FP32.  With ``USE_OUTER_SCALE=True`` the spec order is::
 
-        out_scale_raw = block_amax(x) / outer_scale / F4_E2M1_MAX
-        out_scale     = round_e4m3(clamp(out_scale_raw, [E4M3_EPS, F8E4M3_MAX]))
-        quant_scale   = out_scale * outer_scale
+        inner_scale_raw = block_amax(x) / outer_scale / F4_E2M1_MAX
+        inner_scale     = round_e4m3(clamp(inner_scale_raw,
+                                           [E4M3_EPS, F8E4M3_MAX]))
+        quant_scale     = inner_scale * outer_scale
 
     i.e. clamp + E4M3 round are applied exactly once, on the final stored
-    block scale.
+    block (inner) scale.
 
     When ``IS_2D_BLOCK`` is True, one scale covers a
     ``QUANT_BLOCK_SIZE x QUANT_BLOCK_SIZE`` tile, yielding output shapes
@@ -227,17 +228,17 @@ def _calculate_nvfp4_scales(
 
     if USE_OUTER_SCALE:
         outer_scale = tl.load(outer_scale_ptr)
-        out_scale_f32 = max_abs / outer_scale / F4_E2M1_MAX
-        out_scale_f32 = tl.minimum(tl.maximum(out_scale_f32, E4M3_EPS), F8E4M3_MAX)
-        out_scale = out_scale_f32.to(tl.float8e4nv).to(tl.float32)
-        quant_scale = out_scale * outer_scale
+        inner_scale_raw = max_abs / outer_scale / F4_E2M1_MAX
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
+        quant_scale = inner_scale * outer_scale
     else:
-        block_scale_f32 = max_abs / F4_E2M1_MAX
-        block_scale_f32 = tl.minimum(tl.maximum(block_scale_f32, E4M3_EPS), F8E4M3_MAX)
-        out_scale = block_scale_f32.to(tl.float8e4nv).to(tl.float32)
-        quant_scale = out_scale
+        inner_scale_raw = max_abs / F4_E2M1_MAX
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
+        quant_scale = inner_scale
 
-    return out_scale, quant_scale
+    return inner_scale, quant_scale
 
 
 # ---- top-level Triton kernels ---------------------------------------------
@@ -297,7 +298,7 @@ def _convert_to_nvfp4_kernel(
         other=0,
     )
 
-    out_scale, quant_scale = _calculate_nvfp4_scales(
+    inner_scale, quant_scale = _calculate_nvfp4_scales(
         x,
         outer_scale_ptr,
         BLOCK_M=BLOCK_M,
@@ -326,7 +327,7 @@ def _convert_to_nvfp4_kernel(
     )
     tl.store(
         s_ptr + offs_s,
-        out_scale,
+        inner_scale,
         mask=(offs_sm[:, None] < SCALE_M_ACTUAL) & (offs_sn[None, :] < SCALE_N_ACTUAL),
     )
 
@@ -413,7 +414,7 @@ def compute_dynamic_outer_scale(
     """Compute the FP32 outer-level scale ``amax / (F8E4M3_MAX * F4_E2M1_MAX)``.
 
     The "outer" naming reflects this scalar's position in the NVFP4
-    hierarchy: it sits above the per-block ``out_scale`` and is shared
+    hierarchy: it sits above the per-block ``inner_scale`` and is shared
     across the entire tensor today (NVFP4 spec ``s_global``).  Future
     extensions may produce one outer scale per outer-block tile; this
     function and the surrounding API are named to accommodate that

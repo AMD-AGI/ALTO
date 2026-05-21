@@ -198,6 +198,10 @@ def _calculate_nvfp4_scales(
 ):
     """Compute per-block E4M3-quantised scales for NVFP4 quantization.
 
+    The returned ``inner_scale`` is the NVFP4 spec ``s_block``; the
+    ``outer_scale`` operand is the spec ``s_global``.  See the
+    naming-convention block at the top of this module for the rationale.
+
     Per spec, the only value stored as FP8 E4M3 is the per-block scale
     written next to the packed FP4 data; the outer scale and intermediates
     stay in FP32.  With ``USE_OUTER_SCALE=True`` the spec order is::

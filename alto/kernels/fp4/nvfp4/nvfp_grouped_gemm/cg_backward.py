@@ -89,7 +89,7 @@ def _nvfp4_grouped_wgrad(
     num_groups: Optional[int],
     *,
     use_sr_grad: bool,
-    use_per_tensor_scale: bool,
+    use_outer_scale: bool,
     use_2dblock_x: bool,
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
@@ -102,12 +102,12 @@ def _nvfp4_grouped_wgrad(
     if use_2dblock_x:
         g_m_dq = _qdq(
             grad_output, axis=-1, is_2d_block=True,
-            use_per_tensor_scale=use_per_tensor_scale, use_sr=use_sr_grad,
+            use_outer_scale=use_outer_scale, use_sr=use_sr_grad,
         )
     else:
         g_m_dq = _qdq(
             grad_output, axis=0, is_2d_block=False,
-            use_per_tensor_scale=use_per_tensor_scale, use_sr=use_sr_grad,
+            use_outer_scale=use_outer_scale, use_sr=use_sr_grad,
         )
 
     if use_cdna4_grouped_backend():

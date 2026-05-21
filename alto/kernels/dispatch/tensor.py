@@ -343,7 +343,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
-                use_per_tensor_scale=config.two_level_scaling == "tensorwise",
+                use_outer_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )
@@ -379,7 +379,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
-                use_per_tensor_scale=config.two_level_scaling == "tensorwise",
+                use_outer_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )

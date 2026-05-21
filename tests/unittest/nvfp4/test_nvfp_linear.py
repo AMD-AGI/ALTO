@@ -45,10 +45,10 @@ from .utils import prepare_data, calc_snr, calc_cossim
 @pytest.mark.parametrize("shape", [(128, 64), (4, 128, 64)])
 @pytest.mark.parametrize("axis", [-1, -2])
 @pytest.mark.parametrize("is_2d_block", [False, True])
-@pytest.mark.parametrize("use_per_tensor_scale", [False, True])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 @pytest.mark.parametrize("use_sr", [False, True])
 def test_nvfp4_qdq_roundtrip(
-    shape, axis, is_2d_block, use_per_tensor_scale, use_sr,
+    shape, axis, is_2d_block, use_outer_scale, use_sr,
 ):
     """Verify precision of a single NVFP4 quant -> dequant round-trip.
 
@@ -62,7 +62,7 @@ def test_nvfp4_qdq_roundtrip(
     x_qdq = _qdq(
         x, axis=axis,
         is_2d_block=is_2d_block,
-        use_per_tensor_scale=use_per_tensor_scale,
+        use_outer_scale=use_outer_scale,
         use_sr=use_sr,
     )
 
@@ -133,15 +133,15 @@ def test_nvfp4_linear_autograd_function(
 
     # NVFP4 QDQ path.  This is NOT a shared MXFP4/NVFP4 test; it is specific
     # to NVFP4's autograd function.  We still keep
-    # ``use_per_tensor_scale=False`` here on purpose so the parity check stays
+    # ``use_outer_scale=False`` here on purpose so the parity check stays
     # focused on the shared 6-QDQ linear math (forward + dX + dW).  The
-    # tensor-wise scale path is exercised separately in the QDQ round-trip and
-    # quantization tests, where it can be isolated without broadening this
-    # matrix or coupling the SNR thresholds to an NVFP4-only knob.
+    # outer-level scale path is exercised separately in the QDQ round-trip
+    # and quantization tests, where it can be isolated without broadening
+    # this matrix or coupling the SNR thresholds to an NVFP4-only knob.
     outputs = NVFP4LinearFunction.apply(
         inputs, weights,
         use_2dblock_x, use_2dblock_w, use_sr_grad,
-        False,  # use_per_tensor_scale
+        False,  # use_outer_scale
     )
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
@@ -211,7 +211,7 @@ def test_nvfp4_linear_forward_compares_with_mxfp4_on_shared_cases(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=False,
-        use_per_tensor_scale=False,
+        use_outer_scale=False,
     )
     y_mx = _to_mxfp4_then_scaled_mm(
         x,
@@ -302,7 +302,7 @@ def test_nvfp4_linear_backward_handles_dtype_cross(x_dtype, w_dtype):
         False,  # use_2dblock_x
         False,  # use_2dblock_w
         False,  # use_sr_grad
-        False,  # use_per_tensor_scale
+        False,  # use_outer_scale
     )
     assert y.dtype == x_dtype
     y.sum().backward()

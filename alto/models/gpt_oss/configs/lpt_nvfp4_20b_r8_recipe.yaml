@@ -1,0 +1,13 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "nvfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore: ["output", "re:.*\\.router\\.gate", "re:^layers\\.(21|22|23)(\\..*)?$"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: tensorwise

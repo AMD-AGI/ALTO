@@ -31,9 +31,9 @@ _LAZY_ATTRS = {
     "convert_from_mxfp4": (".mxfp4.mxfp_quantization", "convert_from_mxfp4"),
     "convert_to_mxfp4": (".mxfp4.mxfp_quantization", "convert_to_mxfp4"),
     "NVFP4_BLOCK_SIZE_DEFAULT": (".nvfp4.nvfp_quantization", "BLOCK_SIZE_DEFAULT"),
-    "compute_dynamic_per_tensor_scale": (
+    "compute_dynamic_outer_scale": (
         ".nvfp4.nvfp_quantization",
-        "compute_dynamic_per_tensor_scale",
+        "compute_dynamic_outer_scale",
     ),
     "convert_from_nvfp4": (".nvfp4.nvfp_quantization", "convert_from_nvfp4"),
     "convert_to_nvfp4": (".nvfp4.nvfp_quantization", "convert_to_nvfp4"),
@@ -57,7 +57,7 @@ def __dir__():
 __all__ = (
     "MXFP4_BLOCK_SIZE_DEFAULT",
     "NVFP4_BLOCK_SIZE_DEFAULT",
-    "compute_dynamic_per_tensor_scale",
+    "compute_dynamic_outer_scale",
     "convert_from_mxfp4",
     "convert_from_nvfp4",
     "convert_to_mxfp4",

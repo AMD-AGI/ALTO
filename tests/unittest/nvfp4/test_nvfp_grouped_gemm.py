@@ -19,8 +19,8 @@ Test layers
    Smoke test on shape corner cases (single group / 1-expert / 32-expert).
 
 3. ``test_nvfp4_grouped_gemm_recipe_variants_smoke``
-   Recipe knobs (2D-w, PTS, Hadamard, DGE, combinations) run end-to-end and
-   produce finite outputs + gradients.
+   Recipe knobs (2D-w, outer_scale, Hadamard, DGE, combinations) run end-to-end
+   and produce finite outputs + gradients.
 
 4. ``test_nvfp4_grouped_gemm_rejects_non_aligned_mtotal``
    Contract guard: loop backend must fail fast on misaligned M_total.
@@ -298,20 +298,20 @@ def test_nvfp4_grouped_gemm_boundary(M_multiplier, num_experts):
 
 # ---------------------------------------------------------------------------
 # Test 3 – focused recipe smoke for grouped-only knobs that are not covered by
-# the dense linear tests: grouped 2D-w, grouped PTS, grouped Hadamard, grouped
-# DGE, and their combination.
+# the dense linear tests: grouped 2D-w, grouped outer_scale, grouped Hadamard,
+# grouped DGE, and their combination.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("use_2dblock_x,use_2dblock_w,use_per_tensor_scale,use_hadamard,use_dge", [
+@pytest.mark.parametrize("use_2dblock_x,use_2dblock_w,use_outer_scale,use_hadamard,use_dge", [
     (False, False, False, False, False),  # plain baseline
     (False, True,  False, False, False),  # grouped weight 2D
-    (False, True,  True,  False, False),  # + PTS
+    (False, True,  True,  False, False),  # + outer_scale
     (False, True,  False, True,  False),  # + Hadamard
     (False, True,  False, False, True),   # + DGE
     (False, True,  False, True,  True),   # + Hadamard + DGE
 ])
 def test_nvfp4_grouped_gemm_recipe_variants_smoke(
-    use_2dblock_x, use_2dblock_w, use_per_tensor_scale, use_hadamard, use_dge,
+    use_2dblock_x, use_2dblock_w, use_outer_scale, use_hadamard, use_dge,
 ):
     """Grouped recipe variants should run end-to-end, produce finite outputs,
     and backprop finite gradients without silently falling back."""
@@ -332,7 +332,7 @@ def test_nvfp4_grouped_gemm_recipe_variants_smoke(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=True,
-        use_per_tensor_scale=use_per_tensor_scale,
+        use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
     )
@@ -402,7 +402,7 @@ def test_nvfp4_grouped_gemm_single_expert_equals_linear():
     y_linear = _to_nvfp4_then_scaled_mm(
         x, w,
         use_2dblock_x=False, use_2dblock_w=False,
-        use_sr_grad=False, use_per_tensor_scale=False,
+        use_sr_grad=False, use_outer_scale=False,
     )
 
     # NVFP4 grouped GEMM: one expert, all tokens -> expert 0

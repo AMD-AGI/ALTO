@@ -21,6 +21,27 @@ F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
 
+# Naming convention for the NVFP4 scale hierarchy:
+#   inner_scale -- per-block scale stored alongside the packed FP4 data
+#                  (NVFP4 spec ``s_block``).  Value lives on the E4M3 grid
+#                  in an FP32 container (see outer-side notes below).
+#   outer_scale -- the outer-level scale factor that sits above
+#                  ``inner_scale`` (NVFP4 spec ``s_global``).  Currently a
+#                  per-tensor FP32 scalar; the name is intentionally
+#                  agnostic so the same API can later carry an
+#                  outer-blockwise layout (e.g. one scale per 128x128
+#                  tile) without renaming the public surface.
+#
+# Per spec, ``outer_scale`` lives in FP32; this floor is a div-by-zero
+# guard for the downstream ``max_abs / outer_scale`` when ``amax == 0``.
+# We pick ``1e-30`` (well above FP32 denormal range and ~22 orders below
+# any natural training-time outer scale) so that the effective per-block
+# divisor ``quant_scale = inner_scale * outer_scale`` stays an FP32
+# *normal* in the worst case (``inner_scale == E4M3_EPS``,
+# ``outer_scale == _OUTER_SCALE_DIVZERO_FLOOR``):
+#   1e-30 * 2**-6 ≈ 1.56e-32  >  FP32 smallest normal (~1.18e-38)
+_OUTER_SCALE_DIVZERO_FLOOR = 1.0e-30
+
 SUPPORTED_SCALE_FORMATS = ("e4m3",)
 
 
@@ -168,27 +189,30 @@ def _unpack_fp4(
 @triton.jit
 def _calculate_nvfp4_scales(
     x,
-    per_tensor_scale_ptr,
+    outer_scale_ptr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
-    USE_PER_TENSOR_SCALE: tl.constexpr = False,
+    USE_OUTER_SCALE: tl.constexpr = False,
 ):
     """Compute per-block E4M3-quantised scales for NVFP4 quantization.
 
-    This follows the NVFP4 hardware specification: block scales are stored in
-    FP8 E4M3 format, not as raw float32 values.  Rounding the block scale to
-    the nearest E4M3 representable value at quantisation time ensures that
-    quant and dequant use *identical* scales, producing a consistent round-trip.
+    The returned ``inner_scale`` is the NVFP4 spec ``s_block``; the
+    ``outer_scale`` operand is the spec ``s_global``.  See the
+    naming-convention block at the top of this module for the rationale.
 
-    The procedure:
-    1. Compute raw float32 block scale: amax_block / F4_E2M1_MAX
-    2. **Round to the nearest E4M3 value** by casting to float8_e4m3fn and
-       back to float32.  This is the key step missing from the old code.
-    3. Return the E4M3-rounded scale as ``out_scale`` (stored next to the
-       packed FP4 data) and compute the matching ``quant_scale`` used to
-       divide input values during encoding.
+    Per spec, the only value stored as FP8 E4M3 is the per-block scale
+    written next to the packed FP4 data; the outer scale and intermediates
+    stay in FP32.  With ``USE_OUTER_SCALE=True`` the spec order is::
+
+        inner_scale_raw = block_amax(x) / outer_scale / F4_E2M1_MAX
+        inner_scale     = round_e4m3(clamp(inner_scale_raw,
+                                           [E4M3_EPS, F8E4M3_MAX]))
+        quant_scale     = inner_scale * outer_scale
+
+    i.e. clamp + E4M3 round are applied exactly once, on the final stored
+    block (inner) scale.
 
     When ``IS_2D_BLOCK`` is True, one scale covers a
     ``QUANT_BLOCK_SIZE x QUANT_BLOCK_SIZE`` tile, yielding output shapes
@@ -206,30 +230,19 @@ def _calculate_nvfp4_scales(
         x_grouped = x.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
         max_abs = tl.max(tl.abs(x_grouped), axis=-1).to(tl.float32)
 
-    # Raw float32 scale: clamp to the representable E4M3 range *before* rounding
-    # so that neither zero nor overflow can corrupt the cast.
-    block_scale_f32 = max_abs / F4_E2M1_MAX
-    block_scale_f32 = tl.minimum(tl.maximum(block_scale_f32, E4M3_EPS), F8E4M3_MAX)
-
-    # Round to the nearest E4M3 representable value (hardware storage format).
-    # Cast chain: float32 -> float8_e4m3fn -> float32.
-    block_scale_e4m3 = block_scale_f32.to(tl.float8e4nv)
-    block_scale = block_scale_e4m3.to(tl.float32)
-
-    if USE_PER_TENSOR_SCALE:
-        per_tensor_scale = tl.load(per_tensor_scale_ptr)
-        # The normalised block scale (stored as out_scale) is also rounded so
-        # that the dequant path can reproduce the same effective scale.
-        out_scale_f32 = block_scale / per_tensor_scale
-        out_scale_f32 = tl.minimum(tl.maximum(out_scale_f32, E4M3_EPS), F8E4M3_MAX)
-        out_scale_e4m3 = out_scale_f32.to(tl.float8e4nv)
-        out_scale = out_scale_e4m3.to(tl.float32)
-        quant_scale = out_scale * per_tensor_scale
+    if USE_OUTER_SCALE:
+        outer_scale = tl.load(outer_scale_ptr)
+        inner_scale_raw = max_abs / outer_scale / F4_E2M1_MAX
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
+        quant_scale = inner_scale * outer_scale
     else:
-        out_scale = block_scale
-        quant_scale = out_scale
+        inner_scale_raw = max_abs / F4_E2M1_MAX
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
+        quant_scale = inner_scale
 
-    return out_scale, quant_scale
+    return inner_scale, quant_scale
 
 
 # ---- top-level Triton kernels ---------------------------------------------
@@ -239,7 +252,7 @@ def _convert_to_nvfp4_kernel(
     x_ptr,
     y_ptr,
     s_ptr,
-    per_tensor_scale_ptr,
+    outer_scale_ptr,
     stride_xm,
     stride_xn,
     stride_ym,
@@ -257,7 +270,7 @@ def _convert_to_nvfp4_kernel(
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr,
-    USE_PER_TENSOR_SCALE: tl.constexpr,
+    USE_OUTER_SCALE: tl.constexpr,
     USE_SR: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -289,14 +302,14 @@ def _convert_to_nvfp4_kernel(
         other=0,
     )
 
-    out_scale, quant_scale = _calculate_nvfp4_scales(
+    inner_scale, quant_scale = _calculate_nvfp4_scales(
         x,
-        per_tensor_scale_ptr,
+        outer_scale_ptr,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
-        USE_PER_TENSOR_SCALE=USE_PER_TENSOR_SCALE,
+        USE_OUTER_SCALE=USE_OUTER_SCALE,
     )
 
     y = _pack_fp4(
@@ -318,7 +331,7 @@ def _convert_to_nvfp4_kernel(
     )
     tl.store(
         s_ptr + offs_s,
-        out_scale,
+        inner_scale,
         mask=(offs_sm[:, None] < SCALE_M_ACTUAL) & (offs_sn[None, :] < SCALE_N_ACTUAL),
     )
 
@@ -328,7 +341,7 @@ def _convert_from_nvfp4_kernel(
     x_ptr,
     y_ptr,
     s_ptr,
-    per_tensor_scale_ptr,
+    outer_scale_ptr,
     stride_xm,
     stride_xn,
     stride_ym,
@@ -344,7 +357,7 @@ def _convert_from_nvfp4_kernel(
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr,
-    USE_PER_TENSOR_SCALE: tl.constexpr,
+    USE_OUTER_SCALE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
@@ -377,9 +390,9 @@ def _convert_from_nvfp4_kernel(
         other=0,
     )
 
-    if USE_PER_TENSOR_SCALE:
-        per_tensor_scale = tl.load(per_tensor_scale_ptr)
-        s = s * per_tensor_scale
+    if USE_OUTER_SCALE:
+        outer_scale = tl.load(outer_scale_ptr)
+        s = s * outer_scale
 
     y = _unpack_fp4(
         x,
@@ -398,21 +411,29 @@ def _convert_from_nvfp4_kernel(
     )
 
 
-def compute_dynamic_per_tensor_scale(
+def compute_dynamic_outer_scale(
     data_hp: torch.Tensor,
     scale_format: str = "e4m3",
 ) -> torch.Tensor:
-    """Compute per_tensor_scale dynamically so that the tensor's full range
-    maps into the representable range of block scales * FP4-E2M1 values,
-    i.e. ``per_tensor_scale = amax / (F8E4M3_MAX * F4_E2M1_MAX)``.
+    """Compute the FP32 outer-level scale ``amax / (F8E4M3_MAX * F4_E2M1_MAX)``.
+
+    The "outer" naming reflects this scalar's position in the NVFP4
+    hierarchy: it sits above the per-block ``inner_scale`` and is shared
+    across the entire tensor today (NVFP4 spec ``s_global``).  Future
+    extensions may produce one outer scale per outer-block tile; this
+    function and the surrounding API are named to accommodate that
+    without further renames.
+
+    Per spec, the outer scale stays in FP32 with only a
+    ``_OUTER_SCALE_DIVZERO_FLOOR`` div-by-zero guard (``amax == 0``).
 
     The *scale_format* parameter is reserved for future scale representations
     (e.g. ``"e5m3"``).  Currently only ``"e4m3"`` is supported.
     """
     _check_scale_format(scale_format)
     amax = data_hp.float().abs().max()
-    per_tensor_scale = (amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=E4M3_EPS)
-    return per_tensor_scale.to(dtype=torch.float32).reshape(1)
+    outer_scale = (amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=_OUTER_SCALE_DIVZERO_FLOOR)
+    return outer_scale.to(dtype=torch.float32).reshape(1)
 
 
 @triton_op("alto::convert_to_nvfp4", mutates_args={})
@@ -421,8 +442,8 @@ def convert_to_nvfp4(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: Optional[torch.Tensor] = None,
-    update_per_tensor_scale: bool = True,
+    outer_scale: Optional[torch.Tensor] = None,
+    update_outer_scale: bool = True,
     scale_format: str = "e4m3",
     use_sr: bool = False,
     philox_seed: Optional[int] = None,
@@ -431,22 +452,25 @@ def convert_to_nvfp4(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize a high-precision tensor to NVFP4 (E2M1) format.
 
-    Per-tensor scaling is controlled by ``per_tensor_scale`` and
-    ``update_per_tensor_scale``:
+    Outer-level (NVFP4 spec ``s_global``) scaling is controlled by
+    ``outer_scale`` and ``update_outer_scale``.  ``outer_scale`` is today a
+    1-element FP32 tensor representing a per-tensor scale; the parameter is
+    deliberately named ``outer_scale`` (not ``per_tensor_scale``) so a future
+    outer-blockwise layout can reuse the same surface without renaming.
 
-    * ``per_tensor_scale`` given, ``update_per_tensor_scale=True`` (default):
+    * ``outer_scale`` given, ``update_outer_scale=True`` (default):
       recompute the scale from ``data_hp``'s amax and write it back into the
       caller's tensor **in place** (no clone).  The caller reads the updated
       value back through the same tensor.  This is the recommended path for
-      training, where the per-tensor scale tracks the current tensor's range.
-    * ``per_tensor_scale`` given, ``update_per_tensor_scale=False``:
+      training, where the outer scale tracks the current tensor's range.
+    * ``outer_scale`` given, ``update_outer_scale=False``:
       use the caller-provided scale as-is (for calibrated / frozen scales).
-    * ``per_tensor_scale=None``, ``update_per_tensor_scale=True`` (default):
+    * ``outer_scale=None``, ``update_outer_scale=True`` (default):
       compute a dynamic scale internally and apply it for this call only.
       The scale is not returned; if the caller wants to track it across calls
       they should pre-allocate a buffer and pass it in.
-    * ``per_tensor_scale=None``, ``update_per_tensor_scale=False``:
-      tensor-wise scaling is disabled.
+    * ``outer_scale=None``, ``update_outer_scale=False``:
+      outer-level scaling is disabled.
 
     *scale_format* selects the per-block scale representation.  Currently
     supported: ``"e4m3"`` (default).  ``"e5m3"`` is accepted for forward
@@ -484,29 +508,29 @@ def convert_to_nvfp4(
         -1, scale_shape[-1]
     )
 
-    # Resolve per-tensor-scale I/O on the caller's own buffer — no clone.
-    if per_tensor_scale is not None:
-        assert per_tensor_scale.numel() == 1, "per_tensor_scale must be a scalar tensor"
-        assert per_tensor_scale.dtype == torch.float32, (
-            "per_tensor_scale must be float32"
+    # Resolve outer-scale I/O on the caller's own buffer — no clone.
+    if outer_scale is not None:
+        assert outer_scale.numel() == 1, "outer_scale must be a scalar tensor"
+        assert outer_scale.dtype == torch.float32, (
+            "outer_scale must be float32"
         )
-        assert per_tensor_scale.device == data_hp.device, (
-            f"per_tensor_scale device ({per_tensor_scale.device}) must match "
+        assert outer_scale.device == data_hp.device, (
+            f"outer_scale device ({outer_scale.device}) must match "
             f"data_hp device ({data_hp.device})"
         )
-        if update_per_tensor_scale:
-            per_tensor_scale.copy_(
-                compute_dynamic_per_tensor_scale(data_hp).reshape_as(per_tensor_scale)
+        if update_outer_scale:
+            outer_scale.copy_(
+                compute_dynamic_outer_scale(data_hp).reshape_as(outer_scale)
             )
-        per_tensor_scale_buf = per_tensor_scale.reshape(())
-        use_per_tensor_scale = True
-    elif update_per_tensor_scale:
+        outer_scale_buf = outer_scale.reshape(())
+        use_outer_scale = True
+    elif update_outer_scale:
         # No buffer supplied — compute an ephemeral scale for this call.
-        per_tensor_scale_buf = compute_dynamic_per_tensor_scale(data_hp).reshape(())
-        use_per_tensor_scale = True
+        outer_scale_buf = compute_dynamic_outer_scale(data_hp).reshape(())
+        use_outer_scale = True
     else:
-        per_tensor_scale_buf = torch.ones((), dtype=torch.float32, device=data_hp.device)
-        use_per_tensor_scale = False
+        outer_scale_buf = torch.ones((), dtype=torch.float32, device=data_hp.device)
+        use_outer_scale = False
 
     stride_xm, stride_xn = data_hp.stride()
     stride_ym, stride_yn = data_lp.stride()
@@ -526,7 +550,7 @@ def convert_to_nvfp4(
         data_hp,
         data_lp,
         scales,
-        per_tensor_scale_buf,
+        outer_scale_buf,
         stride_xm,
         stride_xn,
         stride_ym,
@@ -544,7 +568,7 @@ def convert_to_nvfp4(
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
         IS_2D_BLOCK=is_2d_block,
-        USE_PER_TENSOR_SCALE=use_per_tensor_scale,
+        USE_OUTER_SCALE=use_outer_scale,
         USE_SR=use_sr,
     )
 
@@ -562,11 +586,14 @@ def convert_from_nvfp4(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: Optional[torch.Tensor] = None,
+    outer_scale: Optional[torch.Tensor] = None,
     scale_format: str = "e4m3",
     use_asm: Optional[bool] = None,
 ) -> torch.Tensor:
     """Dequantize NVFP4 (E2M1) data back to high-precision format.
+
+    ``outer_scale`` is the optional outer-level FP32 scalar (NVFP4 spec
+    ``s_global``); see :func:`convert_to_nvfp4` for the naming rationale.
 
     *scale_format* is accepted for API symmetry with :func:`convert_to_nvfp4`.
     The dequantization path only multiplies by the stored float32 scale, so
@@ -588,14 +615,14 @@ def convert_from_nvfp4(
     orig_shape_hp = (*orig_shape_lp[:-1], orig_shape_lp[-1] * 2)
     data_hp = data_lp.new_empty(orig_shape_hp, dtype=output_dtype).reshape(-1, orig_shape_hp[-1])
 
-    if per_tensor_scale is None:
-        per_tensor_scale_buf = torch.ones((), dtype=torch.float32, device=data_lp.device)
-        use_per_tensor_scale = False
+    if outer_scale is None:
+        outer_scale_buf = torch.ones((), dtype=torch.float32, device=data_lp.device)
+        use_outer_scale = False
     else:
-        per_tensor_scale = per_tensor_scale.to(device=data_lp.device, dtype=torch.float32)
-        assert per_tensor_scale.numel() == 1, "per_tensor_scale must be a scalar tensor"
-        per_tensor_scale_buf = per_tensor_scale.reshape(())
-        use_per_tensor_scale = True
+        outer_scale = outer_scale.to(device=data_lp.device, dtype=torch.float32)
+        assert outer_scale.numel() == 1, "outer_scale must be a scalar tensor"
+        outer_scale_buf = outer_scale.reshape(())
+        use_outer_scale = True
 
     stride_xm, stride_xn = data_lp.stride()
     stride_ym, stride_yn = data_hp.stride()
@@ -610,7 +637,7 @@ def convert_from_nvfp4(
         data_lp,
         data_hp,
         scales,
-        per_tensor_scale_buf,
+        outer_scale_buf,
         stride_xm,
         stride_xn,
         stride_ym,
@@ -626,7 +653,7 @@ def convert_from_nvfp4(
         BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=block_size,
         IS_2D_BLOCK=is_2d_block,
-        USE_PER_TENSOR_SCALE=use_per_tensor_scale,
+        USE_OUTER_SCALE=use_outer_scale,
     )
 
     return data_hp.reshape(orig_shape_hp).transpose(axis, -1)
@@ -638,8 +665,8 @@ def _fake_convert_to_nvfp4(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: Optional[torch.Tensor] = None,
-    update_per_tensor_scale: bool = True,
+    outer_scale: Optional[torch.Tensor] = None,
+    update_outer_scale: bool = True,
     scale_format: str = "e4m3",
     use_sr: bool = False,
     philox_seed: Optional[int] = None,
@@ -668,7 +695,7 @@ def _fake_convert_from_nvfp4(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: Optional[torch.Tensor] = None,
+    outer_scale: Optional[torch.Tensor] = None,
     scale_format: str = "e4m3",
     use_asm: Optional[bool] = None,
 ) -> torch.Tensor:
@@ -681,7 +708,7 @@ def _qdq(
     *,
     axis: int,
     is_2d_block: bool,
-    use_per_tensor_scale: bool,
+    use_outer_scale: bool,
     use_sr: bool = False,
     block_size: int = 16,
     return_raw: bool = False,
@@ -700,9 +727,9 @@ def _qdq(
     backward path to recover the exact FP4 bin each weight element fell into
     without paying a second quantization pass.
     """
-    pts = (
+    outer_scale = (
         torch.empty(1, dtype=torch.float32, device=tensor.device)
-        if use_per_tensor_scale
+        if use_outer_scale
         else None
     )
     data_lp, scales = convert_to_nvfp4(
@@ -710,10 +737,10 @@ def _qdq(
         block_size=block_size,
         axis=axis,
         is_2d_block=is_2d_block,
-        per_tensor_scale=pts,
-        # With pts provided, refresh it in-place from tensor.amax(); without
-        # pts, skip tensor-wise scaling entirely.
-        update_per_tensor_scale=use_per_tensor_scale,
+        outer_scale=outer_scale,
+        # With ``outer_scale`` provided, refresh it in-place from tensor.amax();
+        # without it, skip outer-level scaling entirely.
+        update_outer_scale=use_outer_scale,
         use_sr=use_sr,
     )
     dq = convert_from_nvfp4(
@@ -723,7 +750,7 @@ def _qdq(
         block_size=block_size,
         axis=axis,
         is_2d_block=is_2d_block,
-        per_tensor_scale=pts,
+        outer_scale=outer_scale,
     )
     if return_raw:
         return dq, data_lp, scales

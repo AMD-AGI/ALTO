@@ -25,7 +25,8 @@ def prepare_data(tensor_shape, data_type, pattern="random"):
         data_type: Data type (torch.float32 or torch.bfloat16).
         pattern: Data pattern -
             "random"   : Gaussian with sparse outliers (default).
-            "zeros"    : All zeros — tests scale clamping to E4M3_EPS.
+            "zeros"    : All zeros — exercises the E4M3 lower clamp on the
+                         stored block scale.
             "large"    : All 5000.0 — exceeds F8E4M3_MAX * F4_E2M1_MAX (2688),
                          tests FP4 saturation and scale clamp to F8E4M3_MAX.
     """
@@ -239,7 +240,7 @@ def convert_to_nvfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: torch.Tensor = None,
+    outer_scale: torch.Tensor = None,
     scale_format: str = "e4m3",
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
@@ -262,21 +263,18 @@ def convert_to_nvfp4_pytorch(
         grouped = data_hp_2d.reshape(M, num_blocks, block_size).float()
         max_abs = grouped.abs().amax(dim=-1)
 
-    # Raw float32 block scale, clamped to E4M3 representable range.
-    block_scale_f32 = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
-
-    # Round to nearest E4M3 value (mirrors the NVFP4 hardware spec and the
-    # Triton kernel). Cast float32 -> float8_e4m3fn -> float32.
-    block_scale = block_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
-
-    if per_tensor_scale is not None:
-        pts = per_tensor_scale.float().to(data_hp.device)
-        out_scale_f32 = (block_scale / pts).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
-        out_scale = out_scale_f32.to(torch.float8_e4m3fn).to(torch.float32)
-        quant_scale = out_scale * pts
+    # NVFP4 spec order: outer_scale-normalise first, then derive the inner
+    # block scale, with clamp + E4M3 round applied exactly once on the
+    # final stored value.
+    if outer_scale is not None:
+        outer_scale = outer_scale.float().to(data_hp.device)
+        inner_scale_raw = (max_abs / outer_scale / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        quant_scale = inner_scale * outer_scale
     else:
-        out_scale = block_scale
-        quant_scale = out_scale
+        inner_scale_raw = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        quant_scale = inner_scale
 
     if is_2d_block:
         quant_scale_expanded = quant_scale.unsqueeze(-2).unsqueeze(-1).expand_as(grouped)
@@ -284,12 +282,12 @@ def convert_to_nvfp4_pytorch(
     else:
         quant_scale_expanded = quant_scale.unsqueeze(-1).expand_as(grouped)
         scaled = (grouped / quant_scale_expanded).reshape(M, N).reshape(ori_shape)
-        out_scale = out_scale.reshape(*ori_shape[:-1], num_blocks)
+        inner_scale = inner_scale.reshape(*ori_shape[:-1], num_blocks)
 
     data_lp_unpacked = f32_to_f4_unpacked(scaled)
     data_lp = pack_uint4(data_lp_unpacked)
 
-    return data_lp.transpose(axis, -1), out_scale.transpose(axis, -1)
+    return data_lp.transpose(axis, -1), inner_scale.transpose(axis, -1)
 
 
 def convert_from_nvfp4_pytorch(
@@ -299,7 +297,7 @@ def convert_from_nvfp4_pytorch(
     block_size: int = BLOCK_SIZE_DEFAULT,
     axis: int = -1,
     is_2d_block: bool = False,
-    per_tensor_scale: torch.Tensor = None,
+    outer_scale: torch.Tensor = None,
     scale_format: str = "e4m3",
 ):
     data_lp = data_lp.transpose(axis, -1)
@@ -310,8 +308,8 @@ def convert_from_nvfp4_pytorch(
     f32 = f4_unpacked_to_f32(f4_unpacked)
     orig_hp_shape = (*orig_lp_shape[:-1], orig_lp_shape[-1] * 2)
 
-    if per_tensor_scale is not None:
-        scales = scales * per_tensor_scale.float().to(scales.device)
+    if outer_scale is not None:
+        scales = scales * outer_scale.float().to(scales.device)
 
     if is_2d_block:
         new_shape = (*orig_hp_shape[:-2],

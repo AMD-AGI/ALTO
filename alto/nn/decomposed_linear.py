@@ -20,7 +20,8 @@ class DecomposedLinear(nn.Module):
         self.sigma = nn.Parameter(torch.empty(lora_rank))
 
     def forward(self, input):
-        y = F.linear(input, self.weight) + input @ self.v @ torch.diag(self.sigma) @ self.u
+        lora_update = (input @ self.v) * self.sigma
+        y = F.linear(input, self.weight) + lora_update @ self.u
         if self.bias is not None:
             y += self.bias
         return y
@@ -30,6 +31,11 @@ class DecomposedLinear(nn.Module):
         new_layer = cls(linear.in_features, linear.out_features, linear.bias is not None, lora_rank)
         new_layer.weight = linear.weight
         new_layer.bias = linear.bias
+        device = linear.weight.device
+        dtype = linear.weight.dtype
+        new_layer.u.data = new_layer.u.data.to(device=device, dtype=dtype)
+        new_layer.v.data = new_layer.v.data.to(device=device, dtype=dtype)
+        new_layer.sigma.data = new_layer.sigma.data.to(device=device, dtype=dtype)
         return new_layer
     
     def init_lora_weights(self, init_std: float = 0.02):

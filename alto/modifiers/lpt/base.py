@@ -6,7 +6,7 @@ from typing import Literal
 import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
-from pydantic import PrivateAttr, Field, field_validator
+from pydantic import PrivateAttr, Field, field_validator, model_validator
 from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
@@ -69,6 +69,25 @@ class LowPrecisionTrainingModifier(Modifier):
                 value[key] = cls.validate_targets(target)
 
         return value
+
+    @model_validator(mode="after")
+    def validate_lora_rank_alignment(self):
+        if self.lora_rank <= 0:
+            return self
+
+        schemes = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
+        for scheme_name in schemes:
+            if scheme_name == "nvfp4":
+                if self.lora_rank % 16 != 0:
+                    raise ValueError(
+                        f"lora_rank must be divisible by 16 for nvfp4, got {self.lora_rank}"
+                    )
+            elif scheme_name in ("mxfp4", "mxfp8_e4m3", "mxfp8_e5m2"):
+                if self.lora_rank % 32 != 0:
+                    raise ValueError(
+                        f"lora_rank must be divisible by 32 for {scheme_name}, got {self.lora_rank}"
+                    )
+        return self
 
     @property
     def requires_training_mode(self) -> bool:

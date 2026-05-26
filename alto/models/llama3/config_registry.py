@@ -156,6 +156,8 @@ def llama3_8b_opt() -> Trainer.Config:
 def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1000
+    config.training.local_batch_size = 2
+    config.dump_folder = "./llama3-8b-mxfp8-e4m3-1gpu-notp-batch2-full-outputs"
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config
@@ -181,25 +183,28 @@ def llama3_1b_awq() -> Trainer.Config:
     return config
 
 
-LLAMA3_8B_PATH = "/workspace/Model-Optimizer/models/meta-llama/Llama-3.1-8B"
+LLAMA3_8B_PATH = "/workspace/Model-Optimizer/models/unsloth/Llama-3.1-8B"
 
 
 def llama3_8b() -> Trainer.Config:
     config = llama3_8b_orig()
     config.hf_assets_path = LLAMA3_8B_PATH
+    config.dump_folder = "./llama3-8b-bf16-outputs"
     config.metrics.log_freq = 1
     config.profiling.enable_profiling = False
-    config.training.steps = 0
+    config.training.steps = 1000
     config.training.local_batch_size = 1
-    config.training.global_batch_size = 8
-    config.training.seq_len = 2048
-    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4_test")
+    config.training.global_batch_size = -1
+    config.training.seq_len = 8192
+    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4")
+    config.parallelism.data_parallel_shard_degree = -1
+    config.parallelism.tensor_parallel_degree = 1
     config.activation_checkpoint.mode = "none"
-    config.checkpoint.enable = True
-    config.checkpoint.interval = 10
-    config.checkpoint.initial_load_path = LLAMA3_8B_PATH
-    config.checkpoint.initial_load_in_hf = True
-    config.validator.enable = True
+    config.compile.enable = False
+    config.checkpoint.enable = False
+    config.checkpoint.initial_load_path = None
+    config.checkpoint.initial_load_in_hf = False
+    config.validator.enable = False
     config.validator.dataloader = HuggingFaceTextDataLoader.Config(dataset="wikitext_test")
     config.validator.freq = 10
     config.validator.steps = 10

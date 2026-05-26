@@ -92,9 +92,10 @@ def _bf16_grouped_ref_forward(
 @pytest.mark.parametrize("use_2dblock_x", [False, True])
 @pytest.mark.parametrize("use_2dblock_w", [False, True])
 @pytest.mark.parametrize("use_sr_grad", [False, True])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
 def test_nvfp4_grouped_gemm_autograd(
-    shape, use_2dblock_x, use_2dblock_w, use_sr_grad, data_type
+    shape, use_2dblock_x, use_2dblock_w, use_sr_grad, use_outer_scale, data_type,
 ):
     """Output, dX, and dW SNR vs BF16 autograd reference must remain healthy."""
     M_total, N, K, num_experts = shape
@@ -129,6 +130,7 @@ def test_nvfp4_grouped_gemm_autograd(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=use_sr_grad,
+        use_outer_scale=use_outer_scale,
     )
     loss = torch.nn.functional.mse_loss(y, target)
     loss.backward()
@@ -156,9 +158,10 @@ def test_nvfp4_grouped_gemm_autograd(
         K=K,
         use_sr_grad=use_sr_grad,
         kind="nvfp4_grouped_gemm",
+        use_outer_scale=use_outer_scale,
         context=(
             f"NVFP4GroupedGEMM shape={shape} dtype={data_type} "
-            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w}"
+            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w} outer={use_outer_scale}"
         ),
     )
 
@@ -182,8 +185,9 @@ def test_nvfp4_grouped_gemm_autograd(
     ((1024, 512, 512, 8), True,  False, False),
     ((1024, 512, 512, 8), False, False, True),
 ])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
-    shape, trans_weights, use_2dblock_x, use_2dblock_w,
+    shape, trans_weights, use_2dblock_x, use_2dblock_w, use_outer_scale,
 ):
     """NVFP4 and MXFP4 grouped forward paths should both track BF16 reference.
 
@@ -231,6 +235,7 @@ def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=False,
+        use_outer_scale=use_outer_scale,
     )
     y_mx = mxfp4_grouped_gemm(
         inputs,
@@ -248,14 +253,6 @@ def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
 
     nv_snr = calc_snr(y_ref, y_nv)
     mx_snr = calc_snr(y_ref, y_mx)
-    print()
-    print(tabulate(
-        [
-            ["NVFP4", f"{nv_snr:.2f}", f"{calc_cossim(y_ref, y_nv):.6f}"],
-            ["MXFP4", f"{mx_snr:.2f}", f"{calc_cossim(y_ref, y_mx):.6f}"],
-        ],
-        headers=["Format", "SNR", "CosSim"], tablefmt="github",
-    ))
 
     assert torch.isfinite(y_nv).all()
     assert torch.isfinite(y_mx).all()

@@ -36,7 +36,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
-    
+
     lora_rank: int = 0
     """
     Lora rank for the decomposed linear layer.
@@ -58,7 +58,7 @@ class LowPrecisionTrainingModifier(Modifier):
 
     @field_validator("scheme", mode="before")
     def validate_scheme(cls, value: str | dict[str, str | list[str]]) -> str | dict[str, list[str]]:
-        if isinstance(value, str) and value not in ["mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]:
+        if isinstance(value, str) and value not in ["mxfp4", "mxfp4_adahop", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]:
             raise ValueError(f"Unsupported training op scheme: {value}")
 
         if isinstance(value, dict):
@@ -79,14 +79,10 @@ class LowPrecisionTrainingModifier(Modifier):
         for scheme_name in schemes:
             if scheme_name == "nvfp4":
                 if self.lora_rank % 16 != 0:
-                    raise ValueError(
-                        f"lora_rank must be divisible by 16 for nvfp4, got {self.lora_rank}"
-                    )
+                    raise ValueError(f"lora_rank must be divisible by 16 for nvfp4, got {self.lora_rank}")
             elif scheme_name in ("mxfp4", "mxfp8_e4m3", "mxfp8_e5m2"):
                 if self.lora_rank % 32 != 0:
-                    raise ValueError(
-                        f"lora_rank must be divisible by 32 for {scheme_name}, got {self.lora_rank}"
-                    )
+                    raise ValueError(f"lora_rank must be divisible by 32 for {scheme_name}, got {self.lora_rank}")
         return self
 
     @property
@@ -102,8 +98,13 @@ class LowPrecisionTrainingModifier(Modifier):
 
             self._resolved_config = {}
             for scheme_name, targets in self.scheme.items():
+                # "mxfp4_adahop" reuses the MXFP4 kernel path; the only
+                # difference is which wrapper class is used at swap time
+                # (handled in on_convert). At the TrainingOpConfig level it
+                # is plain mxfp4.
+                precision = "mxfp4" if scheme_name == "mxfp4_adahop" else scheme_name
                 scheme_obj = TrainingOpConfig(
-                    precision=scheme_name,
+                    precision=precision,
                     use_2dblock_x=self.use_2dblock_x,
                     use_2dblock_w=self.use_2dblock_w,
                     use_hadamard=self.use_hadamard,
@@ -112,11 +113,21 @@ class LowPrecisionTrainingModifier(Modifier):
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
                 )
+                # Tag the underlying scheme so on_convert can pick the right
+                # wrapper class. Stored on the dict key via a sibling attribute
+                # of the modifier rather than mutating TrainingOpConfig.
                 self._resolved_config[scheme_obj] = targets
+                self._scheme_tag = getattr(self, "_scheme_tag", {})
+                self._scheme_tag[scheme_obj] = scheme_name
         return self._resolved_config
 
     def on_convert(self, model: Module, **kwargs) -> bool:
         for scheme_obj, targets in self.resolved_config.items():
+            tensor_cls = self._wrapper_cls_for_scheme(scheme_obj)
+            scheme_name = getattr(self, "_scheme_tag", {}).get(scheme_obj, scheme_obj.precision)
+            wrapper_label = tensor_cls.__name__ if tensor_cls is not None else "default-for-precision"
+            logger.info(f"LowPrecisionTrainingModifier: scheme={scheme_name}, wrapper_cls={wrapper_label}, "
+                        f"targets={targets}, ignore={self.ignore}")
             for name, module in match_named_modules(model, targets, self.ignore):
                 if isinstance(module, BaseAttention):
                     assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
@@ -124,19 +135,28 @@ class LowPrecisionTrainingModifier(Modifier):
                 elif isinstance(module, torch.nn.Linear):
                     if self.lora_rank > 0:
                         module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)
-                        swap_params(module, config=scheme_obj, target_parameter_name="weight")
-                        swap_params(module, config=scheme_obj, target_parameter_name="u")
-                        swap_params(module, config=scheme_obj, target_parameter_name="v")
+                        swap_params(module, config=scheme_obj, target_parameter_name="weight", tensor_cls=tensor_cls)
+                        swap_params(module, config=scheme_obj, target_parameter_name="u", tensor_cls=tensor_cls)
+                        swap_params(module, config=scheme_obj, target_parameter_name="v", tensor_cls=tensor_cls)
                         model.set_submodule(name, module, strict=True)
                     else:
-                        swap_params(module, config=scheme_obj, module_name=name)
+                        swap_params(module, config=scheme_obj, module_name=name, tensor_cls=tensor_cls)
                 elif module.__class__.__name__.endswith("GroupedExperts"):
-                    swap_params(module, config=scheme_obj, module_name=name)
+                    swap_params(module, config=scheme_obj, module_name=name, tensor_cls=tensor_cls)
                 else:
                     raise ValueError(f"Unsupported module type: {type(module)}")
 
         logger.info(f"LowPrecisionTrainingModifier converted model: {model}")
         return True
+
+    def _wrapper_cls_for_scheme(self, scheme_obj):
+        """Return the wrapper tensor class for ``scheme_obj``. ``None`` falls
+        back to ``swap_params``' default (looked up from the config precision)."""
+        scheme_name = getattr(self, "_scheme_tag", {}).get(scheme_obj)
+        if scheme_name == "mxfp4_adahop":
+            from alto.kernels.dispatch.adahop_tensor import MXFP4CalibrationWrapper
+            return MXFP4CalibrationWrapper
+        return None
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         for model_part in model_parts:

@@ -1,0 +1,21 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp4_adahop"
+      targets: ["Linear"]
+      ignore: ["output"]
+    AdaHOPModifier:
+      enabled: true
+      use_hadamard: true
+      use_randomized_hadamard: false
+      calibration_steps: 30
+      layer_transform_config:
+        "row-row": "hadamard"
+        "col-col": "full_precision"
+        "none-none": "hadamard"
+        "row-col": "hadamard"
+        "col-row": "hadamard"
+        "row-none": "hadamard"
+        "none-row": "hadamard"
+        "col-none": "hadamard"
+        "none-col": "hadamard"

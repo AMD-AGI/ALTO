@@ -19,6 +19,8 @@ __all__ = [
     "llama3_debugmodel",
     "llama3_debugmodel_opt",
     "llama3_debugmodel_lpt",
+    "llama3_debugmodel_adahop",
+    "llama3_debugmodel_adahop_short",
     "llama3_1b",
     "llama3_1b_opt",
     "llama3_1b_lpt",
@@ -76,6 +78,27 @@ def llama3_debugmodel_lpt() -> Trainer.Config:
     config.training.steps = 10
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+def llama3_debugmodel_adahop() -> Trainer.Config:
+    config = llama3_debugmodel()
+    # Need enough steps for the 30-step calibration plus a handful of post-calibration
+    # iterations to confirm Phase-B wrappers are actually exercised.
+    config.training.steps = 35
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_debugmodel_adahop_short() -> Trainer.Config:
+    """3-step calibration variant for fast debug iteration on cluster."""
+    config = llama3_debugmodel()
+    config.training.steps = 8  # 3 calibration + 5 post-Phase-B
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_debug_recipe.yaml",),
+    ],)
     return config
 
 

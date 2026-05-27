@@ -37,6 +37,7 @@ from typing import Any, Callable, Optional, Tuple
 
 import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy
+from torchtitan.tools.logging import logger
 
 from alto.modifiers.lpt.adahop_internals.mxfp4_linear_function import MXFP4AdaHOPLinearFunction
 from alto.modifiers.lpt.adahop_internals.transform_mode import TransformMode, assert_mode_supported
@@ -58,6 +59,11 @@ class MXFP4CalibrationWrapper(MXFP4TrainingWeightWrapperTensor):
 
     def attach_calibration_callback(self, cb: Optional[CalibrationCallback]) -> None:
         self._calibration_callback = cb
+
+    def __repr__(self):
+        cb_state = "attached" if self._calibration_callback is not None else "none"
+        return (f"MXFP4CalibrationWrapper(shape={tuple(self.shape)}, dtype={self.dtype}, "
+                f"callback={cb_state})")
 
     @classmethod
     def __torch_function__(cls, func, types, args, kwargs={}):
@@ -112,6 +118,12 @@ class MXFP4AdaHOPWrapper(MXFP4TrainingWeightWrapperTensor):
             "backward_gw_mode": self._backward_gw_mode,
         }
 
+    def __repr__(self):
+        ht_state = "attached" if self._hadamard_transform is not None else "none"
+        return (f"MXFP4AdaHOPWrapper(shape={tuple(self.shape)}, dtype={self.dtype}, "
+                f"forward_y={self._forward_y_mode}, backward_gx={self._backward_gx_mode}, "
+                f"backward_gw={self._backward_gw_mode}, hadamard={ht_state})")
+
     @classmethod
     def __torch_function__(cls, func, types, args, kwargs={}):
         if func.__name__ in gemm_ops:
@@ -144,7 +156,7 @@ class MXFP4AdaHOPWrapper(MXFP4TrainingWeightWrapperTensor):
 
     @classmethod
     def __tensor_unflatten__(cls, inner_tensors, flatten_spec, outer_size, outer_stride):
-        return cls(
+        instance = cls(
             inner_tensors["_data"],
             flatten_spec["config"],
             hadamard_transform=None,
@@ -152,6 +164,12 @@ class MXFP4AdaHOPWrapper(MXFP4TrainingWeightWrapperTensor):
             backward_gx_mode=flatten_spec["backward_gx_mode"],
             backward_gw_mode=flatten_spec["backward_gw_mode"],
         )
+        logger.info(f"[AdaHOP] Restored MXFP4AdaHOPWrapper from checkpoint: "
+                    f"forward_y={instance._forward_y_mode}, "
+                    f"backward_gx={instance._backward_gx_mode}, "
+                    f"backward_gw={instance._backward_gw_mode}, "
+                    f"hadamard_transform=None (will be re-bound by modifier on first use)")
+        return instance
 
     def fsdp_post_all_gather(
         self,

@@ -49,3 +49,18 @@ build-backend = "poetry_dynamic_versioning.backend"
 enable = true
 [tool.poetry-dynamic-versioning.from-file]
 source = "version.txt"
+
+[tool.pytest.ini_options]
+# Real-data op-level SNR tests require pre-captured GPT-OSS-20B activation
+# bundles on a shared filesystem (default ``/wekafs/zhitwang/test_data/
+# real_activations/``).  Bundles are produced once by
+# ``scripts/dump_real_test_activations.py`` and consumed by
+# ``tests/unittest/{nvfp4,mxfp4}/test_*_real.py``.
+#
+# The tests stay opt-in: default ``pytest`` runs (and CI) exclude the marker,
+# so missing weka does not turn into red builds.  Run with ``pytest -m
+# real_data ...`` (or override via -o addopts="") to include them.
+markers = [
+    "real_data: op-level SNR test that needs pre-captured real-model activation bundles on /wekafs (opt-in via `pytest -m real_data`)",
+]
+addopts = "-m 'not real_data'"

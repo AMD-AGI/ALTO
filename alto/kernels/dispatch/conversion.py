@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause AND MIT
 
-from typing import Callable, Optional, Type
+from typing import Any, Callable, Dict, Optional, Type
 
 import torch
 from torch import nn
@@ -44,6 +44,8 @@ def swap_params(
     config: Optional[TrainingOpConfig] = None,
     target_parameter_name: Optional[str] = None,
     module_name: Optional[str] = None,
+    tensor_cls: Optional[Type[torch.Tensor]] = None,
+    tensor_cls_kwargs: Optional[Dict[str, Any]] = None,
 ) -> nn.Module:
     """
     Recurses through the nn.Module, recursively swapping the data tensor of
@@ -66,13 +68,15 @@ def swap_params(
     if config is None:
         raise ValueError("training op config is required")
 
-    tensor_cls = _get_tensor_cls_for_config(config)
+    if tensor_cls is None:
+        tensor_cls = _get_tensor_cls_for_config(config)
+    extra_kwargs: Dict[str, Any] = dict(tensor_cls_kwargs or {})
 
     if isinstance(module, nn.Parameter) and (module_filter_fn is None or module_filter_fn(module, "")):
         if len(list(module.children())) > 0:
             raise AssertionError(f"Does not support a root nn.Parameter with children: {module}")
         if not isinstance(module.data, TrainingWeightWrapperBaseTensor):
-            new_data = tensor_cls(module.data, config)
+            new_data = tensor_cls(module.data, config, **extra_kwargs)
             return nn.Parameter(new_data, requires_grad=module.requires_grad)
         return module
 
@@ -99,7 +103,7 @@ def swap_params(
                     continue
                 if not isinstance(param.data, TrainingWeightWrapperBaseTensor):
                     new_param = nn.Parameter(
-                        tensor_cls(param.data, config),
+                        tensor_cls(param.data, config, **extra_kwargs),
                         requires_grad=param.requires_grad,
                     )
                     setattr(module, param_name, new_param)

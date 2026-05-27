@@ -1,3 +1,7 @@
 [submodule "3rdparty/torchtitan"]
 	path = 3rdparty/torchtitan
 	url = https://github.com/AMD-AGI/torchtitan-amd.git
+[submodule "3rdparty/adahop"]
+	path = 3rdparty/adahop
+	url = git@github.com:AMDResearch/low-precision-training.git
+	branch = AdaHOP_C42

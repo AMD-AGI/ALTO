@@ -45,7 +45,14 @@ except RuntimeError as exc:
 
 @pytest.fixture
 def mxfp4_config():
-    return TrainingOpConfig(precision="mxfp4")
+    return TrainingOpConfig(
+        precision="mxfp4",
+        use_2dblock_x=False,
+        use_2dblock_w=True,
+        use_hadamard=False,
+        use_sr_grad=False,
+        use_dge=False,
+    )
 
 
 def test_calibration_wrapper_accepts_optional_callback(mxfp4_config):

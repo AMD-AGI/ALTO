@@ -12,6 +12,7 @@ from torchtitan.trainer import Trainer as TitanTrainer
 from torchtitan.experiments.forge.example_train import Trainer as ForgeTrainer, main as forge_main
 from torchtitan.components.metrics import MetricsProcessor
 from alto.components.converter import ModelOptConverter
+from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation
 from torchtitan.tools.logging import logger
 
 
@@ -108,6 +109,14 @@ class Trainer(ForgeTrainer):
             else:
                 logger.info("data replay buffer disabled")
                 self.enable_data_cache = False
+
+        deosc_config = DeOscillationConfig(
+            enable=True,
+            period=4,
+            ratio_threshold=16.0,
+            log_freq=1,
+        )
+        enable_de_oscillation(self.optimizers, deosc_config)
 
     def cache_input(self, microbatches: list[tuple[dict[str, torch.Tensor], torch.Tensor]]):
         if self.enable_data_cache:

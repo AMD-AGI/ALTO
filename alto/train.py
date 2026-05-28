@@ -4,6 +4,7 @@
 
 from typing import Iterable, Any
 from contextlib import contextmanager
+import os
 import time
 import torch
 from torchtitan.components.loss import IGNORE_INDEX
@@ -110,14 +111,6 @@ class Trainer(ForgeTrainer):
                 logger.info("data replay buffer disabled")
                 self.enable_data_cache = False
 
-        deosc_config = DeOscillationConfig(
-            enable=True,
-            period=4,
-            ratio_threshold=16.0,
-            log_freq=1,
-        )
-        enable_de_oscillation(self.optimizers, deosc_config)
-
     def cache_input(self, microbatches: list[tuple[dict[str, torch.Tensor], torch.Tensor]]):
         if self.enable_data_cache:
             self._input_cache = microbatches
@@ -199,6 +192,17 @@ class Trainer(ForgeTrainer):
         data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
     ):
         if self.training_mode:
+            # FIXME: This is a hack to enable de-oscillation at a specific step.
+            deosc_step = int(os.environ.get("DEOSC_STEP", "0"))
+            if deosc_step > 0 and self.step == deosc_step:
+                deosc_config = DeOscillationConfig(
+                    enable=True,
+                    period=200,
+                    ratio_threshold=8.0,
+                    log_freq=1,
+                )
+                enable_de_oscillation(self.optimizers, deosc_config)
+
             return super().train_step(data_iterator)
 
         # Keep these variables local to shorten the code as these are

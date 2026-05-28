@@ -51,8 +51,7 @@ silently skipped.  The FP4 format and the per-block scaling layout used
 for ``Q`` come from the wrapper's
 :class:`~alto.kernels.dispatch.config.TrainingOpConfig`, and the
 reduction axis along which QDQ is performed comes from
-``wrapper.weight_reduction_axis`` -- the same field consumed by the FP4
-grouped-MM dispatch.  Reading both from the wrapper guarantees that the
+``_infer_reduction_axis``.  Reading both from the wrapper guarantees that the
 de-oscillation hook tracks oscillation in exactly the same FP4 grid the
 forward / backward GEMMs see, with no axis inference duplicated here.
 
@@ -91,6 +90,15 @@ _FP4_WRAPPER_TYPES: tuple[type, ...] = (
 )
 
 
+def _infer_reduction_axis(w: torch.Tensor):
+    if w.dim() == 2:
+        return -1
+    elif w.dim() == 3:
+        return -2
+    else:
+        raise ValueError(f"Unexpected weight shape: {w.shape}")
+
+
 def _peel_to_fp4_wrapper(
     p: torch.Tensor,
 ) -> TrainingWeightWrapperBaseTensor | None:
@@ -120,7 +128,7 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
     The closure runs on the *plain* underlying FP32/BF16 tensor (i.e.
     ``wrapper._data``), with the same ``is_2d_block`` choice the FP4
     GEMM applies to the weight operand.  The reduction axis is passed in
-    by the caller (read from ``wrapper.weight_reduction_axis``) so the
+    by the caller (read from ``_infer_reduction_axis``) so the
     same cache entry serves both ``nn.Linear`` weights (axis ``-1``) and
     grouped-MM expert weights (axis ``-2``) that share a config.
     """
@@ -160,7 +168,6 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 axis=axis,
                 is_2d_block=is_2d_block,
             )
-
     else:
         raise ValueError(
             f"de-oscillation only supports FP4 wrappers, "
@@ -180,7 +187,7 @@ class DeOscillationConfig:
     quantization grid that the forward pass uses.
 
     Attributes:
-        enabled: master switch.
+        enable: master switch.
         period: number of ``optimizer.step()`` calls per de-oscillation
             window.  Reset decisions are taken on the last step of each
             window.
@@ -192,7 +199,7 @@ class DeOscillationConfig:
             periods.  ``0`` disables logging.
     """
 
-    enabled: bool = False
+    enable: bool = False
     period: int = 25
     ratio_threshold: float = 16.0
     log_freq: int = 0
@@ -225,7 +232,7 @@ class _DeOscillationHook:
         # TrainingOpConfig is @dataclass(unsafe_hash=True), so the same
         # config object (or two equal ones) maps to a single cached QDQ.
         # The cached closure takes ``(tensor, axis)``; the axis is read
-        # per-call from ``wrapper.weight_reduction_axis`` and is not
+        # per-call from ``_infer_reduction_axis`` and is not
         # baked into the cache key.
         self._qdq_cache: dict[TrainingOpConfig, QdqFn] = {}
         # Counts how many periods have completed since the hook was
@@ -328,10 +335,7 @@ class _DeOscillationHook:
         dist_w_qdq = state[self.KEY_DIST_QDQ]
 
         qdq_fn = self._qdq_for(wrapper)
-        # Read the reduction axis from the wrapper so we QDQ along the
-        # exact same axis that the forward FP4 GEMM uses; no shape-based
-        # heuristic here.
-        axis = wrapper.weight_reduction_axis
+        axis = _infer_reduction_axis(w_now)
         w_qdq = qdq_fn(w_now, axis)
         prev_qdq = qdq_fn(prev, axis)
         dist_w.add_((w_now - prev).abs())
@@ -390,55 +394,16 @@ class _DeOscillationHook:
             state[self.KEY_PREV].copy_(w)
 
 
-class DeOscillationOptimizersContainer(OptimizersContainer):
-    """:class:`OptimizersContainer` that installs the de-oscillation hook.
-
-    All standard AdamW / Adam knobs from :class:`OptimizersContainer.Config`
-    keep their usual meaning; the de-oscillation behaviour is controlled by
-    the nested :class:`DeOscillationConfig`.
-
-    The hook only fires on parameters wrapped by
-    :class:`MXFP4TrainingWeightWrapperTensor` or
-    :class:`NVFP4TrainingWeightWrapperTensor` (the FP4 format and
-    block-scaling layout are inferred from each wrapper's
-    :class:`TrainingOpConfig`).  Everything else passes through untouched.
-
-    Example::
-
-        config.optimizer = DeOscillationOptimizersContainer.Config(
-            name="AdamW",
-            lr=8e-4,
-            de_oscillation=DeOscillationConfig(
-                enabled=True,
-                period=25,
-                ratio_threshold=16.0,
-                log_freq=10,
-            ),
-        )
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(OptimizersContainer.Config):
-        de_oscillation: DeOscillationConfig = field(
-            default_factory=DeOscillationConfig
-        )
-
-    def __init__(
-        self,
-        config: Config,
-        *,
-        model_parts: list[nn.Module],
-    ) -> None:
-        super().__init__(config, model_parts=model_parts)
-        self._de_osci_cfg: DeOscillationConfig = config.de_oscillation
-        if self._de_osci_cfg.enabled:
-            hook = _DeOscillationHook(self._de_osci_cfg)
-            for opt in self.optimizers:
-                opt.register_step_post_hook(hook)
-            logger.info(
-                "[de-osc] enabled "
-                f"period={self._de_osci_cfg.period} "
-                f"ratio_threshold={self._de_osci_cfg.ratio_threshold} "
-                f"log_freq={self._de_osci_cfg.log_freq}; "
-                "scope=MXFP4/NVFP4 wrapped weights"
-            )
+def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillationConfig) -> None:
+    if not config.enable:
+        return
+    hook = _DeOscillationHook(config)
+    for opt in optimizers.optimizers:
+        opt.register_step_post_hook(hook)
+    logger.info(
+        "[de-osc] enabled "
+        f"period={config.period} "
+        f"ratio_threshold={config.ratio_threshold} "
+        f"log_freq={config.log_freq}; "
+        "scope=MXFP4/NVFP4 wrapped weights"
+    )

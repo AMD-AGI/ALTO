@@ -156,8 +156,6 @@ def llama3_8b_opt() -> Trainer.Config:
 def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1000
-    config.training.local_batch_size = 2
-    config.dump_folder = "./llama3-8b-mxfp8-e4m3-1gpu-notp-batch2-full-outputs"
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config
@@ -183,7 +181,7 @@ def llama3_1b_awq() -> Trainer.Config:
     return config
 
 
-LLAMA3_8B_PATH = "/workspace/Model-Optimizer/models/unsloth/Llama-3.1-8B"
+LLAMA3_8B_PATH = "/workspace/repos/ALTO/models/unsloth/Llama-3.1-8B"
 
 
 def llama3_8b() -> Trainer.Config:
@@ -193,7 +191,7 @@ def llama3_8b() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiling.enable_profiling = False
     config.training.steps = 1000
-    config.training.local_batch_size = 1
+    config.training.local_batch_size = 3
     config.training.global_batch_size = -1
     config.training.seq_len = 8192
     config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4")

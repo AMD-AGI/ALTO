@@ -10,7 +10,7 @@
 SCRIPT_DIR=$(dirname "$0")
 cd $SCRIPT_DIR/../..
 
-NGPU=1 \
+NGPU=2 \
 MODULE=llama3 \
 CONFIG=llama3_debugmodel_adahop_short \
 ./examples/run.sh

@@ -97,6 +97,28 @@ class MXFP4CalibrationWrapper(MXFP4TrainingWeightWrapperTensor):
             )
         return out
 
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[torch.Tensor] = None,
+    ):
+        # FSDP's all-gather produces a fresh wrapper that doesn't carry our
+        # _calibration_callback. Mirror MXFP4AdaHOPWrapper's pattern: stamp
+        # the callback onto the post-all-gather instance so the canonical
+        # wrapper seen by __torch_function__("linear") has a callback to
+        # invoke during calibration. Without this the forward observation
+        # path is silently a no-op under FSDP.
+        if out is not None:
+            if isinstance(out, MXFP4CalibrationWrapper):
+                out._calibration_callback = self._calibration_callback
+            return super().fsdp_post_all_gather(all_gather_outputs, metadata, param_dtype, out=out)
+        (data,) = all_gather_outputs
+        output = type(self)(data, self.config, calibration_callback=self._calibration_callback)
+        return output, (data,)
+
 
 class MXFP4AdaHOPWrapper(MXFP4TrainingWeightWrapperTensor):
     """Phase-B wrapper: frozen per-slot modes baked in at construction."""

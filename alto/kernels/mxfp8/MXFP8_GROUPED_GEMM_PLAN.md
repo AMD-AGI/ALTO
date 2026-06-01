@@ -131,7 +131,7 @@ functional.py        # 暴露顶层入口
 - `autotune.py`：`ALIGN_SIZE_M=128`，单 config `BSM=BSN=128, BSK=32`（= QUANT_BLOCK_SIZE，每次 dot_scaled 覆盖一个 scale group）。
 - dtype 参数化通道（`LHS_FORMAT_ID` / `RHS_FORMAT_ID`，0=e4m3 / 1=e5m2）已在三个 kernel 签名中预留，但**默认值全部对齐 V1 全 e4m3**（`fwd_format`/`bwd_grad_format` 默认 e4m3，wrapper `lhs_format_id`/`rhs_format_id` 默认 0）；e5m2 通道留给 v2。
 
-### Step 2 — Forward kernel
+### Step 2 — Forward kernel ✅ 已完成
 基于 `mxfp4/cg_forward.py` 机械改写：
 1. 删除所有 packing 相关代码（见 §1 第 1 点清单）
 2. 加入 `LHS_FORMAT_ID` / `RHS_FORMAT_ID` constexpr，`USE_DOT_SCALED` constexpr
@@ -139,6 +139,11 @@ functional.py        # 暴露顶层入口
 4. wrapper：`convert_to_mxfp8(inputs, axis=-1, mxfp_format=fwd_format)`、`convert_to_mxfp8(weights, axis=quant_axis_w, mxfp_format=fwd_format)`、launch
 
 **验证**：与 `mxfp4_grouped_gemm_forward`+bf16 dequant 同样的对比方式，跟 `for e in experts: X_e @ W_e.T`（bf16 reference）比 cosine similarity / max rel error。
+
+**完成情况**：
+- `cg_forward.py` kernel body + wrapper 已实现。fp8 load 用 `other=0.0`；CDNA3 dequant 路径 `_dequantize_fp8` 一律传 `IS_2D_BLOCK=False`（scale 偏移已在 kernel 内展开为逐行 `[BLOCK, n_rep_k]`，与参考 `blockwise_mxfp8_gemm_kernel` 一致）。
+- 测试 `tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py`：2 shapes × 2D-block-x × 2D-block-w 共 8 例全过。主校验用 **dequant-then-matmul reference**（隔离 kernel 移植正确性 vs mxfp8 量化误差），cos-sim > 0.999；另加 bf16 宽松 sanity（> 0.99）。
+- ⚠️ 当前硬件 MI300X = **CDNA3**，`is_cdna4()=False`，仅验证了 `USE_DOT_SCALED=False` 的 dequant+dot 路径；`tl.dot_scaled`（CDNA4）分支已写但需在 MI350 上验证（见 Step 7）。
 
 ### Step 3 — Backward dgrad kernel
 基于 `mxfp4/cg_backward.py` 的 `_kernel_mxfp4_grouped_gemm_backward_dx`：

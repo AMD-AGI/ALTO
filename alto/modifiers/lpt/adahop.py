@@ -230,9 +230,47 @@ class AdaHOPModifier(Modifier):
     # ------------------------------------------------------------------ helpers
 
     def _collect_calibration_wrappers(self, model_parts, cal_wrapper_cls) -> None:
+        # CRITICAL: attach to the canonical instance F.linear will see.
+        #
+        # No-FSDP path: `module.weight` IS the subclass (Parameter of a
+        # tensor subclass IS the subclass). Use that directly.
+        # `module.weight.data` triggers a detach in __torch_dispatch__ and
+        # returns a FRESH wrapper (different Python object); callbacks on
+        # that transient are invisible to F.linear.
+        #
+        # FSDP path: fully_shard swaps module.weight for a sharded DTensor
+        # whose _local_tensor is a FSDP-owned wrapper, distinct from any
+        # wrapper reachable through module.weight at discovery time. The
+        # canonical instance lives at
+        #   fsdp_state._fsdp_param_group.fsdp_params[i]._sharded_local_tensor
+        # (a property returning `cast(DTensor, sharded_param)._local_tensor`).
+        # That's what FSDP later passes as `self` into fsdp_post_all_gather
+        # and where state must be stamped for FSDP's all-gather rewrap to
+        # propagate it onto the unsharded param used in forward.
         from torch.distributed.tensor import DTensor
+        try:
+            from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
+        except Exception:
+            _get_module_fsdp_state = lambda _m: None  # noqa: E731
+
         self._fqn_to_wrapper.clear()
         self._fqn_to_module.clear()
+
+        # Pre-build a map from nn.Module → FSDPParam by walking every FSDP
+        # state and its param group. Each FSDPParam knows its origin module
+        # via _module_info.module and parameter name via _module_info.param_name.
+        module_param_to_fsdp_param = {}
+        for part in model_parts:
+            for _m in part.modules():
+                state = _get_module_fsdp_state(_m)
+                if state is None or state._fsdp_param_group is None:
+                    continue
+                for fp in state._fsdp_param_group.fsdp_params:
+                    mi = getattr(fp, "_module_info", None)
+                    if mi is None:
+                        continue
+                    module_param_to_fsdp_param[(id(mi.module), mi.param_name)] = fp
+
         for part in model_parts:
             for module_fqn, module in part.named_modules():
                 if not isinstance(module, nn.Linear):
@@ -240,15 +278,11 @@ class AdaHOPModifier(Modifier):
                 weight = getattr(module, "weight", None)
                 if weight is None:
                     continue
-                # CRITICAL: attach to the canonical instance F.linear will see.
-                # `weight.data` triggers a detach in __torch_dispatch__ and
-                # returns a FRESH wrapper (different Python object); the
-                # callback set on that transient is invisible to F.linear,
-                # which passes `weight` itself. Under no-FSDP `weight` IS the
-                # subclass (Parameter subclasses the underlying tensor type).
-                # Under FSDP weight.data is a DTensor; its _local_tensor is
-                # the canonical wrapper.
-                if isinstance(weight, cal_wrapper_cls):
+
+                fp = module_param_to_fsdp_param.get((id(module), "weight"))
+                if fp is not None:
+                    inner = fp._sharded_local_tensor
+                elif isinstance(weight, cal_wrapper_cls):
                     inner = weight
                 else:
                     raw = weight.data
@@ -256,8 +290,9 @@ class AdaHOPModifier(Modifier):
                         inner = raw._local_tensor
                     else:
                         inner = raw
-                    if not isinstance(inner, cal_wrapper_cls):
-                        continue
+
+                if not isinstance(inner, cal_wrapper_cls):
+                    continue
                 self._fqn_to_wrapper[module_fqn] = inner
                 self._fqn_to_module[module_fqn] = module
 

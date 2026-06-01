@@ -35,9 +35,49 @@ from typing import Optional
 
 import torch
 
+from alto.kernels.fp4.mxfp4.mxfp_quantization import is_cdna4
 from .transform_mode import TransformMode, assert_mode_supported
 
 HadamardTransformType = "HadamardTransform"  # type-hint placeholder; avoid hard import
+
+
+def _blockwise_mxfp4_gemm_or_dequant(
+    a_mxfp4: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_mxfp4: torch.Tensor,
+    b_scale: torch.Tensor,
+    *,
+    output_dtype: torch.dtype,
+    trans_a: bool = False,
+    trans_b: bool = False,
+) -> torch.Tensor:
+    """Routes to the Triton MXFP4 GEMM on cdna4 (gfx950) and falls back to
+    dequantize-then-bf16-matmul on cdna3 (gfx942). Mirrors ALTO's own gating
+    in ``alto/kernels/fp4/mxfp4/mxfp_linear.py`` (lines 321-353). The cdna3
+    fall-back keeps numerical equivalence at the MXFP4 quantization grain
+    while bypassing ``tt.dot_scaled``, which doesn't lower on gfx942.
+    """
+    if is_cdna4():
+        return torch.ops.torchtitan.blockwise_mxfp4_gemm(
+            a_mxfp4,
+            a_scale,
+            b_mxfp4,
+            b_scale,
+            trans_a=trans_a,
+            trans_b=trans_b,
+            output_dtype=output_dtype,
+        )
+    a_dq = torch.ops.torchtitan.convert_from_mxfp4(
+        a_mxfp4, a_scale, output_dtype, axis=-1, is_2d_block=False,
+    )
+    b_dq = torch.ops.torchtitan.convert_from_mxfp4(
+        b_mxfp4, b_scale, output_dtype, axis=-1, is_2d_block=False,
+    )
+    if trans_a:
+        a_dq = a_dq.T
+    if trans_b:
+        b_dq = b_dq.T
+    return a_dq @ b_dq
 
 
 @torch.compiler.allow_in_graph
@@ -101,7 +141,7 @@ class MXFP4AdaHOPLinearFunction(torch.autograd.Function):
                 axis=-1,
                 is_2d_block=False,
             )
-            y = torch.ops.torchtitan.blockwise_mxfp4_gemm(
+            y = _blockwise_mxfp4_gemm_or_dequant(
                 x_mxfp4_fwd,
                 x_scale_fwd,
                 w_mxfp4_fwd,
@@ -234,7 +274,7 @@ def _backward_gx(
         use_sr=use_sr_grad,
         is_2d_block=False,
     )
-    grad_inputs = torch.ops.torchtitan.blockwise_mxfp4_gemm(
+    grad_inputs = _blockwise_mxfp4_gemm_or_dequant(
         g_mxfp4,
         g_scale,
         w_mxfp4,
@@ -276,7 +316,7 @@ def _backward_gw(
         use_sr=use_sr_grad,
         is_2d_block=False,
     )
-    grad_weights = torch.ops.torchtitan.blockwise_mxfp4_gemm(
+    grad_weights = _blockwise_mxfp4_gemm_or_dequant(
         g_mxfp4_m,
         g_scale_m,
         x_mxfp4,

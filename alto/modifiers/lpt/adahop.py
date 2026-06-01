@@ -132,8 +132,13 @@ class AdaHOPModifier(Modifier):
 
         from alto._adahop_bridge import detect_outlier_pattern
 
+        import os
         for fqn, wrapper in self._fqn_to_wrapper.items():
             wrapper.attach_calibration_callback(make_forward_callback(self, fqn, detect_outlier_pattern))
+            if os.environ.get("ADAHOP_DEBUG_TF"):
+                print(f"[DBG ATTACH] fqn={fqn} wrapper_id={id(wrapper)} "
+                      f"type={type(wrapper).__name__} cb_set={wrapper._calibration_callback is not None}",
+                      flush=True)
 
         for fqn, module in self._fqn_to_module.items():
             # Forward pre-hook on the nn.Linear catches (x, weight._data) before

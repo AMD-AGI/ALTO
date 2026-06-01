@@ -255,7 +255,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 _B = args[1] if func.__name__ != "addmm.default" else args[2]
                 _A = args[0] if func.__name__ != "addmm.default" else args[1]
                 print(f"[DBG TF] func={func.__name__} "
-                      f"A_type={type(_A).__name__} B_type={type(_B).__name__} "
+                      f"B_id={id(_B)} B_type={type(_B).__name__} "
                       f"cb={getattr(_B, '_calibration_callback', 'NO_ATTR')!r}", flush=True)
             trans_b = func.__name__ == "linear"
             if func.__name__ == "addmm.default":

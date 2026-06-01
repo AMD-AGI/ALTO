@@ -24,6 +24,7 @@ __all__ = [
     "llama3_1b",
     "llama3_1b_opt",
     "llama3_1b_lpt",
+    "llama3_1b_adahop",
     "llama3_8b",
     "llama3_8b_pretrain",
     "llama3_8b_opt",
@@ -140,6 +141,14 @@ def llama3_1b_lpt() -> Trainer.Config:
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+def llama3_1b_adahop() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_recipe.yaml",)],)
     return config
 
 

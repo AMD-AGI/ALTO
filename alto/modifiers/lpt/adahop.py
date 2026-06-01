@@ -141,15 +141,6 @@ class AdaHOPModifier(Modifier):
                       flush=True)
 
         for fqn, module in self._fqn_to_module.items():
-            # Forward pre-hook on the nn.Linear catches (x, weight._data) before
-            # any tensor-subclass dispatch. Belt-and-suspenders alongside the
-            # wrapper-side callback: under FSDP the wrapper instance gets
-            # replaced by FSDP's all-gather and any callback we attach to the
-            # canonical instance is invisible by the time the linear actually
-            # runs. The module reference is stable.
-            fwd_handle = module.register_forward_pre_hook(
-                make_forward_pre_hook(self, fqn, detect_outlier_pattern))
-            self._backward_handles.append(fwd_handle)
             handle = module.register_full_backward_hook(make_backward_hook(self, fqn, detect_outlier_pattern))
             self._backward_handles.append(handle)
 
@@ -251,11 +242,24 @@ class AdaHOPModifier(Modifier):
                 weight = getattr(module, "weight", None)
                 if weight is None:
                     continue
-                inner = weight.data
-                if isinstance(inner, DTensor):
-                    inner = inner._local_tensor
-                if not isinstance(inner, cal_wrapper_cls):
-                    continue
+                # CRITICAL: attach to the canonical instance F.linear will see.
+                # `weight.data` triggers a detach in __torch_dispatch__ and
+                # returns a FRESH wrapper (different Python object); the
+                # callback set on that transient is invisible to F.linear,
+                # which passes `weight` itself. Under no-FSDP `weight` IS the
+                # subclass (Parameter subclasses the underlying tensor type).
+                # Under FSDP weight.data is a DTensor; its _local_tensor is
+                # the canonical wrapper.
+                if isinstance(weight, cal_wrapper_cls):
+                    inner = weight
+                else:
+                    raw = weight.data
+                    if isinstance(raw, DTensor):
+                        inner = raw._local_tensor
+                    else:
+                        inner = raw
+                    if not isinstance(inner, cal_wrapper_cls):
+                        continue
                 self._fqn_to_wrapper[module_fqn] = inner
                 self._fqn_to_module[module_fqn] = module
 

@@ -56,11 +56,6 @@ class MXFP4CalibrationWrapper(MXFP4TrainingWeightWrapperTensor):
     def __init__(self, tensor, config, *, calibration_callback: Optional[CalibrationCallback] = None):
         super().__init__(tensor, config)
         self._calibration_callback = calibration_callback
-        import os
-        if os.environ.get("ADAHOP_DEBUG_TF") and os.environ.get("ADAHOP_DEBUG_CTOR"):
-            import traceback
-            print(f"[DBG CTOR] id={id(self)} cb_set={calibration_callback is not None}", flush=True)
-            traceback.print_stack(limit=8)
 
     def attach_calibration_callback(self, cb: Optional[CalibrationCallback]) -> None:
         self._calibration_callback = cb
@@ -81,15 +76,18 @@ class MXFP4CalibrationWrapper(MXFP4TrainingWeightWrapperTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs={}):
-        import os
-        debug = os.environ.get("ADAHOP_DEBUG_TF")
+        # Belt-and-suspenders: even though discovery now attaches to the
+        # canonical wrapper instance, autograd-internal detach/view/clone
+        # rewraps will produce fresh MXFP4CalibrationWrapper instances via
+        # the parent's `cls(data, config)` path with cb=None. Propagate the
+        # callback from any input MXFP4CalibrationWrapper that has one onto
+        # every output MXFP4CalibrationWrapper. Harmless when no callback
+        # is in flight (calibration disabled or Phase-B already complete).
         src_cb = None
-        src_ids = []
         for a in args:
-            if isinstance(a, MXFP4CalibrationWrapper):
-                src_ids.append((id(a), a._calibration_callback is not None))
-                if a._calibration_callback is not None and src_cb is None:
-                    src_cb = a._calibration_callback
+            if isinstance(a, MXFP4CalibrationWrapper) and a._calibration_callback is not None:
+                src_cb = a._calibration_callback
+                break
         out = super().__torch_dispatch__(func, types, args, kwargs)
         if src_cb is not None:
             import torch.utils._pytree as pytree
@@ -98,18 +96,6 @@ class MXFP4CalibrationWrapper(MXFP4TrainingWeightWrapperTensor):
                 lambda t: setattr(t, "_calibration_callback", src_cb) or t,
                 out,
             )
-        if debug:
-            out_ids = []
-            if isinstance(out, MXFP4CalibrationWrapper):
-                out_ids.append(id(out))
-            elif isinstance(out, (list, tuple)):
-                for o in out:
-                    if isinstance(o, MXFP4CalibrationWrapper):
-                        out_ids.append(id(o))
-            if src_ids or out_ids:
-                print(f"[DBG DISP] func={func.__name__} "
-                      f"src={src_ids} out={out_ids} reattached={src_cb is not None}",
-                      flush=True)
         return out
 
     def fsdp_post_all_gather(

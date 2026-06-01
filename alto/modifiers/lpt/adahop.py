@@ -42,6 +42,7 @@ from alto.modifiers.lpt.adahop_internals.calibration_hooks import (
     load_modes_from_json,
     make_backward_hook,
     make_forward_callback,
+    make_forward_pre_hook,
     write_modes_json,
 )
 
@@ -135,6 +136,15 @@ class AdaHOPModifier(Modifier):
             wrapper.attach_calibration_callback(make_forward_callback(self, fqn, detect_outlier_pattern))
 
         for fqn, module in self._fqn_to_module.items():
+            # Forward pre-hook on the nn.Linear catches (x, weight._data) before
+            # any tensor-subclass dispatch. Belt-and-suspenders alongside the
+            # wrapper-side callback: under FSDP the wrapper instance gets
+            # replaced by FSDP's all-gather and any callback we attach to the
+            # canonical instance is invisible by the time the linear actually
+            # runs. The module reference is stable.
+            fwd_handle = module.register_forward_pre_hook(
+                make_forward_pre_hook(self, fqn, detect_outlier_pattern))
+            self._backward_handles.append(fwd_handle)
             handle = module.register_full_backward_hook(make_backward_hook(self, fqn, detect_outlier_pattern))
             self._backward_handles.append(handle)
 

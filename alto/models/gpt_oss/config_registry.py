@@ -22,7 +22,7 @@ GPT_OSS_C4_TRAIN_IDX = (
 GPT_OSS_C4_VALID_IDX = (
     "/wekafs/hanwang2/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
 )
-GPT_OSS_RUN_ROOT = "/wekafs/hanwang2/workspace/alto_runs"
+GPT_OSS_RUN_ROOT = "/wekafs/zhitwang/alto_runs"
 
 __all__ = [
     "gpt_oss_debugmodel",

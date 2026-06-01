@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG_DIR="${TRAIN_LOG_DIR:-/wekafs/hanwang2/workspace/alto_runs/orchestrator_logs}"
+LOG_DIR="${TRAIN_LOG_DIR:-/wekafs/zhitwang/alto_runs/orchestrator_logs}"
 LOG_FILE="${1:-}"
 
 if [[ -z "${LOG_FILE}" ]]; then

@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 
 
 STAMP = "validator_4way_20260519_070723"
-LOG_DIR = Path("/wekafs/hanwang2/workspace/alto_runs/orchestrator_logs")
+LOG_DIR = Path("/wekafs/zhitwang/alto_runs/orchestrator_logs")
 LOGS = {
     "bf16": LOG_DIR / f"e2e100_val_bf16_{STAMP}.log",
     "mxfp4": LOG_DIR / f"e2e100_val_mxfp4_{STAMP}.log",

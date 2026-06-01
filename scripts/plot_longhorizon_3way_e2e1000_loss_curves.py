@@ -33,7 +33,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-LOG_DIR = Path("/wekafs/hanwang2/workspace/alto_runs/orchestrator_logs")
+LOG_DIR = Path("/wekafs/zhitwang/alto_runs/orchestrator_logs")
 LONGHORIZON_STAMP = "longhorizon_1k_20260520_025621"
 RETRY_STAMP = "retry_nodbg_20260520_142532"
 

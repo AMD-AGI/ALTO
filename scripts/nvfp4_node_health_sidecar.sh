@@ -11,7 +11,7 @@
 #   bash scripts/nvfp4_node_health_sidecar.sh stop  <out_dir>
 #
 # Recommended out_dir:
-#   /wekafs/hanwang2/workspace/alto_runs/orchestrator_logs/probe_debug_<tag>/node_health
+#   /wekafs/zhitwang/alto_runs/orchestrator_logs/probe_debug_<tag>/node_health
 #
 # Designed for AMD MI300X (rocm-smi).  If amd-smi is available it is also
 # used.  Falls back gracefully if a tool is missing.

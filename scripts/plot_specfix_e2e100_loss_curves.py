@@ -25,7 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-LOG_DIR = Path("/wekafs/hanwang2/workspace/alto_runs/orchestrator_logs")
+LOG_DIR = Path("/wekafs/zhitwang/alto_runs/orchestrator_logs")
 SUMMARY_CSV = LOG_DIR / "e2e100_summary_specfix_e2e_100step_20260518_143205.csv"
 OUT_DIR = Path("/root/alto/doc/nvfp4_knowledge_transfer/reports")
 OUT_LOSS = OUT_DIR / "specfix_e2e100_loss.png"

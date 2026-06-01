@@ -200,7 +200,7 @@ def main() -> None:
     ap.add_argument(
         "--log-dir",
         type=Path,
-        default=Path("/wekafs/hanwang2/workspace/alto_runs/orchestrator_logs"),
+        default=Path("/wekafs/zhitwang/alto_runs/orchestrator_logs"),
     )
     ap.add_argument(
         "--log-prefix",

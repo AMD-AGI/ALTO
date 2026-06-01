@@ -767,16 +767,17 @@ def check_C7_precision_metadata(ctx: VerifierContext) -> CheckResult:
                 E4M3_EPS,
                 F4_E2M1_MAX,
                 F8E4M3_MAX,
-                compute_dynamic_per_tensor_scale,
+                compute_dynamic_outer_scale,
                 convert_from_nvfp4,
                 convert_to_nvfp4,
             )
 
-            pts = compute_dynamic_per_tensor_scale(w)
+            pts = compute_dynamic_outer_scale(w)
             pts_val = float(pts.item())
-            # The spec PTS is FP32 and *not* clamped to E4M3_EPS; if a
-            # well-conditioned weight's PTS lands exactly on E4M3_EPS, the
-            # spec-fix has likely been reverted.
+            # The spec outer-scale (a.k.a. per-tensor scale / s_global) is FP32
+            # and *not* clamped to E4M3_EPS; if a well-conditioned weight's
+            # outer-scale lands exactly on E4M3_EPS, the spec-fix has likely
+            # been reverted.
             spec_floor_active = pts_val == E4M3_EPS and (
                 float(w.float().abs().max())
                 / (F8E4M3_MAX * F4_E2M1_MAX)
@@ -786,8 +787,8 @@ def check_C7_precision_metadata(ctx: VerifierContext) -> CheckResult:
                 block_size=16,
                 axis=-1,
                 is_2d_block=False,
-                per_tensor_scale=pts,
-                update_per_tensor_scale=False,
+                outer_scale=pts,
+                update_outer_scale=False,
             )
             wq = convert_from_nvfp4(
                 data_lp,
@@ -796,7 +797,7 @@ def check_C7_precision_metadata(ctx: VerifierContext) -> CheckResult:
                 block_size=16,
                 axis=-1,
                 is_2d_block=False,
-                per_tensor_scale=pts,
+                outer_scale=pts,
             )
             err = float((wq.float() - w.float()).norm() / max(1e-12, w.float().norm()))
             ok = (

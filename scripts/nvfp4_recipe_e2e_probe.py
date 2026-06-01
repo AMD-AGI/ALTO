@@ -57,7 +57,7 @@ def _maybe_enable_probe_debug() -> None:
 
     rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))
     default_dir = (
-        f"/wekafs/hanwang2/workspace/alto_runs/orchestrator_logs/"
+        f"/wekafs/zhitwang/alto_runs/orchestrator_logs/"
         f"probe_debug_{os.environ.get('PROBE_RUN_NAME', 'nvfp4_e2e')}"
     )
     debug_dir = os.environ.get("PROBE_DEBUG_DIR", default_dir)

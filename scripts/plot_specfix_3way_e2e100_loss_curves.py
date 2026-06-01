@@ -18,7 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-LOG_DIR = Path("/wekafs/hanwang2/workspace/alto_runs/orchestrator_logs")
+LOG_DIR = Path("/wekafs/zhitwang/alto_runs/orchestrator_logs")
 LOGS = {
     "bf16": LOG_DIR / "e2e100_bf16_specfix_e2e_100step_20260518_143205.log",
     "mxfp4": LOG_DIR / "e2e100_mxfp4_specfix_e2e_100step_20260518_143205.log",

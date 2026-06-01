@@ -250,11 +250,6 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
 
         # linear op override
         elif func.__name__ in gemm_ops:
-            import os
-            if os.environ.get("ADAHOP_DEBUG_TF"):
-                _B = args[1] if func.__name__ != "addmm.default" else args[2]
-                print(f"[DBG TF] func={func.__name__} B_id={id(_B)} B_type={type(_B).__name__} "
-                      f"cb={getattr(_B, '_calibration_callback', 'NO_ATTR')!r}", flush=True)
             trans_b = func.__name__ == "linear"
             if func.__name__ == "addmm.default":
                 bias, A, B = args[0], args[1], args[2]

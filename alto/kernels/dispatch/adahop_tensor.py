@@ -106,12 +106,6 @@ class MXFP4CalibrationWrapper(MXFP4TrainingWeightWrapperTensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        import os
-        if os.environ.get("ADAHOP_DEBUG_TF"):
-            print(f"[DBG FSDP] self_id={id(self)} type={type(self).__name__} "
-                  f"self_cb={self._calibration_callback is not None} "
-                  f"out_type={type(out).__name__ if out is not None else None} "
-                  f"out_id={id(out) if out is not None else None}", flush=True)
         if out is not None:
             if isinstance(out, MXFP4CalibrationWrapper):
                 out._calibration_callback = self._calibration_callback

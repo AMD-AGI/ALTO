@@ -53,6 +53,34 @@ _ht = _load_package("_alto_adahop_ht", _HT_DIR)
 _tc = _load_module("_alto_adahop_transform_config", _TC_PATH)
 
 
+def _alias_ht_at_absolute_path() -> None:
+    """AdaHOP's ``iht_quantization`` does an *absolute* import:
+        ``from torchtitan.experiments.kernels.hadamard_transform.hadamard import _build_H_b32``
+    ALTO's vendored ``torchtitan`` package does not contain AdaHOP's
+    ``hadamard_transform`` subpackage, so the import fails. Alias the
+    bridge-loaded hadamard package at the absolute path the file expects.
+    Also stub the intermediate ``torchtitan.experiments`` and
+    ``torchtitan.experiments.kernels`` packages if they aren't already
+    populated, so the dotted lookup resolves.
+    """
+    import types
+    # Build out the chain torchtitan -> .experiments -> .kernels -> .hadamard_transform
+    # without clobbering whatever ALTO already has installed.
+    if "torchtitan" not in sys.modules:
+        sys.modules["torchtitan"] = types.ModuleType("torchtitan")
+    if "torchtitan.experiments" not in sys.modules:
+        sys.modules["torchtitan.experiments"] = types.ModuleType("torchtitan.experiments")
+    if "torchtitan.experiments.kernels" not in sys.modules:
+        sys.modules["torchtitan.experiments.kernels"] = types.ModuleType("torchtitan.experiments.kernels")
+    sys.modules["torchtitan.experiments.kernels.hadamard_transform"] = _ht
+    # The submodule that gets cherry-picked too:
+    if hasattr(_ht, "hadamard"):
+        sys.modules["torchtitan.experiments.kernels.hadamard_transform.hadamard"] = _ht.hadamard
+
+
+_alias_ht_at_absolute_path()
+
+
 def _load_mxfp4_package() -> Any:
     """Load AdaHOP's ``mxfp4/`` package without triggering the colliding
     ``torch.ops.torchtitan.*`` registrations from ``mxfp_linear.py`` and

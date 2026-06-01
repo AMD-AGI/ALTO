@@ -74,6 +74,29 @@ class MXFP4CalibrationWrapper(MXFP4TrainingWeightWrapperTensor):
                 weight._calibration_callback(x.detach(), weight._data.detach())
         return super().__torch_function__(func, types, args, kwargs)
 
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args, kwargs={}):
+        # The parent's __torch_dispatch__ rewraps subclass-preserving ops
+        # (detach, view, _to_copy, etc.) via cls(data, config), which loses
+        # our _calibration_callback because it isn't carried in the rewrap
+        # path. Re-attach the callback from the source wrapper onto the
+        # output so the canonical instance seen by __torch_function__
+        # ("linear") still has a callback to invoke.
+        src_cb = None
+        for a in args:
+            if isinstance(a, MXFP4CalibrationWrapper) and a._calibration_callback is not None:
+                src_cb = a._calibration_callback
+                break
+        out = super().__torch_dispatch__(func, types, args, kwargs)
+        if src_cb is not None:
+            import torch.utils._pytree as pytree
+            pytree.tree_map_only(
+                MXFP4CalibrationWrapper,
+                lambda t: setattr(t, "_calibration_callback", src_cb) or t,
+                out,
+            )
+        return out
+
 
 class MXFP4AdaHOPWrapper(MXFP4TrainingWeightWrapperTensor):
     """Phase-B wrapper: frozen per-slot modes baked in at construction."""

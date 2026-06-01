@@ -27,6 +27,40 @@ def make_forward_callback(modifier: Any, fqn: str, detect: Callable) -> Callable
     return _cb
 
 
+def make_forward_pre_hook(modifier: Any, fqn: str, detect: Callable) -> Callable:
+    """Forward pre-hook on the nn.Linear module. Captures (x, weight._data) directly
+    from the module — avoids the tensor-subclass dispatch path entirely, which is
+    fragile under FSDP because all the rewrap paths (__torch_dispatch__,
+    fsdp_post_all_gather, and any intervening detach/view) drop wrapper instance
+    state. By the time __torch_function__("linear") fires the canonical wrapper
+    is gone; the module reference is stable across all of that."""
+
+    def _pre(module, args):
+        if not modifier._per_step_patterns:
+            return
+        if not args:
+            return
+        x = args[0]
+        weight = module.weight
+        # Under FSDP weight is a DTensor wrapping our subclass; under no-FSDP
+        # it's the subclass directly. Either way ._data lives on the subclass.
+        w = weight.data
+        # Unwrap DTensor if present.
+        try:
+            from torch.distributed.tensor import DTensor
+            if isinstance(w, DTensor):
+                w = w._local_tensor
+        except Exception:
+            pass
+        w_data = getattr(w, "_data", w)
+        per_step = modifier._per_step_patterns[-1]
+        per_layer = per_step.setdefault(fqn, {})
+        per_layer["x"] = detect(x.detach())
+        per_layer["w"] = detect(w_data.detach())
+
+    return _pre
+
+
 def make_backward_hook(modifier: Any, fqn: str, detect: Callable) -> Callable:
     """Build a backward hook that writes ``grad_output`` pattern for ``fqn``."""
 

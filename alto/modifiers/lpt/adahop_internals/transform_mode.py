@@ -40,7 +40,14 @@ VALID_MODES: frozenset = frozenset([
 # Modes implemented in the ALTO-side MXFP4LinearFunction port.
 # Other VALID_MODES are accepted by the schema but will raise at runtime if
 # encountered in a calibration JSON until their kernel paths are ported.
-SUPPORTED_MODES: frozenset = frozenset(["none", "hadamard", "outer_hadamard", "full_precision"])
+SUPPORTED_MODES: frozenset = frozenset([
+    "none",
+    "hadamard",
+    "outer_hadamard",
+    "full_precision",
+    "inner_outlier_extract_left",
+    "inner_outlier_extract_right",
+])
 
 
 def assert_mode_supported(mode: str, slot: str) -> None:

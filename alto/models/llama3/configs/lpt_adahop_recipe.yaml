@@ -9,13 +9,15 @@ training_stage:
       use_hadamard: true
       use_randomized_hadamard: false
       calibration_steps: 30
+      # Mirrors AdaHOP's reference config
+      # (3rdparty/adahop/torchtitan/models/llama3/train_configs/llama3_3b_mxfp4_adahop_lv2.toml).
       layer_transform_config:
         "row-row": "hadamard"
-        "col-col": "full_precision"
-        "none-none": "hadamard"
-        "row-col": "hadamard"
+        "row-none": "inner_outlier_extract_left"
+        "row-col": "inner_outlier_extract_right"
         "col-row": "hadamard"
-        "row-none": "hadamard"
-        "none-row": "hadamard"
         "col-none": "hadamard"
-        "none-col": "hadamard"
+        "col-col": "full_precision"
+        "none-row": "hadamard"
+        "none-none": "hadamard"
+        "none-col": "inner_outlier_extract_right"

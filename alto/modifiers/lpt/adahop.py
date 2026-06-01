@@ -226,6 +226,7 @@ class AdaHOPModifier(Modifier):
     # ------------------------------------------------------------------ helpers
 
     def _collect_calibration_wrappers(self, model_parts, cal_wrapper_cls) -> None:
+        from torch.distributed.tensor import DTensor
         self._fqn_to_wrapper.clear()
         self._fqn_to_module.clear()
         for part in model_parts:
@@ -233,9 +234,14 @@ class AdaHOPModifier(Modifier):
                 if not isinstance(module, nn.Linear):
                     continue
                 weight = getattr(module, "weight", None)
-                if weight is None or not isinstance(weight.data, cal_wrapper_cls):
+                if weight is None:
                     continue
-                self._fqn_to_wrapper[module_fqn] = weight.data
+                inner = weight.data
+                if isinstance(inner, DTensor):
+                    inner = inner._local_tensor
+                if not isinstance(inner, cal_wrapper_cls):
+                    continue
+                self._fqn_to_wrapper[module_fqn] = inner
                 self._fqn_to_module[module_fqn] = module
 
     def _do_phase_b_reswap(self, modes_by_fqn: Dict[str, Dict[str, str]]) -> None:
@@ -257,6 +263,8 @@ class AdaHOPModifier(Modifier):
         else:
             ht_resolver = lambda _dev: None  # noqa: E731
 
+        from torch.distributed.tensor import DTensor
+
         for fqn, wrapper in self._fqn_to_wrapper.items():
             modes = modes_by_fqn.get(fqn, {"forward_y": "none", "backward_gx": "none", "backward_gw": "none"})
             module = self._fqn_to_module[fqn]
@@ -271,7 +279,21 @@ class AdaHOPModifier(Modifier):
                 backward_gx_mode=modes.get("backward_gx", "none"),
                 backward_gw_mode=modes.get("backward_gw", "none"),
             )
-            module.weight = nn.Parameter(new_wrapper, requires_grad=old_param.requires_grad)
+            if isinstance(old_param.data, DTensor):
+                # Preserve FSDP sharding: rebuild the DTensor around the new local wrapper
+                # using the same device mesh and placements as the existing param.
+                old_dt = old_param.data
+                new_dt = DTensor.from_local(
+                    new_wrapper,
+                    device_mesh=old_dt.device_mesh,
+                    placements=old_dt.placements,
+                    run_check=False,
+                    shape=old_dt.shape,
+                    stride=old_dt.stride(),
+                )
+                module.weight = nn.Parameter(new_dt, requires_grad=old_param.requires_grad)
+            else:
+                module.weight = nn.Parameter(new_wrapper, requires_grad=old_param.requires_grad)
             ht_state = "attached" if ht is not None else "none"
             logger.info(f"  [AdaHOP] re-swapped {fqn}: MXFP4CalibrationWrapper → "
                         f"MXFP4AdaHOPWrapper(forward_y={new_wrapper._forward_y_mode}, "

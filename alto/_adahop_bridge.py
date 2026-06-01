@@ -124,7 +124,13 @@ def _load_mxfp4_package() -> Any:
     mxfp_grouped_stub.mxfp4_grouped_gemm = None
     sys.modules[f"{pkg_name}.mxfp_grouped_gemm"] = mxfp_grouped_stub
 
-    return _load_package(pkg_name, _MXFP4_DIR)
+    pkg = _load_package(pkg_name, _MXFP4_DIR)
+    # __init__.py doesn't import foid / outlier_extract; force-load them
+    # via the package's submodule search so they hang off `pkg` as attributes.
+    import importlib
+    pkg.foid = importlib.import_module(f"{pkg_name}.foid")
+    pkg.outlier_extract = importlib.import_module(f"{pkg_name}.outlier_extract")
+    return pkg
 
 
 _mxfp4 = _load_mxfp4_package()

@@ -111,7 +111,7 @@ def nvfp4_grouped_gemm(
         [M_total, N] output tensor.
     """
     if not trans_weights:
-        # Downstream grouped kernels and _qdq both consume strided 
+        # Downstream grouped kernels and _qdq both consume strided
         # expert_weights, so no .contiguous() needed.
         expert_weights = expert_weights.transpose(-2, -1)
     return _nvfp4_grouped_gemm_impl(

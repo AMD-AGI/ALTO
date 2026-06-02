@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from alto.kernels.mxfp8.mxfp8_quantization import BLOCK_SIZE_DEFAULT, is_cdna4
+from alto.kernels.mxfp8.mxfp8_quantization import BLOCK_SIZE_DEFAULT
 from alto.kernels.mxfp8.mxfp8_grouped_gemm.autotune import ALIGN_SIZE_M
 from alto.kernels.mxfp8.mxfp8_grouped_gemm.cg_forward import mxfp8_grouped_gemm_forward
 
@@ -40,22 +40,24 @@ def _reference(inputs, expert_weights, indices, num_groups, trans_weights):
 @pytest.mark.parametrize("shape", [(256, 128, 128, 1), (512, 256, 256, 4)])
 @pytest.mark.parametrize("use_2dblock_x", [False, True])
 @pytest.mark.parametrize("use_2dblock_w", [False, True])
-def test_forward(shape, use_2dblock_x, use_2dblock_w):
+@pytest.mark.parametrize("trans_weights", [True, False])
+def test_forward(shape, use_2dblock_x, use_2dblock_w, trans_weights):
     M_total, N, K, num_experts = shape
     M_total = (M_total // ALIGN_SIZE_M) * ALIGN_SIZE_M
     num_groups = M_total // ALIGN_SIZE_M
     device = torch.device("cuda")
     data_type = torch.bfloat16
-    trans_weights = True
 
     inputs = prepare_data((M_total, K), data_type)
-    expert_weights = prepare_data((num_experts, N, K), data_type)
+    weight_shape = (num_experts, N, K) if trans_weights else (num_experts, K, N)
+    weight_axis = -1 if trans_weights else -2
+    expert_weights = prepare_data(weight_shape, data_type)
     indices = _make_indices(num_groups, num_experts, device)
 
     x_lp, x_s = torch.ops.alto.convert_to_mxfp8(
         inputs, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=use_2dblock_x)
     w_lp, w_s = torch.ops.alto.convert_to_mxfp8(
-        expert_weights, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=use_2dblock_w)
+        expert_weights, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=weight_axis, is_2d_block=use_2dblock_w)
 
     out = mxfp8_grouped_gemm_forward(
         x_lp, w_lp, indices, x_s, w_s,
@@ -71,7 +73,7 @@ def test_forward(shape, use_2dblock_x, use_2dblock_w):
     # consumed, matmul in PyTorch. This isolates kernel-port correctness from
     # mxfp8-vs-bf16 quantization error.
     x_dq = convert_from_mxfp8_pytorch(x_lp, x_s, torch.float32, BLOCK_SIZE_DEFAULT, -1, use_2dblock_x)
-    w_dq = convert_from_mxfp8_pytorch(w_lp, w_s, torch.float32, BLOCK_SIZE_DEFAULT, -1, use_2dblock_w)
+    w_dq = convert_from_mxfp8_pytorch(w_lp, w_s, torch.float32, BLOCK_SIZE_DEFAULT, weight_axis, use_2dblock_w)
     ref_dq = _reference(x_dq, w_dq, indices, num_groups, trans_weights)
     cos_dq = _cossim(out, ref_dq)
     assert cos_dq > 0.999, \
@@ -81,3 +83,33 @@ def test_forward(shape, use_2dblock_x, use_2dblock_w):
     ref_bf16 = _reference(inputs, expert_weights, indices, num_groups, trans_weights)
     cos_bf16 = _cossim(out, ref_bf16)
     assert cos_bf16 > 0.99, f"kernel vs bf16 cos-sim too low: {cos_bf16}"
+
+
+def test_forward_rejects_indices_length_mismatch():
+    M_total, N, K, num_experts = ALIGN_SIZE_M, 128, 128, 1
+    data_type = torch.bfloat16
+    inputs = prepare_data((M_total, K), data_type)
+    expert_weights = prepare_data((num_experts, N, K), data_type)
+    indices = torch.zeros(M_total - 1, dtype=torch.int32, device="cuda")
+    x_lp, x_s = torch.ops.alto.convert_to_mxfp8(
+        inputs, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=False)
+    w_lp, w_s = torch.ops.alto.convert_to_mxfp8(
+        expert_weights, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=False)
+
+    with pytest.raises(AssertionError, match="expert_indices length"):
+        mxfp8_grouped_gemm_forward(x_lp, w_lp, indices, x_s, w_s)
+
+
+def test_forward_rejects_wrong_scale_shape():
+    M_total, N, K, num_experts = ALIGN_SIZE_M, 128, 128, 1
+    data_type = torch.bfloat16
+    inputs = prepare_data((M_total, K), data_type)
+    expert_weights = prepare_data((num_experts, N, K), data_type)
+    indices = torch.zeros(M_total, dtype=torch.int32, device="cuda")
+    x_lp, x_s = torch.ops.alto.convert_to_mxfp8(
+        inputs, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=False)
+    w_lp, w_s = torch.ops.alto.convert_to_mxfp8(
+        expert_weights, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=False)
+
+    with pytest.raises(AssertionError, match="weight_scales shape"):
+        mxfp8_grouped_gemm_forward(x_lp, w_lp, indices, x_s, w_s[:, :, :-1])

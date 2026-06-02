@@ -142,8 +142,9 @@ functional.py        # 暴露顶层入口
 
 **完成情况**：
 - `cg_forward.py` kernel body + wrapper 已实现。fp8 load 用 `other=0.0`；CDNA3 dequant 路径 `_dequantize_fp8` 一律传 `IS_2D_BLOCK=False`（scale 偏移已在 kernel 内展开为逐行 `[BLOCK, n_rep_k]`，与参考 `blockwise_mxfp8_gemm_kernel` 一致）。
-- 测试 `tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py`：2 shapes × 2D-block-x × 2D-block-w 共 8 例全过。主校验用 **dequant-then-matmul reference**（隔离 kernel 移植正确性 vs mxfp8 量化误差），cos-sim > 0.999；另加 bf16 宽松 sanity（> 0.99）。
-- ⚠️ 当前硬件 MI300X = **CDNA3**，`is_cdna4()=False`，仅验证了 `USE_DOT_SCALED=False` 的 dequant+dot 路径；`tl.dot_scaled`（CDNA4）分支已写但需在 MI350 上验证（见 Step 7）。
+- wrapper 已补最小输入契约检查：`inputs`/`expert_weights` 维度、`expert_indices.numel() == M_total`、`K % 32 == 0`、2D weight scale 的 `N % 32 == 0`、以及 input/weight scale shape 精确匹配。V1 仍不支持 padded buffer；如需支持，应像 mxfp4/nvfp4 一样显式区分 `M_bufferlen` 与 `M_total`。
+- 测试 `tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py`：2 shapes × 2D-block-x × 2D-block-w × `trans_weights` 共 16 个正例全过；另有 2 个负例覆盖 `expert_indices` 长度不匹配和 `weight_scales` shape 错误，共 **18 passed**。主校验用 **dequant-then-matmul reference**（隔离 kernel 移植正确性 vs mxfp8 量化误差），cos-sim > 0.999；另加 bf16 宽松 sanity（> 0.99）。
+- 2026-06-02 在 `friendly_elgamal` 容器中验证：`is_cdna4()=True`，forward 默认走 **CDNA4 `tl.dot_scaled`** 路径，`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py -q` 结果为 `18 passed, 14 warnings in 12.05s`。CDNA3 fallback 路径仍需在 CDNA3/MI300 上单独复验。
 
 ### Step 3 — Backward dgrad kernel
 基于 `mxfp4/cg_backward.py` 的 `_kernel_mxfp4_grouped_gemm_backward_dx`：

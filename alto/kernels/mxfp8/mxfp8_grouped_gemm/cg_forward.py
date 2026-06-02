@@ -236,6 +236,8 @@ def mxfp8_grouped_gemm_forward(
 
     Y[m, :] = X[m] @ W[expert(m)]^T, computed per contiguous group of tokens.
     """
+    assert inputs.dim() == 2, f"inputs must be 2D, got {inputs.dim()}D"
+    assert expert_weights.dim() == 3, f"expert_weights must be 3D, got {expert_weights.dim()}D"
     assert expert_indices.is_contiguous(), "Expert indices tensor must be contiguous"
     if use_dot_scaled is None:
         use_dot_scaled = is_cdna4()
@@ -244,6 +246,10 @@ def mxfp8_grouped_gemm_forward(
     torch._check(M_total > 0)
     assert M_total % ALIGN_SIZE_M == 0, \
         f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
+    assert expert_indices.numel() == M_total, \
+        f"expert_indices length ({expert_indices.numel()}) must match M_total ({M_total})"
+    if K % BLOCK_SIZE_DEFAULT != 0:
+        raise ValueError(f"K ({K}) must be divisible by block_size ({BLOCK_SIZE_DEFAULT})")
 
     if expert_indices.dtype != torch.int32:
         expert_indices = expert_indices.to(torch.int32)
@@ -258,6 +264,30 @@ def mxfp8_grouped_gemm_forward(
         stride_bse, stride_bsk, stride_bsn = weight_scales.stride()
 
     assert K == K_weights, f"Input K ({K}) must match weight K ({K_weights})"
+    if use_2dblock_w and N % BLOCK_SIZE_DEFAULT != 0:
+        raise ValueError(f"N ({N}) must be divisible by block_size ({BLOCK_SIZE_DEFAULT}) for 2D weight scales")
+
+    expected_input_scales = (
+        (M_total // BLOCK_SIZE_DEFAULT, K // BLOCK_SIZE_DEFAULT)
+        if use_2dblock_x else
+        (M_total, K // BLOCK_SIZE_DEFAULT)
+    )
+    if trans_weights:
+        expected_weight_scales = (
+            (num_experts, N // BLOCK_SIZE_DEFAULT, K // BLOCK_SIZE_DEFAULT)
+            if use_2dblock_w else
+            (num_experts, N, K // BLOCK_SIZE_DEFAULT)
+        )
+    else:
+        expected_weight_scales = (
+            (num_experts, K // BLOCK_SIZE_DEFAULT, N // BLOCK_SIZE_DEFAULT)
+            if use_2dblock_w else
+            (num_experts, K // BLOCK_SIZE_DEFAULT, N)
+        )
+    assert input_scales.shape == torch.Size(expected_input_scales), \
+        f"input_scales shape {input_scales.shape} must be {expected_input_scales}"
+    assert weight_scales.shape == torch.Size(expected_weight_scales), \
+        f"weight_scales shape {weight_scales.shape} must be {expected_weight_scales}"
 
     output = torch.zeros((M_total, N), device=inputs.device, dtype=output_dtype)
 

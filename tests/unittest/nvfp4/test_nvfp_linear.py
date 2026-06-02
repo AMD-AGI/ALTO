@@ -195,11 +195,9 @@ def test_nvfp4_linear_forward_compares_with_mxfp4_on_shared_cases(
     # "NVFP4 vs BF16" and "MXFP4 vs BF16", not "NVFP4 vs MXFP4".
     y_ref = torch.nn.functional.linear(x, w)
 
-    # Keep both recipes deliberately minimal and analogous: 1D block scales,
-    # deterministic rounding on the forward path, no clipping, no Hadamard,
-    # no DGE, no macro/outer scaling.  This keeps the test focused on whether
-    # each format family can run the same dense-linear shape and produce a
-    # finite output with reasonable forward error.
+    # Minimal forward config for both formats (1D blocks, RNE, no clip/Hadamard/
+    # DGE).  Intentional asymmetry: NVFP4 sweeps ``use_outer_scale`` to exercise
+    # its two-level FP32 scaling path; MXFP4 stays fixed (no macro-block).
     y_nv = _to_nvfp4_then_scaled_mm(
         x,
         w,

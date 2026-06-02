@@ -223,10 +223,9 @@ def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
         trans_weights=trans_weights,
     )
 
-    # Use analogous minimal grouped recipes for both format families.  In
-    # particular, do not enable MXFP4 clipping or macro-block scaling here:
-    # those are valuable recipe knobs, but this test is only a cross-format
-    # smoke/reference check for the common routed-expert shape.
+    # Minimal grouped recipes for both formats.  Intentional asymmetry: NVFP4
+    # sweeps ``use_outer_scale`` (two-level FP32 scaling path); MXFP4 stays
+    # fixed (no clipping, no macro-block).  Cross-format smoke/reference check.
     y_nv = nvfp4_grouped_gemm(
         inputs,
         expert_weights,

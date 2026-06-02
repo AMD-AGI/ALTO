@@ -144,16 +144,27 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
     if cfg.precision == "mxfp4":
 
         def qdq(w: torch.Tensor, axis: int) -> torch.Tensor:
+            # hotfix for GPT-OSS 20B model
+            original_rows = -1
+            if w.dim() == 2 and w.shape[0] % 32 != 0:
+                # for 2-D w, if the first dim is not divisible by 32, pad it to be divisible by 32
+                original_rows = w.shape[0]
+                w = torch.nn.functional.pad(w, (0, 0, 0, 32 - original_rows % 32))
+
             data_lp, scales = convert_to_mxfp4(
                 w, axis=axis, is_2d_block=is_2d_block,
             )
-            return convert_from_mxfp4(
+            dequantized = convert_from_mxfp4(
                 data_lp,
                 scales,
                 output_dtype=w.dtype,
                 axis=axis,
                 is_2d_block=is_2d_block,
             )
+            # hotfix for GPT-OSS 20B model
+            if original_rows != -1:
+                dequantized = dequantized[:original_rows, :]
+            return dequantized
 
     elif cfg.precision == "nvfp4":
 

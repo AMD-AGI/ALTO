@@ -39,6 +39,8 @@ _ops_to_preserve_subclass = {
     torch.ops.aten.clone.default,
     torch.ops.aten.transpose.int,
     torch.ops.aten.t.default,
+    # required for TP - scatter_ is used to distribute weights
+    torch.ops.c10d.scatter_.default,
 }
 
 gemm_ops = ("linear", "mm.default", "matmul.default", "addmm.default", "matmul")
@@ -111,6 +113,8 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
         # detach is special case
         if func == torch.ops.aten.detach.default:
             return cls(args_unwrapped[0], config)
+        elif func.__name__ in gemm_ops or func.__name__ == "_grouped_mm":
+            return func(*args, **kwargs)
 
         # perform op
         out = func(*args_unwrapped, **kwargs_unwrapped)

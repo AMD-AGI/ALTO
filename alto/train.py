@@ -194,11 +194,12 @@ class Trainer(ForgeTrainer):
         if self.training_mode:
             # FIXME: This is a hack to enable de-oscillation at a specific step.
             deosc_step = int(os.environ.get("DEOSC_STEP", "0"))
+            ratio_threshold = float(os.environ.get("DEOSC_RATIO", "8.0"))
             if deosc_step > 0 and self.step == deosc_step:
                 deosc_config = DeOscillationConfig(
                     enable=True,
                     period=200,
-                    ratio_threshold=8.0,
+                    ratio_threshold=ratio_threshold,
                     log_freq=1,
                 )
                 enable_de_oscillation(self.optimizers, deosc_config)

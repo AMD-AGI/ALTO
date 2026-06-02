@@ -114,7 +114,9 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
         if func == torch.ops.aten.detach.default:
             return cls(args_unwrapped[0], config)
         elif func.__name__ in gemm_ops or func.__name__ == "_grouped_mm":
-            return func(*args, **kwargs)
+            # Delegate to the subclass' GEMM / grouped_mm overrides without
+            # unwrapping the wrapper tensor, avoiding __torch_dispatch__ recursion.
+            return cls.__torch_function__(func, types, args, kwargs or {})
 
         # perform op
         out = func(*args_unwrapped, **kwargs_unwrapped)

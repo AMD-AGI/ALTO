@@ -28,14 +28,29 @@ class DecomposedLinear(nn.Module):
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, lora_rank: int = 32):
-        new_layer = cls(linear.in_features, linear.out_features, linear.bias is not None, lora_rank)
-        new_layer.weight = linear.weight
-        new_layer.bias = linear.bias
+        # Build u/v/sigma directly on the source weight's device/dtype (which may
+        # be "meta" during TorchTitan's meta-device model construction). We must
+        # NOT allocate on CPU and then `.to(device=...)`: moving a real CPU tensor
+        # onto a meta device triggers an incompatible set_data and crashes during
+        # `on_convert`, before `to_empty`/`init_weights` have materialized params.
         device = linear.weight.device
         dtype = linear.weight.dtype
-        new_layer.u.data = new_layer.u.data.to(device=device, dtype=dtype)
-        new_layer.v.data = new_layer.v.data.to(device=device, dtype=dtype)
-        new_layer.sigma.data = new_layer.sigma.data.to(device=device, dtype=dtype)
+
+        new_layer = cls.__new__(cls)
+        nn.Module.__init__(new_layer)
+        new_layer.in_features = linear.in_features
+        new_layer.out_features = linear.out_features
+        new_layer.weight = linear.weight
+        new_layer.bias = linear.bias
+        new_layer.u = nn.Parameter(
+            torch.empty(lora_rank, linear.out_features, device=device, dtype=dtype)
+        )  # transposed
+        new_layer.v = nn.Parameter(
+            torch.empty(linear.in_features, lora_rank, device=device, dtype=dtype)
+        )
+        new_layer.sigma = nn.Parameter(
+            torch.empty(lora_rank, device=device, dtype=dtype)
+        )
         return new_layer
     
     def init_lora_weights(self, init_std: float = 0.02):

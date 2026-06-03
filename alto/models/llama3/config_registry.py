@@ -128,7 +128,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.metrics.enable_tensorboard = True
     config.profiling.enable_profiling = False
     config.training.steps = 5000
-    config.training.local_batch_size = 3
+    config.training.local_batch_size = 2
     config.training.global_batch_size = 384
     config.training.seq_len = 8192
     config.optimizer.lr = 1e-4
@@ -140,7 +140,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 1
     config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.tensor_parallel_degree = 1
     config.activation_checkpoint.mode = "none"
     config.checkpoint.enable = False
     config.checkpoint.interval = 10

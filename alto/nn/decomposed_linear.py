@@ -7,9 +7,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# ``lora_rank`` is the contraction dim (K) of the ``lora_update @ u`` GEMM. When
+# u/v are quantized (NVFP4/MXFP4), low-precision kernels quantize K in blocks of
+# this size, so lora_rank must be a positive multiple of it. NVFP4 uses 16
+# (BLOCK_SIZE_DEFAULT); MXFP4 uses 32 and is a multiple of 16, so requiring a
+# multiple of 16 covers both. Without this check, e.g. lora_rank=8 fails deep in
+# the kernel with an opaque torch._check error instead of here at construction.
+LORA_RANK_BLOCK_MULTIPLE = 16
+
+
+def _validate_lora_rank(lora_rank: int) -> None:
+    if lora_rank <= 0 or lora_rank % LORA_RANK_BLOCK_MULTIPLE != 0:
+        raise ValueError(
+            f"lora_rank must be a positive multiple of {LORA_RANK_BLOCK_MULTIPLE} "
+            f"(required by NVFP4/MXFP4 block-quantized kernels), got {lora_rank}."
+        )
+
+
 class DecomposedLinear(nn.Module):
     def __init__(self, in_features, out_features, bias=True, lora_rank=32):
         super(DecomposedLinear, self).__init__()
+        _validate_lora_rank(lora_rank)
         self.in_features = in_features
         self.out_features = out_features
 
@@ -28,6 +46,7 @@ class DecomposedLinear(nn.Module):
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, lora_rank: int = 32):
+        _validate_lora_rank(lora_rank)
         # Build u/v/sigma directly on the source weight's device/dtype (which may
         # be "meta" during TorchTitan's meta-device model construction). We must
         # NOT allocate on CPU and then `.to(device=...)`: moving a real CPU tensor

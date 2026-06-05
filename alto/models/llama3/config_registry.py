@@ -202,7 +202,7 @@ def llama3_8b() -> Trainer.Config:
     config.checkpoint.enable = False
     config.checkpoint.initial_load_path = None
     config.checkpoint.initial_load_in_hf = False
-    config.validator.enable = False
+    config.validator.enable = True
     config.validator.dataloader = HuggingFaceTextDataLoader.Config(dataset="wikitext_test")
     config.validator.freq = 10
     config.validator.steps = 10

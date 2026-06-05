@@ -25,3 +25,27 @@ STANDARD_CONFIGS = [
         num_warps=4,
     ),
 ]
+
+DGRAD_CONFIGS = [
+    triton.Config(
+        {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 32,   # dgrad reduces over N; keep one MX scale group per dot_scaled
+            "BLOCK_SIZE_K": 32,
+        },
+        num_stages=2,
+        num_warps=4,
+    ),
+]
+
+WGRAD_CONFIGS = [
+    triton.Config(
+        {
+            "BLOCK_SIZE_M": 32,   # wgrad reduces over M; keep one MX scale group per dot_scaled
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 32,
+        },
+        num_stages=2,
+        num_warps=4,
+    ),
+]

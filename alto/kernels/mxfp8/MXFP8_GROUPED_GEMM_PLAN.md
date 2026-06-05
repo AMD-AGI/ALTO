@@ -146,20 +146,30 @@ functional.py        # 暴露顶层入口
 - 测试 `tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py`：2 shapes × 2D-block-x × 2D-block-w × `trans_weights` 共 16 个正例全过；另有 2 个负例覆盖 `expert_indices` 长度不匹配和 `weight_scales` shape 错误，共 **18 passed**。主校验用 **dequant-then-matmul reference**（隔离 kernel 移植正确性 vs mxfp8 量化误差），cos-sim > 0.999；另加 bf16 宽松 sanity（> 0.99）。
 - 2026-06-02 在 `friendly_elgamal` 容器中验证：`is_cdna4()=True`，forward 默认走 **CDNA4 `tl.dot_scaled`** 路径，`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py -q` 结果为 `18 passed, 14 warnings in 12.05s`。CDNA3 fallback 路径仍需在 CDNA3/MI300 上单独复验。
 
-### Step 3 — Backward dgrad kernel
+### Step 3 — Backward dgrad kernel ✅ 已完成
 基于 `mxfp4/cg_backward.py` 的 `_kernel_mxfp4_grouped_gemm_backward_dx`：
 - 删 packing
 - dtype：V1 `LHS=e4m3, RHS=e4m3`（v2 改 `LHS=e5m2`）
 - 注意 W 的访问：dgrad 沿 N reduce，所以 W [N,K] 在 kernel 内按 N-major 加载（与 fwd 相同 shape，不同 reduction）；scale `b_s` 此时沿 N 是 reduction 维 → `stride_bsk`/`stride_bsn` 用法跟 mxfp4 一致
 
-### Step 4 — Backward wgrad kernel
+**完成情况**：
+- `autotune.py` 新增 `DGRAD_CONFIGS`：`BSM=128, BSN=32, BSK=32`，让 dgrad 的 N reduction 每次 `dot_scaled` 只覆盖一个 32-wide MX scale group。
+- `_kernel_mxfp8_grouped_gemm_backward_dx` 已实现：按 `(M, K)` tile 计算 `dX = GO @ W`，删除 mxfp4 packing，支持 `USE_DOT_SCALED=True` 的 CDNA4 `tl.dot_scaled` 路径，以及 `USE_DOT_SCALED=False` 的 CDNA3 dequant + `tl.dot` fallback。
+- wrapper `mxfp8_grouped_gemm_backward_inputs` 已补最小输入契约检查：`M_total` 按 `ALIGN_SIZE_M=128` 对齐、`expert_indices.numel() == M_total`、`N/K` 可被 32 整除、GO/W scale shape 精确匹配，并支持 `trans_weights=True/False`。
+
+### Step 4 — Backward wgrad kernel ✅ 已完成
 基于 `_kernel_mxfp4_grouped_gemm_backward_dw`：
 - 删 packing
 - dtype：V1 `LHS=e4m3, RHS=e4m3`（v2 改 `LHS=e5m2`）
 - M 是 reduction 维 → 必须用 **沿 M 量化** 的 GO / X（autograd 里准备好）
 - 保持 mxfp4 的 "loop over groups, skip if expert mismatch" 简单实现，性能问题留到 v2
 
-### Step 5 — Autograd Function
+**完成情况**：
+- `autotune.py` 新增 `WGRAD_CONFIGS`：`BSM=32, BSN=128, BSK=32`，让 wgrad 的 M reduction 每次 `dot_scaled` 只覆盖一个 32-wide MX scale group。
+- `_kernel_mxfp8_grouped_gemm_backward_dw` 已实现：按 `(expert, N, K)` tile 计算 `dW = GO^T @ X`，保留 mxfp4 的简单调度方式：每个 expert tile 遍历所有 contiguous routing group，只累加匹配 expert 的 group。
+- wrapper `mxfp8_grouped_gemm_backward_weights` 已补最小输入契约检查：`M_total` 按 `ALIGN_SIZE_M=128` 对齐、`expert_indices.numel() == M_total`、`N/K` 可被 32 整除、GO/X scale shape 精确匹配，并支持 `trans_weights=True/False`。
+
+### Step 5 — Autograd Function ✅ 已完成
 参考 `MXFP4GroupedGEMM`：
 1. fwd：调 `convert_to_mxfp8` 量化 X (axis=-1) 与 W (axis=quant_axis_w)，调 fwd kernel
 2. 若 `use_2dblock_x=False`，额外 quant X 沿 axis=0 一份给 wgrad
@@ -168,11 +178,21 @@ functional.py        # 暴露顶层入口
 5. bwd：quant GO 沿 axis=-1（给 dgrad）与 axis=0（给 wgrad），格式用 `bwd_grad_format`（V1=e4m3），调两个 bwd kernel
 6. 跳过 mxfp4 里的 `use_dge` / `hadamard_transform` / `use_macro_block_scaling` / `clip_mode`（这些是研究 feature，最小版本不要）
 
-### Step 6 — 数值正确性测试
-新建 `mxfp8/mxfp8_grouped_gemm/tests/`：
-1. `test_forward.py`：单 expert + 多 expert，bf16 reference 对齐（rel err < ~1e-2）
-2. `test_backward.py`：finite-diff 不现实，改用「mxfp8 模拟版」reference：用 `convert_to_mxfp8` 后立刻 `convert_from_mxfp8` 回 bf16，再走 PyTorch 原生 GEMM，作为「数值等价 reference」
-3. `test_e2e_moe.py`：toy MoE layer（2 expert, K=128, N=128, M_total=256），fwd+bwd+optimizer step，看 loss 下降几步
+**完成情况**：
+- `MXFP8GroupedGEMM` 已接通完整 forward/backward：forward 保存 wgrad 所需的沿 M 量化 X，以及 dgrad 所需的沿 N 量化 W；backward 量化 GO 后分别调用 dgrad/wgrad kernel。
+- `functional.py` 的用户入口 `mxfp8_grouped_gemm(...)` 已接到 `MXFP8GroupedGEMM.apply`，默认仍是 V1 全 e4m3，`bwd_grad_format="e4m3"`。
+- 当前实现没有引入 mxfp4 的 DGE、Hadamard、macro block scaling、clip mode；这是正确的，v1 不该把研究 feature 混进最小路径。
+
+### Step 6 — 数值正确性测试 ⏳ 部分完成
+测试位置在 `tests/unittest/mxfp8/`：
+1. `test_mxfp8_grouped_gemm_forward.py`：单 expert + 多 expert，dequant-then-matmul reference 对齐，并保留 bf16 sanity。
+2. `test_mxfp8_grouped_gemm_backward.py`：用「mxfp8 模拟版」reference（先 `convert_to_mxfp8`，再 `convert_from_mxfp8` 回 fp32，然后走 PyTorch 原生 GEMM）校验 dgrad/wgrad；另覆盖 autograd 端到端 forward + backward。
+3. `test_e2e_moe.py`：toy MoE layer + optimizer step 仍未实现。
+
+**验证记录**：
+- 2026-06-05 在 `cranky_shockley` 容器（`wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`）中验证 backward：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` 结果为 **17 passed, 14 warnings in 20.64s**。
+- backward 覆盖：dgrad `trans_weights` × 2D GO × 2D W 共 8 个正例；wgrad `trans_weights` × 2D X 共 4 个正例；autograd 覆盖 `trans_weights=True` 下 2D X/W 四种组合，以及 `trans_weights=False` 的 1D 路径。
+- 仍需补 toy MoE 训练 sanity，并在 CDNA3/MI300 上单独验证 `USE_DOT_SCALED=False` fallback。
 
 ### Step 7 — MI300 fallback 验证
 仅切 `USE_DOT_SCALED=False` 路径重跑 Step 6，确保 CDNA3 上数值与 CDNA4 一致（dequant + fp32 dot 是 ground truth）。

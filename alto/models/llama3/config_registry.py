@@ -28,8 +28,11 @@ __all__ = [
     "llama3_1b_adahop",
     "llama3_8b",
     "llama3_8b_pretrain",
+    "llama3_8b_random_init",
     "llama3_8b_opt",
     "llama3_8b_lpt",
+    "llama3_8b_lpt_hadamard",
+    "llama3_8b_adahop",
     "llama3_1b_gptq",
     "llama3_1b_awq",
     "llama3_8b",
@@ -195,11 +198,52 @@ def llama3_8b_opt() -> Trainer.Config:
     return config
 
 
+def llama3_8b_random_init() -> Trainer.Config:
+    """Random-init Llama 3.1 8B for a controlled init checkpoint, mirroring
+    AdaHOP's pretrain-from-scratch recipe. The launcher runs this for 1 step,
+    relies on torchtitan's checkpoint.interval=1 to save a DCP at step 1, and
+    all quantization variants then `--checkpoint.initial_load_path` that file
+    so every variant starts from the SAME random weights (seeded with 1234).
+    """
+    config = llama3_8b_orig()
+    # Tokenizer (overridden on CLI anyway), no weight initial load.
+    config.hf_assets_path = LLAMA3_8B_PATH
+    config.metrics.log_freq = 1
+    config.profiling.enable_profiling = False
+    config.training.local_batch_size = 1
+    config.training.global_batch_size = 8
+    config.training.seq_len = 2048
+    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4")
+    config.activation_checkpoint.mode = "selective"
+    config.activation_checkpoint.selective_ac_option = "op"
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 1  # save IMMEDIATELY so we can branch from this
+    config.validator.enable = False
+    config.debug.seed = 1234
+    return config
+
+
 def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b_pretrain()
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+def llama3_8b_lpt_hadamard() -> Trainer.Config:
+    config = llama3_8b_pretrain()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_hadamard_recipe.yaml",)],)
+    return config
+
+
+def llama3_8b_adahop() -> Trainer.Config:
+    config = llama3_8b_pretrain()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_recipe.yaml",)],)
     return config
 
 

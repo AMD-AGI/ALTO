@@ -14,6 +14,8 @@ from alto.components.converter import ModelOptConverter
 __all__ = [
     "gpt_oss_debugmodel",
     "gpt_oss_debugmodel_lpt",
+    "gpt_oss_debugmodel_obs_lpt",
+    "gpt_oss_debugmodel_obs_bf16",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
@@ -36,6 +38,32 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
     config = gpt_oss_debugmodel()
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_debugmodel_obs_lpt() -> Trainer.Config:
+    """gpt_oss debugmodel + MXFP4 + DebugObserver. Produces a per-step
+    tensor dump under the path configured in
+    ``configs/debug_observer_lpt_recipe.yaml``."""
+    config = gpt_oss_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./alto/models/gpt_oss/configs/debug_observer_lpt_recipe.yaml",
+        ),
+    ],)
+    return config
+
+
+def gpt_oss_debugmodel_obs_bf16() -> Trainer.Config:
+    """gpt_oss debugmodel in plain BF16 + DebugObserver (no LPT). Used to
+    capture the reference dump that visualizer can diff against the
+    quantized run."""
+    config = gpt_oss_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./alto/models/gpt_oss/configs/debug_observer_bf16_recipe.yaml",
+        ),
     ],)
     return config
 
@@ -89,8 +117,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
-    config.dataloader.dataset = "megatron"
-    config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
+    config.dataloader.dataset = "c4"
+    config.dataloader.dataset_path = ""
     config.parallelism.expert_parallel_degree = 4
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 4
@@ -98,8 +126,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2
     config.validator.enable = True
-    config.validator.dataloader.dataset = "megatron"
-    config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
+    config.validator.dataloader.dataset = "wikitext_test"
+    config.validator.dataloader.dataset_path = ""
     config.validator.freq = 768
     config.validator.steps = 64
     config.activation_checkpoint.mode = "selective"

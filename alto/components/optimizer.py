@@ -167,6 +167,7 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
             return dequantized
 
     elif cfg.precision == "nvfp4":
+        use_outer_scale = cfg.two_level_scaling == "tensorwise"
 
         def qdq(w: torch.Tensor, axis: int) -> torch.Tensor:
             # hotfix for GPT-OSS 20B model
@@ -176,8 +177,16 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 original_rows = w.shape[0]
                 w = torch.nn.functional.pad(w, (0, 0, 0, 16 - original_rows % 16))
 
+            outer_scale = (
+                torch.empty(1, dtype=torch.float32, device=w.device)
+                if use_outer_scale
+                else None
+            )
+
             data_lp, scales = convert_to_nvfp4(
                 w, axis=axis, is_2d_block=is_2d_block,
+                outer_scale=outer_scale,
+                update_outer_scale=use_outer_scale,
             )
             dequantized = convert_from_nvfp4(
                 data_lp,
@@ -185,6 +194,7 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 output_dtype=w.dtype,
                 axis=axis,
                 is_2d_block=is_2d_block,
+                outer_scale=outer_scale,
             )
             # hotfix for GPT-OSS 20B model
             if original_rows != -1:

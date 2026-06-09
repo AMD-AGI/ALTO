@@ -15,7 +15,10 @@ from typing import Any, Literal, Optional, Union
 
 import torch
 import tqdm
-from compressed_tensors.quantization import disable_quantization, enable_quantization
+from compressed_tensors.quantization import (
+    disable_quantization,
+    enable_quantization,
+)
 from compressed_tensors.utils import getattr_chain, match_named_modules
 from pydantic import Field, PrivateAttr
 from torch.nn import Module
@@ -27,6 +30,7 @@ from alto.modifiers.quantization.calibration import update_weight_zp_scale
 from alto.utils.pytorch.module import get_layers
 
 __all__ = ["QuantizationModifier"]
+
 
 DEFAULT_SUBLAYER_GROUPS = [
     ["wq", "wk", "wv", "q_proj", "k_proj", "v_proj"],

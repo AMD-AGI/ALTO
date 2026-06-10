@@ -1,9 +1,6 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""MXFP8 contiguous grouped GEMM — backward (dgrad + wgrad) + autograd Function.
-
-Skeleton only; kernel bodies filled in Steps 3-5.
-"""
+"""MXFP8 contiguous grouped GEMM — backward (dgrad + wgrad) + autograd Function."""
 
 from typing import Optional
 

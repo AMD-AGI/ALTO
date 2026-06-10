@@ -207,7 +207,8 @@ functional.py        # 暴露顶层入口
 **验证记录**：
 - 2026-06-05 在 `cranky_shockley` 容器（`wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`）中验证 backward，彼时 **17 passed**；之后扩充 `use_dot_scaled` 参数化与空 expert / 对齐负例。
 - 2026-06-09 在 MI300X（CDNA3）上重跑 forward + backward：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` 结果为 **52 passed（21 forward + 31 backward）, 14 warnings in 20.74s**。
-- 仍需补 toy MoE 训练 sanity；`use_dot_scaled=False` fallback 已在 CI 强制覆盖，真实 CDNA4 `tl.dot_scaled` 路径仍需在 CDNA4 硬件上单独复验（本次为 CDNA3 机器）。
+- 2026-06-10 在 MI355X（CDNA4 / m355）`gracious_lovelace` 容器（`wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`）中重跑 forward + backward：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` 结果为 **52 passed（21 forward + 31 backward）, 14 warnings in 18.51s**。环境确认：PyTorch `2.12.0a0+git78d5fb4`，`is_cdna4=True`。结论：m355 默认 `tl.dot_scaled` 路径的 grouped GEMM fwd / dgrad / wgrad 数值单测已通过。
+- 仍需补 toy MoE 训练 sanity；`use_dot_scaled=False` fallback 已在 CI 强制覆盖，CDNA4/m355 默认 `tl.dot_scaled` 路径已通过上述 52 个 grouped GEMM 单测。
 
 ### Step 7 — MI300 fallback 验证
 仅切 `USE_DOT_SCALED=False` 路径重跑 Step 6，确保 CDNA3 上数值与 CDNA4 一致（dequant + fp32 dot 是 ground truth）。
@@ -226,8 +227,8 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
   真实 MoE（含 GPT-OSS）路由后每个 expert 的 token 数是**动态、不等、不保证 128 对齐**的 → 现状下 GPT-OSS 给不出 mxfp8 能吃的输入。
   参照：mxfp4 用户传 `offs`（累积 offset，如 `[128,128,256,...]`），内部 `create_indices_from_offsets_nosync`（`mxfp4/.../functional.py:23`）转 indices；nvfp4 另有 `test_nvfp4_grouped_gemm_accepts_padded_buffer` 覆盖 `M_bufferlen > 实际 token 数` 的补零场景。mxfp8 需补同款 `offsets` 入口 + `M_bufferlen` vs `M_total` 区分。
 
-- [ ] **【阻塞】CDNA4 真机验证默认 `tl.dot_scaled` 路径。**
-  GPT-OSS 真训大概率在 MI350(CDNA4) 走默认 `tl.dot_scaled`，而该路径至今未在真机验证（既有 52+2 用例均在 MI300X/CDNA3 跑 dequant fallback）。接入前必须先在 CDNA4 容器重跑确认数值正确（与 §6 open item 合并）。
+- [x] **CDNA4/m355 真机验证默认 `tl.dot_scaled` 路径。**
+  2026-06-10 已在 MI355X（CDNA4 / m355）`gracious_lovelace` 容器中重跑 forward + backward 52 个 grouped GEMM 单测，结果 **52 passed, 14 warnings in 18.51s**。结论：m355 默认 `tl.dot_scaled` 路径的 fwd / dgrad / wgrad 数值正确性单测已通过。
 
 - [ ] **【高 · 接入前评估】e5m2 混合格式可能是前提，而非 v2 优化。**
   §0 自述全 e4m3「通常几百到几千步发散」，而 toy test 只跑 100 步、单层；GPT-OSS 是多层 + 几千步，很可能踩进发散区。e5m2 通道代码已预留但**从未启用/测过**。建议接入前先评估是否必须先开 e5m2，避免训崩后回头。
@@ -238,7 +239,7 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
 - [ ] **【中】接入形态对齐。**
   `mxfp8_grouped_gemm` 签名要能直接替换 GPT-OSS MoE forward 中的 grouped GEMM 调用；具体集成视 GPT-OSS 训练栈 PR 时再定。
 
-一句话：**发动机（算子）基本造好，但接进整车（GPT-OSS）所需的传动接口（offsets/padding）、CDNA4 路试、以及很可能必需的 e5m2，都还没做。** 最小可用 kernel ≈ 70% 到位，差的恰是「接真实模型」这一段。
+一句话：**发动机（算子）基本造好，CDNA4/m355 路试已过；但接进整车（GPT-OSS）所需的传动接口（offsets/padding）以及很可能必需的 e5m2，都还没做。** 最小可用 kernel ≈ 75% 到位，差的恰是「接真实模型」这一段。
 
 ### 8.1 offsets 入口 + padded buffer 实施方案（已批准 · 待实施）
 
@@ -299,15 +300,14 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
 
 | # | 验收标准 | 状态 | 说明 |
 |---|---|---|---|
-| 1 | fwd / dgrad / wgrad 三个 kernel 在 CDNA4 与 CDNA3 上都能跑通 | ⏳ 部分 | CDNA3 ✅（2026-06-09 MI300X 52 passed）；CDNA4 默认 `tl.dot_scaled` 路径**真机未验证**，见下方 open item |
+| 1 | fwd / dgrad / wgrad 三个 kernel 在 CDNA4 与 CDNA3 上都能跑通 | ✅ | CDNA3 ✅（2026-06-09 MI300X 52 passed）；CDNA4/m355 ✅（2026-06-10 MI355X 52 passed，默认 `tl.dot_scaled` 路径） |
 | 2 | 数值对齐 bf16 reference：fwd cos-sim > 0.999，bwd cos-sim > 0.995 | ✅ | 测试用 cos-sim > 0.999 + SNR > 40 dB 双门槛卡住（比标准更严） |
 | 3 | 端到端 autograd 梯度对齐 | ✅ | `test_mxfp8_grouped_gemm_autograd*` 单步 forward+backward，dX/dW vs bf16 reference cos-sim > 0.99。**这与同目录 mxfp4 / nvfp4 的端到端标准一致**——两者也止步于单步梯度对齐，均未做训练 loop |
-| 4 | 单元测试覆盖 1D/2D block × CDNA3/CDNA4 各组合（V1 全 e4m3；e5m2 分支留待 v2） | ⏳ 部分 | 1D/2D ✅、CDNA3 ✅；CDNA4 同标准 1 |
+| 4 | 单元测试覆盖 1D/2D block × CDNA3/CDNA4 各组合（V1 全 e4m3；e5m2 分支留待 v2） | ✅ | 1D/2D ✅、CDNA3 ✅、CDNA4/m355 ✅ |
 
 **收口说明**：标准 3 原文为「toy MoE 训练 100 steps loss 单调下降」。对齐 mxfp4 / nvfp4 的既有验收口径后，**V1 把端到端硬验收降级为单步 autograd 梯度对齐（已达成）**；toy MoE 训练 loop 作为更高一档的 sanity，单列于 §7 记录与跟进，不阻塞 V1 完成定义。
 
 **V1 剩余 open items**：
-- **CDNA4 真机验证**（标准 1、4）：当前手头为 MI300X(CDNA3)，CDNA4 默认 `tl.dot_scaled` 路径需在 CDNA4（如 MI350）容器上重跑现有 52 个用例确认数值正确。纯运行、不改代码。
 - **toy MoE 训练 sanity**（§7）：验证 §0「全 e4m3 是否够用、会不会几百步发散」这一核心假设；mxfp4/nvfp4 未做，属 mxfp8 主动加严项。
 
 ---

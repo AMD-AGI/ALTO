@@ -149,7 +149,7 @@ functional.py        # 暴露顶层入口
   - `test_forward_dequant_fallback_matches_dot_scaled`：强制 `use_dot_scaled=False`，无论运行设备都覆盖 `_dequantize_fp8 → tl.dot` 分支（真实 MI300 ground-truth 仍待 Step 7）。
   - `test_forward_single_expert_matches_mxfp8_linear`：全部 token 路由到单 expert，与 `mxfp8_linear._to_mxfp8_then_scaled_mm` 交叉校验（SNR > 30 dB）。这是独立交叉验证——linear 路径用自己的 autograd Function 量化，能抓到 dequant-matmul reference 抓不到的量化 bug（后者与测试共用同一份 `convert_to_mxfp8` 输出，量化 bug 会两边同时错而仍通过）。
   - 3 个负例：`expert_indices` 长度不匹配、`M_total` 未对齐 `ALIGN_SIZE_M`、`weight_scales` shape 错误。
-- 2026-06-02 在 `friendly_elgamal` 容器中验证：`is_cdna4()=True`，forward 默认走 **CDNA4 `tl.dot_scaled`** 路径。CDNA3 dequant 分支已由 `use_dot_scaled=False` 测试在 CI 中强制覆盖；真实 CDNA3/MI300 硬件 ground-truth 复验仍属 Step 7。
+- 2026-06-02 在 `friendly_elgamal` 容器中验证：`is_cdna4()=True`，forward 默认走 **CDNA4 `tl.dot_scaled`** 路径。CDNA3 dequant 分支已由 `use_dot_scaled=False` 测试在 CI 中强制覆盖；真实 CDNA3/MI300 硬件 ground-truth 已于 2026-06-09 在 MI300X 复验（见 §6 验证记录）。
 
 ### Step 3 — Backward dgrad kernel ✅ 已完成
 基于 `mxfp4/cg_backward.py` 的 `_kernel_mxfp4_grouped_gemm_backward_dx`：
@@ -210,8 +210,10 @@ functional.py        # 暴露顶层入口
 - 2026-06-10 在 MI355X（CDNA4 / m355）`gracious_lovelace` 容器（`wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`）中重跑 forward + backward：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` 结果为 **52 passed（21 forward + 31 backward）, 14 warnings in 18.51s**。环境确认：PyTorch `2.12.0a0+git78d5fb4`，`is_cdna4=True`。结论：m355 默认 `tl.dot_scaled` 路径的 grouped GEMM fwd / dgrad / wgrad 数值单测已通过。
 - 仍需补 toy MoE 训练 sanity；`use_dot_scaled=False` fallback 已在 CI 强制覆盖，CDNA4/m355 默认 `tl.dot_scaled` 路径已通过上述 52 个 grouped GEMM 单测。
 
-### Step 7 — MI300 fallback 验证
+### Step 7 — MI300 fallback 验证 ✅ 已完成
 仅切 `USE_DOT_SCALED=False` 路径重跑 Step 6，确保 CDNA3 上数值与 CDNA4 一致（dequant + fp32 dot 是 ground truth）。
+
+**完成情况**：2026-06-09 在 MI300X（CDNA3）跑 dequant fallback、2026-06-10 在 MI355X（CDNA4）跑默认 `tl.dot_scaled`，两机各 **52 passed**（详见 §6 验证记录），CDNA3 与 CDNA4 数值一致。
 
 ### Step 8 — 接 GPT-OSS（不在最小版本范围）
 预留接口：`mxfp8_grouped_gemm` 签名要能直接替换现有 MoE forward 中的 grouped GEMM 调用。具体集成视 GPT-OSS 训练栈 PR 时再做。
@@ -261,7 +263,7 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
 
 5. **测试**（`test_mxfp8_grouped_gemm_backward.py`）：新增 `test_mxfp8_grouped_gemm_accepts_padded_buffer`，采 **padded-vs-unpadded 自比**（最强校验，闭环证明 padding 零干扰）。**关键：固定 `use_sr_grad=False`** 使量化确定性，否则随机舍入令 `torch.equal` 偶发失败；routed 行两次跑应逐位相等。断言：`y_pad.shape==(M_bufferlen,N)`、`y_pad[M_routed:]` 全 0、`y_pad[:M_routed]==y_ref`、`inputs_pad.grad[M_routed:]` 全 0、`inputs_pad.grad[:M_routed]==inputs_ref.grad`、`w_pad.grad==w_ref.grad`；另加 offsets 入口 smoke test。
 
-**验证**：现有 54 用例不回归 + 新 padded-buffer 测试通过；额外确认「若 wrapper 仍按 `[M_total,N]` 分配则新测试会失败」以证明确实触发了 padding 路径。本改动 device-agnostic（只动 wrapper/入口），CDNA4 路试仍为独立 open item。
+**验证**：现有 54 用例不回归 + 新 padded-buffer 测试通过；额外确认「若 wrapper 仍按 `[M_total,N]` 分配则新测试会失败」以证明确实触发了 padding 路径。本改动 device-agnostic（只动 wrapper/入口）；CDNA4/m355 路试已于 2026-06-10 通过（见 §6 验证记录）。
 
 **完成后**：勾选 §8 头号 item，并在 §3 相应 Step 回填新入口 `_quantize_then_mxfp8_scaled_grouped_mm` 与 padded-buffer 测试。
 
@@ -345,3 +347,32 @@ mxfp4 / nvfp4 都没有这层测试（见 §6 标准 3 说明），所以这是 
 - loss 曲线：见 `tests/unittest/mxfp8/e2e_moe_loss_curve.png`（对数 y 轴，mxfp8 vs bf16 并排）。复跑/刷新用自包含脚本 `tests/unittest/mxfp8/plot_e2e_moe_curve.py`（训练逻辑与 `test_e2e_moe.py` 一致，并打印逐步 loss 序列）。
 - 曲线观察：前 ~40 步两条线在对数轴上基本贴死，下降形状完全一致；**分叉只出现在尾部**——loss 逼近收敛底部（≲1）时，e4m3 量化噪声才表现为 mxfp8 略高于 bf16 + 轻微逐步抖动（`experts=2` 比 `experts=4` 明显，后者尾部几乎仍咬合），但全程贴着 baseline、无上翘/发散。即量化误差只在 loss 很小时显现为小幅抬升,不破坏训练动态。
 - 仍待：CDNA4 默认 `tl.dot_scaled` 路径上重跑本测试（与 §6 open item 合并）；步数/网络规模放大后是否仍贴合 bf16，留待接 GPT-OSS 时据实加严。
+
+### 7.4 跨格式对比：mxfp8 vs mxfp4 vs nvfp4（同配置 toy MoE）
+
+把 §7 的 toy MoE 训练 loop 原样扩展到 mxfp4 / nvfp4 grouped GEMM，与 bf16 baseline 在同一张图上对比。三个 kernel 入口同形（`fn(inputs[M_total,K], expert_weights[E,N,K], expert_indices[M_total], trans_weights=True) -> [M_total,N]`，`ALIGN_SIZE_M=128`），toy 任务原样迁移。
+
+**配置**（与 §7.3 逐项一致，保证可比）：`num_groups=4`、`m_total=4×128=512`、`N=K=128`、contiguous router（group g → expert `g % num_experts`）、`num_experts ∈ {2,4}`、同一份 `prepare_data` 种子(1234)+0.5% 离群点注入的 `inputs/target/w_init`、SGD 100 步 `lr=0.5`、MSE loss。**公平性关键**：mxfp4/nvfp4 均显式传 `use_sr_grad=False`（nvfp4 默认 `True` 的随机舍入会令曲线带噪不可复现），使所有量化路径确定性可比。
+
+脚本（自包含、可直接 `python` 运行）：`tests/unittest/compare_grouped_gemm_toy_moe.py`，四条曲线叠加输出 `tests/unittest/compare_grouped_gemm_toy_moe.png`，并打印全部逐步 loss。
+
+**验证记录**（2026-06-10，MI300X / CDNA3）：
+
+| 格式 | experts=2 末段均值 (vs bf16) | experts=4 末段均值 (vs bf16) | 跌破 loss<10 的步数 (exp2 / exp4) | 跌破 loss<2 |
+|---|---|---|---|---|
+| bf16 baseline | 0.400 (1×) | 0.969 (1×) | 15 / 24 | 33 / 53 |
+| mxfp8 (e4m3) | 0.496 (**1.24×**) | 1.041 (**1.08×**) | 16 / 24 | 34 / 55 |
+| mxfp4 | 5.735 (**14.3×**) | 6.430 (**6.6×**) | 33 / 51 | 从未跌破 |
+| nvfp4 | N/A | N/A | — | — |
+
+（末段均值 = 最后 20 步均值；尾部逐步抖动 mean\|Δ\| bf16≈0.007~0.015、mxfp8≈0.015~0.022、mxfp4≈0.20~0.28。）
+
+**结论：**
+1. **三条路径均稳定收敛、无发散**：全程 finite、单调下降到稳定底部，无上翘/NaN。算子层面 mxfp8/mxfp4 放进权重更新循环 100 步均不崩 → 算子可装车。
+2. **mxfp8(e4m3) ≈ bf16，近无损替代**：收敛轨迹逐点贴死（到各阈值的步数与 bf16 差 0~2 步），末段 loss 仅 1.08~1.24×；量化噪声只在收敛底部表现为极小抖动。再次坐实 §0「全 e4m3 在 toy MoE 上够用」。
+3. **mxfp4 能训练但精度地板明显抬高**（4-bit 固有代价、非 bug）：中期即分叉（跌破 10 慢一倍多、从未跌破 2），尾部卡在 loss≈5.5~6.4 的更高底部（experts=2 达 bf16 的 14.3×），tail jitter 比 mxfp8 大一个量级 → 4-bit 量化噪声成为收敛底部主导误差项。适合「容忍精度损失换吞吐/显存」的场景。
+4. **二级现象**：experts 越多 mxfp4 相对差距越小（14.3×→6.6×），因 experts=4 时 bf16 自身底部也更高（任务更难），mxfp4 的固定噪声地板占比相对下降。即 mxfp4 的劣势在「能收敛到极低 loss 的容易任务」上最刺眼。
+
+**边界与待办**：
+- 这是单层 grouped GEMM 拟合任务，不含 router/gating 梯度、激活、多层耦合、残差，仅 100 步。toy 通过 ≠ 模型级可用；真实 GPT-OSS（多层+几千步）很可能踩进 §0 发散区，mxfp4 的精度地板暗示其在深网络累积误差风险更高。
+- **nvfp4 在 CDNA3 上无数据**：其量化 kernel 在本机 Triton 3.6.0 下有预存编译错（`F4_E2M1_MAX` 在 `@triton.jit` 内非 constexpr，nvfp4 自身 grouped GEMM 单测亦 65 failed / 2 passed）。判断为需更新硬件（疑似 CDNA4）方可跑通，**CDNA3 上按现状不修**；脚本对 nvfp4 容错跳过并在图例标 `N/A (CDNA3)`。nvfp4 三/四路对比留待 CDNA4 补齐。

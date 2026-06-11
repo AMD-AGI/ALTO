@@ -18,7 +18,8 @@ def _quantize_then_mxfp_scaled_grouped_mm(
     use_dge: bool,
     use_hadamard: bool,
     clip_mode: str,
-    use_macro_block_scaling: bool,
+    use_midmax: bool = False,
+    use_macro_block_scaling: bool = False,
 ) -> torch.Tensor:
     m_indices = create_indices_from_offsets_nosync(offs)
     return mxfp4_grouped_gemm(

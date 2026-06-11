@@ -33,6 +33,7 @@ def _calculate_scales(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
     USE_DYNAMIC_CLIP: tl.constexpr = False,
+    USE_MIDMAX: tl.constexpr = False,
 ):
     if x.type.element_ty == tl.float32:
         hp_int_dtype = tl.int32
@@ -71,12 +72,25 @@ def _calculate_scales(
             max_abs = tl.max(tl.abs(x), axis=-1)
     max_abs = max_abs.to(x.type.element_ty)
 
-    # round even (adaptive)
-    max_abs = max_abs.to(hp_int_dtype, bitcast=True)
-    val_to_add = 1 << (hp_mbits - mbits - 1)
-    mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
-    max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
-    scales = max_abs - target_max_pow2
+    if USE_MIDMAX:
+        # Normalize absmax into [2^target_max_pow2, 2^(target_max_pow2+1)) by replacing
+        # its FP32 exponent field, then bump the scale by 1 if it exceeds the E2M1
+        # midmax threshold (7.0), which sits between the two largest representable values.
+        max_abs_bits = max_abs.to(tl.float32).to(tl.int32, bitcast=True)
+        f32_exp = (max_abs_bits >> 23) & 0xFF
+        # NaN/Inf have exponent=0xFF (255); cap to 0xFE so scale stays bounded.
+        f32_exp = tl.where(f32_exp >= 0xFF, 0xFE, f32_exp)
+        scales = f32_exp - target_max_pow2
+        amax_scaled_bits = (max_abs_bits & 0x7FFFFF) | ((127 + target_max_pow2) << 23)
+        amax_scaled = amax_scaled_bits.to(tl.float32, bitcast=True)
+        scales = scales + (amax_scaled > 7.0).to(tl.int32)
+    else:
+        # round even (adaptive)
+        max_abs = max_abs.to(hp_int_dtype, bitcast=True)
+        val_to_add = 1 << (hp_mbits - mbits - 1)
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2
 
     # Today, 2**-127 returns 0 in compile+inductor+triton because it is in the
     # float32 denormal range. For now, manually adjust the fp scale. This is
@@ -269,6 +283,7 @@ def _convert_to_mxfp4_kernel(
     USE_ASM: tl.constexpr,
     USE_STATIC_CLIP: tl.constexpr,
     USE_DYNAMIC_CLIP: tl.constexpr,
+    USE_MIDMAX: tl.constexpr,
 ):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
@@ -308,6 +323,7 @@ def _convert_to_mxfp4_kernel(
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_DYNAMIC_CLIP=USE_DYNAMIC_CLIP,
+        USE_MIDMAX=USE_MIDMAX,
     )
 
     if USE_STATIC_CLIP:
@@ -410,6 +426,7 @@ def convert_to_mxfp4(
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
     clip_mode: str = "none",
+    use_midmax: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
@@ -469,6 +486,7 @@ def convert_to_mxfp4(
         USE_ASM=use_asm,
         USE_STATIC_CLIP=use_static_clip,
         USE_DYNAMIC_CLIP=use_dynamic_clip,
+        USE_MIDMAX=use_midmax,
     )
 
     return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)

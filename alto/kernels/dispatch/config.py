@@ -34,5 +34,7 @@ class TrainingOpConfig:
       * NVFP4: not implemented
     """
 
+    use_midmax: bool = False
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

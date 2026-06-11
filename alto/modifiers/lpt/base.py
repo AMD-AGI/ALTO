@@ -36,7 +36,9 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
-    
+    use_midmax: bool = False
+
+
     lora_rank: int = 0
     """
     Lora rank for the decomposed linear layer.
@@ -111,6 +113,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_dge=self.use_dge,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
+                    use_midmax=self.use_midmax,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

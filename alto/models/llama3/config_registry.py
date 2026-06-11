@@ -29,6 +29,7 @@ __all__ = [
     "llama3_1b_gptq",
     "llama3_1b_awq",
     "llama3_1b_mx9_wa",
+    "llama3_1b_mx6_wa",
     "llama3_8b",
     "llama3_8b_gptq",
     "llama3_8b_rtn",
@@ -189,6 +190,16 @@ def llama3_1b_mx9_wa() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/mx9_wa_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_1b_mx6_wa() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/mx6_wa_recipe.yaml",),
     ],)
     return config
 

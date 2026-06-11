@@ -62,6 +62,11 @@ class ModelPatcher:
                     from alto.kernels.mx9.quantize import mx9_fake_quantize
 
                     return mx9_fake_quantize(x, block_size=(args.group_size or BLOCK_SIZE))
+                if getattr(args, "format", None) == "mx6":
+                    from alto.kernels.mx6.format import BLOCK_SIZE
+                    from alto.kernels.mx6.quantize import mx6_fake_quantize
+
+                    return mx6_fake_quantize(x, block_size=(args.group_size or BLOCK_SIZE))
                 return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod

@@ -17,6 +17,10 @@ __all__ = [
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
+    "gpt_oss_20b_lpt_c4",
+    "gpt_oss_20b_lpt_c4_midmax",
+    "gpt_oss_20b_lpt_c4_lowrank",
+    "gpt_oss_20b_pretrain_c4",
 ]
 
 
@@ -107,11 +111,56 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.debug.seed = 1234
     return config
 
+def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
+    """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
+    config = gpt_oss_20b_pretrain()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-outputs"
+    config.dataloader.dataset = "c4"
+    config.dataloader.dataset_path = None
+    config.validator.dataloader.dataset = "c4_validation"
+    config.validator.dataloader.dataset_path = None
+    config.checkpoint.initial_load_in_hf = True
+    config.checkpoint.initial_load_in_hf_quantized = True
+    config.checkpoint.interval = 100
+    return config
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
     config.dump_folder = "gpt_oss_20b-mi300-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-rank32-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_lpt_c4() -> Trainer.Config:
+    """gpt_oss_20b_lpt using HuggingFace C4 dataset (no Megatron binary files required)."""
+    config = gpt_oss_20b_lpt()
+    config.dataloader.dataset = "c4"
+    config.dataloader.dataset_path = None
+    config.validator.dataloader.dataset = "c4_validation"
+    config.validator.dataloader.dataset_path = None
+    config.checkpoint.initial_load_in_hf = True
+    config.checkpoint.initial_load_in_hf_quantized = True
+    config.checkpoint.interval = 100
+    return config
+
+
+def gpt_oss_20b_lpt_c4_midmax() -> Trainer.Config:
+    """gpt_oss_20b_lpt_c4 with midmax scale selection for MXFP4 quantization."""
+    config = gpt_oss_20b_lpt_c4()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-midmax-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_midmax.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_lpt_c4_lowrank() -> Trainer.Config:
+    """gpt_oss_20b_lpt_c4 with low-rank (lora_rank=32) correction for MXFP4 quantization."""
+    config = gpt_oss_20b_lpt_c4()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-lowrank-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_lowrank.yaml",),
     ],)
     return config

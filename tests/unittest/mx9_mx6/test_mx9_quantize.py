@@ -14,8 +14,7 @@ Three layers:
 import pytest
 import torch
 
-from alto.kernels.mx9.format import BLOCK_SIZE, QUANT_BIT
-from alto.kernels.mx9.quantize import mx9_fake_quantize
+from alto.modifiers.quantization.mx import BLOCK_SIZE, MX9_QUANT_BIT as QUANT_BIT, mx9_fake_quantize
 
 
 # --------------------------------------------------------------------------- #

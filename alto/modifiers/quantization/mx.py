@@ -1,13 +1,20 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
 # SPDX-License-Identifier: MIT
-"""MX9 fake-quantize kernel (block-wise emulation; no real packing/kernel inference).
+"""MX6 / MX9 fake-quantize (block-wise emulation; no real packing/kernel inference).
 
-This is a port of Quark's ``fake_quantize_mx6_mx9`` for the ``quant_bit=8`` (MX9)
-case, with its helpers (``_t_exponent`` / ``_reshape_to_blocks`` / ``_pad_to_blocks``)
-inlined here.
+Port of Quark's ``fake_quantize_mx6_mx9`` with its helpers (``_t_exponent`` /
+``_reshape_to_blocks`` / ``_pad_to_blocks``) inlined. As in Quark, MX6 and MX9 are
+the SAME algorithm and differ only in the element integer width ``quant_bit``:
 
-MX9 in a nutshell:
+- MX6: ``quant_bit = 5``
+- MX9: ``quant_bit = 8``
+
+so a single core (``_mx_fake_quantize``) backs both, exposed via the thin
+``mx6_fake_quantize`` / ``mx9_fake_quantize`` wrappers (cf. Quark's
+``partial(fake_quantize_mx6_mx9, quant_bit=...)``).
+
+MX in a nutshell:
   1. Split the input along ``axis`` into blocks of ``block_size`` elements.
   2. Each block derives a shared exponent ``max_exp = floor(log2(amax))`` from its
      max absolute value.
@@ -17,20 +24,20 @@ MX9 in a nutshell:
   4. The shared exponent yields a power-of-two scale; the block is then
      round -> clamp -> dequant.
 
-The "9" is not ``quant_bit=9``: elements are still quantized to 8-bit integers, and
+The "9" is not ``quant_bit=9``: elements are still quantized to 8-bit integers and
 the extra "1" is the per-pair prime bit that decides the one-exponent demotion.
-Intuitively: 8-bit signed integer value + a shared prime bit for exponent refinement.
-  - ``QUANT_BIT = 8``: elements round to an 8-bit integer grid.
-  - ``SHARED_PRIME_BIT_GROUP = 2``: every two adjacent elements share a prime bit.
 
 This is fake quantization: the output keeps the input dtype (bf16/fp16/fp32) with
-values projected onto the MX9-representable grid. The scale is computed from the
+values projected onto the MX-representable grid. The scale is computed from the
 data at runtime; any externally supplied compressed_tensors scale is ignored here.
 """
 
 import torch
 
-from .format import BLOCK_SIZE, QUANT_BIT, SHARED_PRIME_BIT_GROUP
+BLOCK_SIZE = 16
+SHARED_PRIME_BIT_GROUP = 2
+MX9_QUANT_BIT = 8
+MX6_QUANT_BIT = 5
 
 
 def _pad_to_blocks(x: torch.Tensor, block_size: int) -> torch.Tensor:
@@ -79,23 +86,23 @@ def _t_exponent(t: torch.Tensor) -> torch.Tensor:
         return _exponent_frexp_no_exception(t)
 
 
-def mx9_fake_quantize(
+def _mx_fake_quantize(
     input_tensor: torch.Tensor,
-    block_size: int = BLOCK_SIZE,
-    quant_bit: int = QUANT_BIT,
+    block_size: int,
+    quant_bit: int,
     axis: int = -1,
 ) -> torch.Tensor:
-    """Block-wise MX9 fake quantization (QDQ), bit-exact with Quark's
-    ``fake_quantize_mx6_mx9(quant_bit=8)``.
+    """Block-wise MX fake quantization (QDQ), bit-exact with Quark's
+    ``fake_quantize_mx6_mx9``.
 
     Args:
         input_tensor: tensor to quantize (weight or activation).
-        block_size: elements per MX9 block.
+        block_size: elements per MX block.
         quant_bit: element integer width (8 for MX9, 5 for MX6).
         axis: axis to block along. Only ``axis=-1`` is supported on the ALTO path.
     """
     if axis != -1:
-        raise NotImplementedError("mx9_fake_quantize supports axis=-1 only")
+        raise NotImplementedError("mx fake_quantize supports axis=-1 only")
 
     input_dtype = input_tensor.dtype
 
@@ -132,7 +139,7 @@ def mx9_fake_quantize(
     # Demoted pairs drop one exponent (the prime-bit refinement).
     shared_exp = max_exp - demote.long()
 
-    # Final power-of-two scale: 2 ** (shared_exp - quant_bit + 2)  (=2**(shared_exp-6) for MX9).
+    # Final power-of-two scale: 2 ** (shared_exp - quant_bit + 2).
     scale = torch.pow(2.0, shared_exp - quant_bit + 2)
 
     # Max representable integer magnitude. clamp_max guards against float overflow
@@ -153,3 +160,23 @@ def mx9_fake_quantize(
     output_tensor = output_tensor.reshape(output_tensor.size(0), -1)
     output_tensor = output_tensor[:, : input_shape[-1]].reshape(input_shape).to(input_dtype)
     return output_tensor.transpose(axis, -1)
+
+
+def mx9_fake_quantize(
+    input_tensor: torch.Tensor,
+    block_size: int = BLOCK_SIZE,
+    quant_bit: int = MX9_QUANT_BIT,
+    axis: int = -1,
+) -> torch.Tensor:
+    """MX9 block-wise fake quantization (QDQ); ``quant_bit=8``."""
+    return _mx_fake_quantize(input_tensor, block_size=block_size, quant_bit=quant_bit, axis=axis)
+
+
+def mx6_fake_quantize(
+    input_tensor: torch.Tensor,
+    block_size: int = BLOCK_SIZE,
+    quant_bit: int = MX6_QUANT_BIT,
+    axis: int = -1,
+) -> torch.Tensor:
+    """MX6 block-wise fake quantization (QDQ); same math as MX9 with ``quant_bit=5``."""
+    return _mx_fake_quantize(input_tensor, block_size=block_size, quant_bit=quant_bit, axis=axis)

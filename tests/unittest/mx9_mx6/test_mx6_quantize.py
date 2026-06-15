@@ -11,8 +11,7 @@ bit width and still preserves the basic QDQ invariants.
 import pytest
 import torch
 
-from alto.kernels.mx6.format import BLOCK_SIZE, QUANT_BIT
-from alto.kernels.mx6.quantize import mx6_fake_quantize
+from alto.modifiers.quantization.mx import BLOCK_SIZE, MX6_QUANT_BIT as QUANT_BIT, mx6_fake_quantize
 
 
 def _quark_mx6_reference(x: torch.Tensor, block_size: int):

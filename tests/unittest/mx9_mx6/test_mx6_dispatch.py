@@ -9,7 +9,7 @@ The MX6 kernel itself is covered by ``test_mx6_quantize.py``. This file tests th
 ``format == "mx6"`` must route to ``mx6_fake_quantize``, while plain int8 args
 (no ``format``) must fall through to the original implementation untouched.
 
-Also checks that ``registry_patch.inject_format_field()`` makes the ``format``
+Also checks that ``format_registry.inject_format_field()`` makes the ``format``
 field survive pydantic validation (otherwise the recipe value is silently
 dropped and dispatch never fires).
 
@@ -23,8 +23,7 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs
 from compressed_tensors.quantization.lifecycle import forward as forward_module
 
-from alto.kernels.mx6.format import BLOCK_SIZE
-from alto.kernels.mx6.quantize import mx6_fake_quantize
+from alto.modifiers.quantization.mx import BLOCK_SIZE, mx6_fake_quantize
 
 
 def _mx6_args() -> QuantizationArgs:
@@ -52,7 +51,7 @@ def _int8_args() -> QuantizationArgs:
 
 
 # --------------------------------------------------------------------------- #
-# format field injection (registry_patch)
+# format field injection (alto.modifiers.quantization.format_registry)
 # --------------------------------------------------------------------------- #
 def test_format_field_survives_validation():
     """Without inject_format_field(), pydantic drops the unknown ``format`` key

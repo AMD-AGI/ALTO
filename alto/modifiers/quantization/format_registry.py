@@ -1,16 +1,20 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
 # SPDX-License-Identifier: MIT
-"""Runtime patches that wire emulated formats into the standard quant path.
+"""Runtime patch that wires emulated formats into the standard quant path.
 
 Importing this module injects a real ``format`` field into
 ``compressed_tensors.QuantizationArgs`` so recipe values like ``format: mx9``
 survive pydantic parsing and become readable via ``getattr(args, "format", None)``
 (by default unknown fields are silently dropped).
 
-The actual ``fake_quantize`` dispatch (``args.format == "mx9"`` -> mx9 kernel)
-lives in ``alto.models.patcher.ModelPatcher.patch_fake_quantize`` where the single
-wrap of ``compressed_tensors...forward.fake_quantize`` already happens.
+The actual ``fake_quantize`` dispatch (``args.format == "mx9"`` -> mx9) lives in
+``alto.models.patcher.ModelPatcher.patch_fake_quantize`` where the single wrap of
+``compressed_tensors...forward.fake_quantize`` already happens.
+
+``inject_format_field()`` is called at the top of this package's ``__init__`` (before
+``QuantizationModifier`` is imported) so the field exists before the modifier
+compiles its nested ``QuantizationScheme`` schema.
 """
 
 from typing import Optional

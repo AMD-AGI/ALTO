@@ -58,15 +58,29 @@ class ModelPatcher:
             @staticmethod
             def forward(ctx, x, scale, zero_point, args, g_idx, global_scale):
                 if getattr(args, "format", None) == "mx9":
-                    from alto.kernels.mx9.format import BLOCK_SIZE
-                    from alto.kernels.mx9.quantize import mx9_fake_quantize
+                    from alto.modifiers.quantization.mx import (
+                        BLOCK_SIZE,
+                        MX9_QUANT_BIT,
+                        mx9_fake_quantize,
+                    )
 
-                    return mx9_fake_quantize(x, block_size=(args.group_size or BLOCK_SIZE))
+                    return mx9_fake_quantize(
+                        x,
+                        block_size=(args.group_size or BLOCK_SIZE),
+                        quant_bit=(args.num_bits or MX9_QUANT_BIT),
+                    )
                 if getattr(args, "format", None) == "mx6":
-                    from alto.kernels.mx6.format import BLOCK_SIZE
-                    from alto.kernels.mx6.quantize import mx6_fake_quantize
+                    from alto.modifiers.quantization.mx import (
+                        BLOCK_SIZE,
+                        MX6_QUANT_BIT,
+                        mx6_fake_quantize,
+                    )
 
-                    return mx6_fake_quantize(x, block_size=(args.group_size or BLOCK_SIZE))
+                    return mx6_fake_quantize(
+                        x,
+                        block_size=(args.group_size or BLOCK_SIZE),
+                        quant_bit=(args.num_bits or MX6_QUANT_BIT),
+                    )
                 return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod

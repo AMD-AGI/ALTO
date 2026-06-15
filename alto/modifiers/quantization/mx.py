@@ -130,7 +130,11 @@ def _mx_fake_quantize(
     # Prime bit: a pair is demoted only if BOTH its elements are below the block max.
     # Reshape last dim into pairs, AND within each pair, then broadcast back.
     n = SHARED_PRIME_BIT_GROUP
-    assert demote.shape[-1] % n == 0
+    if demote.shape[-1] % n != 0:
+        raise ValueError(
+            f"block_size ({block_size}) must be a multiple of "
+            f"SHARED_PRIME_BIT_GROUP ({n})"
+        )
     flat_shape = demote.shape
     demote = demote.reshape(*flat_shape[:-1], flat_shape[-1] // n, n)
     demote = torch.sum(demote, -1, keepdim=True) == n

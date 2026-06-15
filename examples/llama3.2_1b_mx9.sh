@@ -7,10 +7,10 @@
 # Weight and input activations are quantized dynamically through
 # alto/models/llama3/configs/mx9_wa_recipe.yaml
 #
-# Usage:
-#   bash examples/llama3.2_1b_mx9.sh
-#   VALIDATOR_STEPS=100 bash examples/llama3.2_1b_mx9.sh
-#   CONFIG=llama3_1b bash examples/llama3.2_1b_mx9.sh  # BF16 baseline
+# Usage (MODEL_PATH is required, point it at your local Llama-3.2-1B dir):
+#   MODEL_PATH=/path/to/Llama-3.2-1B bash examples/llama3.2_1b_mx9.sh
+#   MODEL_PATH=/path/to/Llama-3.2-1B VALIDATOR_STEPS=100 bash examples/llama3.2_1b_mx9.sh
+#   MODEL_PATH=/path/to/Llama-3.2-1B CONFIG=llama3_1b bash examples/llama3.2_1b_mx9.sh  # BF16 baseline
 rm -rf outputs/
 set -ex
 
@@ -23,9 +23,14 @@ MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_1b_mx9_wa"}
 COMM_MODE=${COMM_MODE:-""}
 
-MODEL_PATH=${MODEL_PATH:-"/wekafs/jiarwang/Llama-3.2-1B"}
+MODEL_PATH=${MODEL_PATH:-""}
+if [ -z "${MODEL_PATH}" ]; then
+    echo "ERROR: MODEL_PATH must be set to your local Llama-3.2-1B directory, e.g." >&2
+    echo "       MODEL_PATH=/path/to/Llama-3.2-1B bash $0" >&2
+    exit 1
+fi
 VALIDATOR_STEPS=${VALIDATOR_STEPS:-"10"}
-CHECKPOINT_FOLDER=${CHECKPOINT_FOLDER:-"/wekafs/jiarwang/mx9_e2e_logs/ckpt_${CONFIG}_$(date +%Y%m%d_%H%M%S)"}
+CHECKPOINT_FOLDER=${CHECKPOINT_FOLDER:-"./outputs/ckpt_${CONFIG}_$(date +%Y%m%d_%H%M%S)"}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 

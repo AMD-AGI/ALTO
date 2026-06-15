@@ -219,7 +219,7 @@ def _kernel_mxfp8_grouped_gemm_forward(
 
 @triton_op("alto::mxfp8_grouped_gemm_forward", mutates_args={})
 def mxfp8_grouped_gemm_forward(
-    inputs: torch.Tensor,            # [M_total, K], fp8
+    inputs: torch.Tensor,            # [M_bufferlen, K], fp8 (M_bufferlen may be padded >= M_total)
     expert_weights: torch.Tensor,    # [num_experts, N, K] (trans) or [num_experts, K, N], fp8
     expert_indices: torch.Tensor,    # [M_total], int32
     input_scales: torch.Tensor,
@@ -242,12 +242,15 @@ def mxfp8_grouped_gemm_forward(
     if use_dot_scaled is None:
         use_dot_scaled = is_cdna4()
 
-    M_total, K = inputs.shape
+    M_bufferlen, K = inputs.shape
+    M_total = expert_indices.numel()
     torch._check(M_total > 0)
+    assert M_bufferlen >= M_total, \
+        f"M_bufferlen ({M_bufferlen}) must be >= M_total ({M_total})"
+    assert M_bufferlen % BLOCK_SIZE_DEFAULT == 0, \
+        f"M_bufferlen ({M_bufferlen}) must be a multiple of block_size ({BLOCK_SIZE_DEFAULT})"
     assert M_total % ALIGN_SIZE_M == 0, \
         f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
-    assert expert_indices.numel() == M_total, \
-        f"expert_indices length ({expert_indices.numel()}) must match M_total ({M_total})"
     if K % BLOCK_SIZE_DEFAULT != 0:
         raise ValueError(f"K ({K}) must be divisible by block_size ({BLOCK_SIZE_DEFAULT})")
 
@@ -268,9 +271,9 @@ def mxfp8_grouped_gemm_forward(
         raise ValueError(f"N ({N}) must be divisible by block_size ({BLOCK_SIZE_DEFAULT}) for 2D weight scales")
 
     expected_input_scales = (
-        (M_total // BLOCK_SIZE_DEFAULT, K // BLOCK_SIZE_DEFAULT)
+        (M_bufferlen // BLOCK_SIZE_DEFAULT, K // BLOCK_SIZE_DEFAULT)
         if use_2dblock_x else
-        (M_total, K // BLOCK_SIZE_DEFAULT)
+        (M_bufferlen, K // BLOCK_SIZE_DEFAULT)
     )
     if trans_weights:
         expected_weight_scales = (
@@ -289,7 +292,7 @@ def mxfp8_grouped_gemm_forward(
     assert weight_scales.shape == torch.Size(expected_weight_scales), \
         f"weight_scales shape {weight_scales.shape} must be {expected_weight_scales}"
 
-    output = torch.zeros((M_total, N), device=inputs.device, dtype=output_dtype)
+    output = torch.zeros((M_bufferlen, N), device=inputs.device, dtype=output_dtype)
 
     stride_am, stride_ak = inputs.stride()
     stride_asm, stride_ask = input_scales.stride()

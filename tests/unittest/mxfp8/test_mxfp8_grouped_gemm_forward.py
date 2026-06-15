@@ -162,13 +162,15 @@ def test_forward_rejects_indices_length_mismatch():
     data_type = torch.bfloat16
     inputs = prepare_data((M_total, K), data_type)
     expert_weights = prepare_data((num_experts, N, K), data_type)
+    # A routed count below the buffer is now the padded-buffer case, not an error;
+    # but a non-128-aligned routed count (127) must still be rejected.
     indices = torch.zeros(M_total - 1, dtype=torch.int32, device="cuda")
     x_lp, x_s = torch.ops.alto.convert_to_mxfp8(
         inputs, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=False)
     w_lp, w_s = torch.ops.alto.convert_to_mxfp8(
         expert_weights, block_size=BLOCK_SIZE_DEFAULT, mxfp_format="e4m3", axis=-1, is_2d_block=False)
 
-    with pytest.raises(AssertionError, match="expert_indices length"):
+    with pytest.raises(AssertionError, match="multiple of group_size_m"):
         mxfp8_grouped_gemm_forward(x_lp, w_lp, indices, x_s, w_s)
 
 

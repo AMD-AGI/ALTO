@@ -224,10 +224,8 @@ functional.py        # 暴露顶层入口
 
 V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 pass 数值对、autograd 通、toy 训练 100 步不发散）。但「支持 GPT-OSS training」卡在算子与真实 MoE 之间的**接口契约**与若干前置验证上。下列待办按接入优先级排：
 
-- [ ] **【阻塞 · 头号】offsets 入口 + padded buffer 支持，对齐 mxfp4/nvfp4。**（方案已批准，待实施，见 §8.1）
-  现状（`cg_forward.py:247-249` 等）：入口要求 `M_total % 128 == 0`、每 128 token 整块同一 expert、`expert_indices.numel() == M_total`，且 forward 注释明确「V1 不支持 padded buffer」。
-  真实 MoE（含 GPT-OSS）路由后每个 expert 的 token 数是**动态、不等、不保证 128 对齐**的 → 现状下 GPT-OSS 给不出 mxfp8 能吃的输入。
-  参照：mxfp4 用户传 `offs`（累积 offset，如 `[128,128,256,...]`），内部 `create_indices_from_offsets_nosync`（`mxfp4/.../functional.py:23`）转 indices；nvfp4 另有 `test_nvfp4_grouped_gemm_accepts_padded_buffer` 覆盖 `M_bufferlen > 实际 token 数` 的补零场景。mxfp8 需补同款 `offsets` 入口 + `M_bufferlen` vs `M_total` 区分。
+- [x] **offsets 入口 + padded buffer 支持，对齐 mxfp4/nvfp4。**（2026-06-10 已实施，见 §8.1）
+  新增 dispatch 入口 `_quantize_then_mxfp8_scaled_grouped_mm(A, B, offs, ...)`，并把三个 wrapper 改为区分 `M_bufferlen`(=`inputs/grad_output.shape[0]`) 与 `M_total`(=`expert_indices.numel()`=`offs[-1]`)：M_total 仍须 128 对齐，但 buffer 尾部可有 padding 行（输出/梯度恒 0）。真实 MoE（含 GPT-OSS）路由后每 expert token 数动态、不等、不保证 128 对齐 + 上游 padded buffer → 现在 mxfp8 能直接吃。Triton kernel 零改动（详见 §8.1）。
 
 - [x] **CDNA4/m355 真机验证默认 `tl.dot_scaled` 路径。**
   2026-06-10 已在 MI355X（CDNA4 / m355）`gracious_lovelace` 容器中重跑 forward + backward 52 个 grouped GEMM 单测，结果 **52 passed, 14 warnings in 18.51s**。结论：m355 默认 `tl.dot_scaled` 路径的 fwd / dgrad / wgrad 数值正确性单测已通过。
@@ -238,14 +236,14 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
 - [ ] **【中】性能可用性验证。**
   wgrad 为「每 tile 扫所有 group」的 O(experts) 朴素实现、`BLOCK_SIZE_K=32`、无 autotune（§4 划线项）。能跑通 ≠ 训得起，GPT-OSS 规模下需实测吞吐，必要时提前做 split-K / autotune（原列为 v2）。
 
-- [ ] **【中】接入形态对齐。**
-  `mxfp8_grouped_gemm` 签名要能直接替换 GPT-OSS MoE forward 中的 grouped GEMM 调用；具体集成视 GPT-OSS 训练栈 PR 时再定。
+- [x] **接入形态对齐（dispatch subclass wiring）。**（2026-06-10 已实施，见 §8.2）
+  `MXFP8TrainingWeightWrapperTensor.__torch_function__` 的 `_grouped_mm` 分支原为 `raise NotImplementedError`，现已照搬 mxfp4 模式接上 §8.1 的 `_quantize_then_mxfp8_scaled_grouped_mm`，并加 V1 边界保护（只收 `mxfp8_e4m3`，拒 e5m2 grouped / hadamard / dge）。至此 `lpt_recipe.yaml` 全链路（modifier 白名单 → conversion 选类 → dispatch 路由 → offsets/padding 入口 → 算子）打通，接 GPT-OSS **无需再写新代码**，只需改 recipe 配置（见 §8.2）。
 
-一句话：**发动机（算子）基本造好，CDNA4/m355 路试已过；但接进整车（GPT-OSS）所需的传动接口（offsets/padding）以及很可能必需的 e5m2，都还没做。** 最小可用 kernel ≈ 75% 到位，差的恰是「接真实模型」这一段。
+一句话：**发动机（算子）造好，CDNA4/m355 路试已过，传动接口（offsets/padding）与 dispatch wiring 都接好了；接 GPT-OSS 代码侧已就绪，只差改 recipe 配置。剩下的真正风险是很可能必需的 e5m2、性能实测、以及整网真训的数值收敛。** 最小可用 kernel ≈ 90% 到位，差的主要是「真训路况下的数值/性能验证」。
 
-### 8.1 offsets 入口 + padded buffer 实施方案（已批准 · 待实施）
+### 8.1 offsets 入口 + padded buffer 实施方案（✅ 已实施 · 2026-06-10）
 
-> 状态：方案已评审通过，**代码尚未动手**。本节是落地蓝图，实施时按此执行并回填结果。
+> 状态：**已落地并通过测试**（MI300X/CDNA3，54 passed）。本节为实施记录。
 
 **核心发现：三个 Triton kernel 无需改动。** 它们已用 `M_TOTAL` 作为迭代上界并 `offs_m < M_TOTAL` 掩码；输出张量是独立 `torch.zeros` 分配，padding 行从不被写入、天然保持 0。buffer-vs-routed 的混淆**只存在于 Python wrapper**。两个长度的定义：
 - **M_total** = 路由 token 数 = `expert_indices.numel()` = `offs[-1]`，必须 128 对齐（GPT-OSS 把每 expert 的 token 数向上 padding 到 128）。
@@ -257,15 +255,45 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
 
 2. **`cg_backward.py` 两个 wrapper**（kernel 不动）：dgrad/wgrad 同样拆 `M_bufferlen`(=`grad_output.shape[0]`) vs `M_total`(=`expert_indices.numel()`)；`grad_inputs` 按 bufferlen 分配；scale shape 按 bufferlen；grid 用 M_total。wgrad kernel 只遍历 `M_TOTAL // GROUP_SIZE_M` 个路由 group → padding 行永不累加进 dW。
 
-3. **`functional.py` 新增 dispatch 入口**（对齐 GPT-OSS 约定，零改动 drop-in）：`_quantize_then_mxfp8_scaled_grouped_mm(A, B, offs, *, use_2dblock_x=False, use_2dblock_w=False, use_sr_grad=False, fwd_format="e4m3", bwd_grad_format="e4m3")`。`B` 以 dispatch 布局 `[E,K,N]` 传入，入口内 `B.transpose(-2,-1).contiguous()` 转成 canonical `[E,N,K]`（仿 nvfp4 `functional.py:149`），再以 `trans_weights=True` 调 `MXFP8GroupedGEMM.apply`；`offs` 经 `create_indices_from_offsets_nosync`（`alto/kernels/dsgemm_utils.py`）转 indices。`__init__.py` 导出该入口。
+3. **`functional.py` 新增 dispatch 入口**（对齐 GPT-OSS 约定，零改动 drop-in）：`_quantize_then_mxfp8_scaled_grouped_mm(A, B, offs, *, use_2dblock_x=False, use_2dblock_w=True, use_sr_grad=False, fwd_format="e4m3", bwd_grad_format="e4m3")`。`offs` 经 `create_indices_from_offsets_nosync`（`alto/kernels/dsgemm_utils.py`）转 indices。`__init__.py` 导出该入口。
+   > **实施偏离蓝图（已批准）**：原蓝图拟仿 nvfp4 在入口内 `B.transpose(-2,-1).contiguous()` 转 canonical `[E,N,K]` 再以 `trans_weights=True` 调。最终改采 **mxfp4 式**：`B` 以 dispatch 布局 `[E,K,N]` 原样传入，`trans_weights=False`，**不做 transpose 拷贝**（仿 `mxfp4/.../functional.py:_quantize_then_mxfp_scaled_grouped_mm` 的 7 行最简模板）。理由：省每步一次 `E×K×N` 权重拷贝、模板更简。代价是 mxfp8 的 `trans_weights=False` 路径原本单测覆盖较少——故新增的 padded-buffer 测试**专门走该路径**补强覆盖。
 
 4. **`MXFP8GroupedGEMM` autograd**：结构无需改（已用 bufferlen 张量 + ctx 透传 indices）；仅需确认 M 轴量化 `convert_to_mxfp8(..., axis=0)` 在 bufferlen buffer 上成立（要求 `M_bufferlen % 32 == 0`，由新断言保证）。
 
 5. **测试**（`test_mxfp8_grouped_gemm_backward.py`）：新增 `test_mxfp8_grouped_gemm_accepts_padded_buffer`，采 **padded-vs-unpadded 自比**（最强校验，闭环证明 padding 零干扰）。**关键：固定 `use_sr_grad=False`** 使量化确定性，否则随机舍入令 `torch.equal` 偶发失败；routed 行两次跑应逐位相等。断言：`y_pad.shape==(M_bufferlen,N)`、`y_pad[M_routed:]` 全 0、`y_pad[:M_routed]==y_ref`、`inputs_pad.grad[M_routed:]` 全 0、`inputs_pad.grad[:M_routed]==inputs_ref.grad`、`w_pad.grad==w_ref.grad`；另加 offsets 入口 smoke test。
 
-**验证**：现有 54 用例不回归 + 新 padded-buffer 测试通过；额外确认「若 wrapper 仍按 `[M_total,N]` 分配则新测试会失败」以证明确实触发了 padding 路径。本改动 device-agnostic（只动 wrapper/入口）；CDNA4/m355 路试已于 2026-06-10 通过（见 §6 验证记录）。
+5b. **smoke test**：另加 `test_mxfp8_dispatch_entry_offsets_matches_indices`——同一路由下 offsets 入口与 indices 路径输出 SNR > 30 dB，验证 `create_indices_from_offsets_nosync` round-trip 正确。
 
-**完成后**：勾选 §8 头号 item，并在 §3 相应 Step 回填新入口 `_quantize_then_mxfp8_scaled_grouped_mm` 与 padded-buffer 测试。
+**验证记录**（2026-06-10，MI300X / CDNA3）：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` → **54 passed**（52 原有不回归 + 2 新增：padded-buffer 自比、offsets smoke）。padded-buffer 测试的 `y_pad.shape==(M_bufferlen,N)` 断言本身即负控——若 wrapper 仍按 `[M_total,N]` 分配则该断言失败，证明确实触发 padding 路径。本改动 device-agnostic（只动 wrapper/入口，Triton kernel 零改动）；CDNA4/m355 路试已于 2026-06-10 通过（见 §6 验证记录）。
+
+**后续（已于同日完成）**：dispatch `__torch_function__` subclass wiring（`alto/kernels/dispatch/tensor.py`，即 §8「接入形态对齐」）当时列为后续 PR，已于 2026-06-10 一并实施，见 §8.2。
+
+### 8.2 dispatch wiring + GPT-OSS 接入（✅ 已实施 · 2026-06-10）
+
+> 状态：**已落地并验证**（MI300X/CDNA3）。打通 `lpt_recipe.yaml` 到算子的全链路。
+
+**全链路**：`lpt_recipe.yaml` → `LowPrecisionTrainingModifier`（`alto/modifiers/lpt/base.py`，已支持 `mxfp8_e4m3` scheme 与 `GptOssGroupedExperts` target）→ `swap_params` → `conversion.py:_get_tensor_cls_for_config` 选 `MXFP8TrainingWeightWrapperTensor` → 训练时 MoE 调 `torch._grouped_mm` → wrapper `__torch_function__` 拦截 → §8.1 入口 → 算子。除 dispatch 分支外其余环节本就齐备。
+
+**改动（`alto/kernels/dispatch/tensor.py`）**：`MXFP8TrainingWeightWrapperTensor.__torch_function__` 的 `_grouped_mm` 分支原为 `raise NotImplementedError("... restrict MXFP8 schemes to Linear targets.")`，改为照搬 mxfp4 分支模式：取 `A/B/offs`，断言 2d×3d+offs，调 `_quantize_then_mxfp8_scaled_grouped_mm(A, B, offs=offs, use_2dblock_x/w, use_sr_grad)`。**V1 边界保护**：断言 `config.precision == "mxfp8_e4m3"`（拒 e5m2 grouped——该路径未验证）、`not use_hadamard and not use_dge`。新增顶部 import。
+
+**验证记录**（2026-06-10，MI300X / CDNA3）：
+- 端到端 dispatch smoke：包一个 `MXFP8TrainingWeightWrapperTensor` 权重 `[E,K,N]`，`torch._grouped_mm(A, B, offs=[128,256,384,512])` → forward `(512,256)` finite、`.sum().backward()` 后 `A.grad` finite。
+- 边界：`mxfp8_e5m2` 与 `use_hadamard=True` 均被正确 `AssertionError` 拒绝。
+- 回归：`test_mxfp8_grouped_gemm_forward.py` + `_backward.py` **54 passed** 无回归。
+
+**接 GPT-OSS：无需再写代码，只改 recipe 配置。** `alto/models/gpt_oss/configs/lpt_recipe.yaml`（当前为 mxfp4）改成最小 e4m3 V1 需动 3 行（其余保持）：
+
+| 字段 | 当前(mxfp4) | mxfp8 V1 | 原因 |
+|---|---|---|---|
+| `scheme` | `mxfp4` | `mxfp8_e4m3` | 切格式 |
+| `use_hadamard` | `true` | `false` | mxfp8 grouped 不支持（dispatch 断言拒绝） |
+| `use_sr_grad` | `true` | `false` | V1 grouped sr 路径未验证 |
+| `use_2dblock_x` | `false` | `false` | 支持，保持 |
+| `use_2dblock_w` | `true` | `true` | 支持，保持 |
+| `use_dge` / `clip_mode` / `two_level_scaling` | `false`/`none`/`none` | 同 | 已关，保持 |
+| `targets` / `ignore` | 不变 | 不变 | `["Linear","GptOssGroupedExperts"]` 均支持 |
+
+**接入后仍需注意**（非本次范围，属真训验证）：① 本机为 CDNA3 dequant fallback，GPT-OSS 真训若在 CDNA4 走默认 `tl.dot_scaled`，算子单测已在 m355 过（§6），但**整网真训未跑**；② §0 风险——全 e4m3 多层+几千步可能发散（toy 仅 100 步单层），能跑 ≠ 能收敛，真训需盯 loss，必要时回到「e5m2 混合格式」open item。
 
 ---
 

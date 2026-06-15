@@ -332,12 +332,15 @@ def mxfp8_grouped_gemm_backward_inputs(
     if use_dot_scaled is None:
         use_dot_scaled = is_cdna4()
 
-    M_total, N = grad_output.shape
+    M_bufferlen, N = grad_output.shape
+    M_total = expert_indices.numel()
     torch._check(M_total > 0)
+    assert M_bufferlen >= M_total, \
+        f"M_bufferlen ({M_bufferlen}) must be >= M_total ({M_total})"
+    assert M_bufferlen % BLOCK_SIZE_DEFAULT == 0, \
+        f"M_bufferlen ({M_bufferlen}) must be a multiple of block_size ({BLOCK_SIZE_DEFAULT})"
     assert M_total % ALIGN_SIZE_M == 0, \
         f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
-    assert expert_indices.numel() == M_total, \
-        f"expert_indices length ({expert_indices.numel()}) must match M_total ({M_total})"
     if N % BLOCK_SIZE_DEFAULT != 0:
         raise ValueError(f"N ({N}) must be divisible by block_size ({BLOCK_SIZE_DEFAULT})")
 
@@ -368,16 +371,16 @@ def mxfp8_grouped_gemm_backward_inputs(
         raise ValueError(f"K ({K}) must be divisible by block_size ({BLOCK_SIZE_DEFAULT})")
 
     expected_go_scales = (
-        (M_total // BLOCK_SIZE_DEFAULT, N // BLOCK_SIZE_DEFAULT)
+        (M_bufferlen // BLOCK_SIZE_DEFAULT, N // BLOCK_SIZE_DEFAULT)
         if use_2dblock_x else
-        (M_total, N // BLOCK_SIZE_DEFAULT)
+        (M_bufferlen, N // BLOCK_SIZE_DEFAULT)
     )
     assert go_scales.shape == torch.Size(expected_go_scales), \
         f"go_scales shape {go_scales.shape} must be {expected_go_scales}"
     assert expert_weight_scales.shape == torch.Size(expected_weight_scales), \
         f"expert_weight_scales shape {expert_weight_scales.shape} must be {expected_weight_scales}"
 
-    grad_inputs = torch.zeros((M_total, K), device=grad_output.device, dtype=output_dtype)
+    grad_inputs = torch.zeros((M_bufferlen, K), device=grad_output.device, dtype=output_dtype)
     stride_gom, stride_gon = grad_output.stride()
     stride_gosm, stride_gosn = go_scales.stride()
     stride_gim, stride_gik = grad_inputs.stride()
@@ -433,14 +436,17 @@ def mxfp8_grouped_gemm_backward_weights(
     if use_dot_scaled is None:
         use_dot_scaled = is_cdna4()
 
-    M_total, N = grad_output.shape
+    M_bufferlen, N = grad_output.shape
     M_inputs, K = inputs.shape
-    assert M_inputs == M_total, f"inputs M ({M_inputs}) must match grad_output M ({M_total})"
+    assert M_inputs == M_bufferlen, f"inputs M ({M_inputs}) must match grad_output M ({M_bufferlen})"
+    M_total = expert_indices.numel()
     torch._check(M_total > 0)
+    assert M_bufferlen >= M_total, \
+        f"M_bufferlen ({M_bufferlen}) must be >= M_total ({M_total})"
+    assert M_bufferlen % BLOCK_SIZE_DEFAULT == 0, \
+        f"M_bufferlen ({M_bufferlen}) must be a multiple of block_size ({BLOCK_SIZE_DEFAULT})"
     assert M_total % ALIGN_SIZE_M == 0, \
         f"M_total ({M_total}) must be a multiple of group_size_m ({ALIGN_SIZE_M})"
-    assert expert_indices.numel() == M_total, \
-        f"expert_indices length ({expert_indices.numel()}) must match M_total ({M_total})"
     if N % BLOCK_SIZE_DEFAULT != 0:
         raise ValueError(f"N ({N}) must be divisible by block_size ({BLOCK_SIZE_DEFAULT})")
     if K % BLOCK_SIZE_DEFAULT != 0:
@@ -450,14 +456,14 @@ def mxfp8_grouped_gemm_backward_weights(
         expert_indices = expert_indices.to(torch.int32)
 
     expected_go_scales = (
-        (M_total // BLOCK_SIZE_DEFAULT, N // BLOCK_SIZE_DEFAULT)
+        (M_bufferlen // BLOCK_SIZE_DEFAULT, N // BLOCK_SIZE_DEFAULT)
         if use_2dblock_go else
-        (M_total // BLOCK_SIZE_DEFAULT, N)
+        (M_bufferlen // BLOCK_SIZE_DEFAULT, N)
     )
     expected_input_scales = (
-        (M_total // BLOCK_SIZE_DEFAULT, K // BLOCK_SIZE_DEFAULT)
+        (M_bufferlen // BLOCK_SIZE_DEFAULT, K // BLOCK_SIZE_DEFAULT)
         if use_2dblock_x else
-        (M_total // BLOCK_SIZE_DEFAULT, K)
+        (M_bufferlen // BLOCK_SIZE_DEFAULT, K)
     )
     assert go_scales.shape == torch.Size(expected_go_scales), \
         f"go_scales shape {go_scales.shape} must be {expected_go_scales}"

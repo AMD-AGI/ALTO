@@ -5,7 +5,10 @@
 import pytest
 import torch
 
-from alto.kernels.mxfp8.mxfp8_grouped_gemm import mxfp8_grouped_gemm
+from alto.kernels.mxfp8.mxfp8_grouped_gemm import (
+    mxfp8_grouped_gemm,
+    _quantize_then_mxfp8_scaled_grouped_mm,
+)
 from alto.kernels.mxfp8.mxfp8_grouped_gemm.autotune import ALIGN_SIZE_M
 from alto.kernels.mxfp8.mxfp8_grouped_gemm.cg_backward import (
     mxfp8_grouped_gemm_backward_inputs,
@@ -279,3 +282,82 @@ def test_autograd_many_experts_with_empty_expert():
     # Empty experts must get exactly zero weight gradient.
     assert torch.count_nonzero(expert_weights.grad[2:]) == 0, "unused experts must have zero dW"
     assert torch.count_nonzero(expert_weights.grad[:2]) > 0, "routed experts must have nonzero dW"
+
+
+# =============== offsets dispatch entry + padded buffer (PLAN.md §8.1) ===============
+
+def test_mxfp8_grouped_gemm_accepts_padded_buffer():
+    """Padded activation buffer (M_bufferlen > routed M_total) must not disturb
+    routed rows, and padding rows must stay zero in both output and gradients.
+
+    Padded-vs-unpadded self-comparison through the offsets dispatch entry (which
+    uses trans_weights=False, also boosting that path's coverage). use_sr_grad is
+    forced False so quantization is deterministic and torch.equal holds bitwise.
+    """
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    M_routed, M_pad = 4 * ALIGN_SIZE_M, 2 * ALIGN_SIZE_M  # 512 routed, 256 padding
+    M_bufferlen = M_routed + M_pad
+    num_experts, K, N = 4, 256, 256
+
+    routed_rows = prepare_data((M_routed, K), dtype)
+    weights = prepare_data((num_experts, K, N), dtype)  # dispatch convention [E, K, N]
+    # Each expert owns one ALIGN_SIZE_M group of routed tokens -> cumulative offs.
+    offs = torch.tensor(
+        [(i + 1) * (M_routed // num_experts) for i in range(num_experts)],
+        dtype=torch.int32, device=device,
+    )
+
+    inputs_pad = torch.zeros(M_bufferlen, K, dtype=dtype, device=device)
+    inputs_pad[:M_routed] = routed_rows
+    inputs_pad.requires_grad_(True)
+    weights_pad = weights.clone().requires_grad_(True)
+    y_pad = _quantize_then_mxfp8_scaled_grouped_mm(
+        inputs_pad, weights_pad, offs,
+        use_2dblock_x=False, use_2dblock_w=False, use_sr_grad=False)
+
+    inputs_ref = routed_rows.clone().requires_grad_(True)
+    weights_ref = weights.clone().requires_grad_(True)
+    y_ref = _quantize_then_mxfp8_scaled_grouped_mm(
+        inputs_ref, weights_ref, offs,
+        use_2dblock_x=False, use_2dblock_w=False, use_sr_grad=False)
+
+    assert y_pad.shape == (M_bufferlen, N)
+    assert torch.equal(y_pad[M_routed:], torch.zeros_like(y_pad[M_routed:])), \
+        "padding output rows must be zero"
+    assert torch.equal(y_pad[:M_routed], y_ref), \
+        "routed output rows must be unaffected by buffer padding"
+
+    y_pad.sum().backward()
+    y_ref.sum().backward()
+    assert inputs_pad.grad.shape == (M_bufferlen, K)
+    assert torch.equal(inputs_pad.grad[M_routed:], torch.zeros_like(inputs_pad.grad[M_routed:])), \
+        "padding rows must receive zero input gradient"
+    assert torch.equal(inputs_pad.grad[:M_routed], inputs_ref.grad), \
+        "routed-row input gradients must be unaffected by buffer padding"
+    assert torch.equal(weights_pad.grad, weights_ref.grad), \
+        "weight gradients must be unaffected by buffer padding"
+
+
+def test_mxfp8_dispatch_entry_offsets_matches_indices():
+    """The offsets entry must equal the indices path: create_indices_from_offsets
+    round-trip is correct. No padding here (M_bufferlen == M_total)."""
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    num_groups, num_experts, K, N = 4, 4, 256, 256
+    M_total = num_groups * ALIGN_SIZE_M
+
+    inputs = prepare_data((M_total, K), dtype)
+    weights = prepare_data((num_experts, K, N), dtype)  # [E, K, N] dispatch convention
+    # Contiguous round-robin routing: group g -> expert (g % num_experts).
+    indices = _make_indices(num_groups, num_experts, device)
+    # Matching cumulative offsets (one group per expert here, all sizes ALIGN_SIZE_M).
+    offs = torch.arange(1, num_groups + 1, dtype=torch.int32, device=device) * ALIGN_SIZE_M
+
+    y_indices = mxfp8_grouped_gemm(
+        inputs, weights, indices, trans_weights=False, use_sr_grad=False)
+    y_offsets = _quantize_then_mxfp8_scaled_grouped_mm(
+        inputs, weights, offs, use_sr_grad=False)
+
+    snr = calc_snr(y_indices.float(), y_offsets.float())
+    assert snr > 30, f"offsets entry vs indices path SNR too low: {snr:.1f}dB"

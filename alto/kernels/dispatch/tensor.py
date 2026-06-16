@@ -39,6 +39,8 @@ _ops_to_preserve_subclass = {
     torch.ops.aten.clone.default,
     torch.ops.aten.transpose.int,
     torch.ops.aten.t.default,
+    # required for TP - scatter_ is used to distribute weights
+    torch.ops.c10d.scatter_.default,
 }
 
 gemm_ops = ("linear", "mm.default", "matmul.default", "addmm.default", "matmul")
@@ -111,6 +113,10 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
         # detach is special case
         if func == torch.ops.aten.detach.default:
             return cls(args_unwrapped[0], config)
+        elif func.__name__ in gemm_ops or func.__name__ == "_grouped_mm":
+            # Delegate to the subclass' GEMM / grouped_mm overrides without
+            # unwrapping the wrapper tensor, avoiding __torch_dispatch__ recursion.
+            return cls.__torch_function__(func, types, args, kwargs or {})
 
         # perform op
         out = func(*args_unwrapped, **kwargs_unwrapped)
@@ -343,7 +349,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
-                use_per_tensor_scale=config.two_level_scaling == "tensorwise",
+                use_outer_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )
@@ -379,7 +385,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
-                use_per_tensor_scale=config.two_level_scaling == "tensorwise",
+                use_outer_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )

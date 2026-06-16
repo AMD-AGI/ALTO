@@ -40,7 +40,7 @@ def _nvfp4_grouped_gemm_impl(
     use_2dblock_x: bool = False,
     use_2dblock_w: bool = False,
     use_sr_grad: bool = True,
-    use_per_tensor_scale: bool = False,
+    use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
 ) -> torch.Tensor:
@@ -67,7 +67,7 @@ def _nvfp4_grouped_gemm_impl(
         use_2dblock_x,
         use_2dblock_w,
         use_sr_grad,
-        use_per_tensor_scale,
+        use_outer_scale,
         hadamard_transform,
         use_dge,
     )
@@ -82,7 +82,7 @@ def nvfp4_grouped_gemm(
     use_2dblock_x: bool = False,
     use_2dblock_w: bool = False,
     use_sr_grad: bool = True,
-    use_per_tensor_scale: bool = False,
+    use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
 ) -> torch.Tensor:
@@ -102,7 +102,8 @@ def nvfp4_grouped_gemm(
         use_2dblock_x:     Use 16x16 2D scaling for activations.
         use_2dblock_w:     Use 16x16 2D scaling for weights.
         use_sr_grad:       Stochastic rounding for gradient quantisation.
-        use_per_tensor_scale: Enable dynamic per-tensor scale on top of block scale.
+        use_outer_scale:   Enable the outer-level (NVFP4 ``s_global``) scale
+                           on top of the per-block scale.
         use_hadamard:      Apply Hadamard on the wgrad reduction axis (1D-x only).
         use_dge:           Apply DGE modulation to grouped weight gradients.
 
@@ -110,9 +111,9 @@ def nvfp4_grouped_gemm(
         [M_total, N] output tensor.
     """
     if not trans_weights:
-        # User/dispatch stored weights as [E, K, N]; materialize the canonical
-        # [E, N, K] layout exactly once, here at the wrapper boundary.
-        expert_weights = expert_weights.transpose(-2, -1).contiguous()
+        # Downstream grouped kernels and _qdq both consume strided
+        # expert_weights, so no .contiguous() needed.
+        expert_weights = expert_weights.transpose(-2, -1)
     return _nvfp4_grouped_gemm_impl(
         inputs,
         expert_weights,
@@ -120,7 +121,7 @@ def nvfp4_grouped_gemm(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=use_sr_grad,
-        use_per_tensor_scale=use_per_tensor_scale,
+        use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
     )
@@ -133,7 +134,7 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
     use_2dblock_x: bool,
     use_2dblock_w: bool,
     use_sr_grad: bool,
-    use_per_tensor_scale: bool = False,
+    use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
 ) -> torch.Tensor:
@@ -145,7 +146,8 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
     in dispatch layout ``[E, K, N]`` and is transposed once to the canonical
     ``[E, N, K]`` layout shared by the autograd function and its primitives.
     """
-    B_canonical = B.transpose(-2, -1).contiguous()
+    # Zero-copy stride view; see nvfp4_grouped_gemm for rationale.
+    B_canonical = B.transpose(-2, -1)
     return _nvfp4_grouped_gemm_impl(
         A,
         B_canonical,
@@ -153,7 +155,7 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=use_sr_grad,
-        use_per_tensor_scale=use_per_tensor_scale,
+        use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
     )

@@ -57,7 +57,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_2dblock_x: bool,
         use_2dblock_w: bool,
         use_sr_grad: bool,
-        use_per_tensor_scale: bool,
+        use_outer_scale: bool,
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
     ):
@@ -76,12 +76,12 @@ class NVFP4LinearFunction(torch.autograd.Function):
         x_dq = _qdq(
             x_2d, axis=-1,
             is_2d_block=use_2dblock_x,
-            use_per_tensor_scale=use_per_tensor_scale,
+            use_outer_scale=use_outer_scale,
         )
         w_dq = _qdq(
             weight, axis=-1,
             is_2d_block=use_2dblock_w,
-            use_per_tensor_scale=use_per_tensor_scale,
+            use_outer_scale=use_outer_scale,
         )
 
         y = x_dq @ w_dq.T
@@ -116,14 +116,14 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 w_dq_axis0, w_raw_fp4, w_raw_scales = _qdq(
                     weight, axis=0,
                     is_2d_block=False,
-                    use_per_tensor_scale=use_per_tensor_scale,
+                    use_outer_scale=use_outer_scale,
                     return_raw=True,
                 )
             else:
                 w_dq_axis0 = _qdq(
                     weight, axis=0,
                     is_2d_block=False,
-                    use_per_tensor_scale=use_per_tensor_scale,
+                    use_outer_scale=use_outer_scale,
                 )
         else:
             # 2D block scaling is axis-invariant, so the fprop quantized view is
@@ -135,7 +135,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 _, w_raw_fp4, w_raw_scales = _qdq(
                     weight, axis=-1,
                     is_2d_block=use_2dblock_w,
-                    use_per_tensor_scale=use_per_tensor_scale,
+                    use_outer_scale=use_outer_scale,
                     return_raw=True,
                 )
             w_dq_axis0 = w_dq
@@ -166,7 +166,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
             x_dq_axis0 = _qdq(
                 x_for_axis0, axis=0,
                 is_2d_block=False,
-                use_per_tensor_scale=use_per_tensor_scale,
+                use_outer_scale=use_outer_scale,
             )
         else:
             x_dq_axis0 = x_dq
@@ -178,7 +178,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
         ctx.use_2dblock_x = use_2dblock_x
         ctx.use_2dblock_w = use_2dblock_w
         ctx.use_sr_grad = use_sr_grad
-        ctx.use_per_tensor_scale = use_per_tensor_scale
+        ctx.use_outer_scale = use_outer_scale
         ctx.hadamard_transform = hadamard_transform
         ctx.use_dge = use_dge
 
@@ -208,7 +208,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
             grad_output_dq = _qdq(
                 grad_output, axis=-1,
                 is_2d_block=True,
-                use_per_tensor_scale=ctx.use_per_tensor_scale,
+                use_outer_scale=ctx.use_outer_scale,
                 use_sr=ctx.use_sr_grad,
             )
             grad_output_m_dq = grad_output_dq
@@ -216,7 +216,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
             grad_output_dq = _qdq(
                 grad_output, axis=-1,
                 is_2d_block=False,
-                use_per_tensor_scale=ctx.use_per_tensor_scale,
+                use_outer_scale=ctx.use_outer_scale,
                 use_sr=ctx.use_sr_grad,
             )
             # Apply the same Hadamard rotation that was used on x in forward,
@@ -229,7 +229,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
             grad_output_m_dq = _qdq(
                 grad_output_for_m, axis=0,
                 is_2d_block=False,
-                use_per_tensor_scale=ctx.use_per_tensor_scale,
+                use_outer_scale=ctx.use_outer_scale,
                 use_sr=ctx.use_sr_grad,
             )
 
@@ -239,10 +239,10 @@ class NVFP4LinearFunction(torch.autograd.Function):
         if ctx.use_dge:
             # Recover the weight's FP4 bin value (no scale applied) by
             # dequantizing the saved packed FP4 view with unit block scales
-            # and PTS=None.  dge_bwd() then maps each element to a bin-aware
-            # gradient magnification factor (clamped to [0, 3]), which scales
-            # the STE weight gradient so FP4 "dead weights" pinned near bin
-            # boundaries still get non-zero learning signal.
+            # and outer_scale=None.  dge_bwd() then maps each element to a
+            # bin-aware gradient magnification factor (clamped to [0, 3]),
+            # which scales the STE weight gradient so FP4 "dead weights"
+            # pinned near bin boundaries still get non-zero learning signal.
             wgrad_axis_w = 0 if not ctx.use_2dblock_w else -1
             wgrad_is_2d_w = ctx.use_2dblock_w
             unit_scales = torch.ones_like(w_raw_scales)
@@ -252,7 +252,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 output_dtype=grad_weights.dtype,
                 axis=wgrad_axis_w,
                 is_2d_block=wgrad_is_2d_w,
-                per_tensor_scale=None,
+                outer_scale=None,
             )
             grad_weights = grad_weights * dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
@@ -269,7 +269,7 @@ def _to_nvfp4_then_scaled_mm(
     use_2dblock_x: bool,
     use_2dblock_w: bool,
     use_sr_grad: bool,
-    use_per_tensor_scale: bool = False,
+    use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
 ) -> torch.Tensor:
@@ -291,7 +291,7 @@ def _to_nvfp4_then_scaled_mm(
         use_2dblock_x,
         use_2dblock_w,
         use_sr_grad,
-        use_per_tensor_scale,
+        use_outer_scale,
         hadamard_transform,
         use_dge,
     )

@@ -1,0 +1,12 @@
+training_stage:
+  debug_modifiers:
+    DebugObserverModifier:
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore: ["output", "re:.*\\.router\\.gate"]
+      capture_every: 1
+      max_captures: 10
+      output_path: "./outputs/debug_obs_bf16.pt"
+      capture_input: true
+      capture_weight: true
+      capture_grad_output: true
+      capture_grad_weight: true

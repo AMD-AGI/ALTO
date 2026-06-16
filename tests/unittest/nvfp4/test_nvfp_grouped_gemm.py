@@ -19,8 +19,8 @@ Test layers
    Smoke test on shape corner cases (single group / 1-expert / 32-expert).
 
 3. ``test_nvfp4_grouped_gemm_recipe_variants_smoke``
-   Recipe knobs (2D-w, PTS, Hadamard, DGE, combinations) run end-to-end and
-   produce finite outputs + gradients.
+   Recipe knobs (2D-w, outer_scale, Hadamard, DGE, combinations) run end-to-end
+   and produce finite outputs + gradients.
 
 4. ``test_nvfp4_grouped_gemm_rejects_non_aligned_mtotal``
    Contract guard: loop backend must fail fast on misaligned M_total.
@@ -92,9 +92,10 @@ def _bf16_grouped_ref_forward(
 @pytest.mark.parametrize("use_2dblock_x", [False, True])
 @pytest.mark.parametrize("use_2dblock_w", [False, True])
 @pytest.mark.parametrize("use_sr_grad", [False, True])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
 def test_nvfp4_grouped_gemm_autograd(
-    shape, use_2dblock_x, use_2dblock_w, use_sr_grad, data_type
+    shape, use_2dblock_x, use_2dblock_w, use_sr_grad, use_outer_scale, data_type,
 ):
     """Output, dX, and dW SNR vs BF16 autograd reference must remain healthy."""
     M_total, N, K, num_experts = shape
@@ -129,6 +130,7 @@ def test_nvfp4_grouped_gemm_autograd(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=use_sr_grad,
+        use_outer_scale=use_outer_scale,
     )
     loss = torch.nn.functional.mse_loss(y, target)
     loss.backward()
@@ -156,9 +158,10 @@ def test_nvfp4_grouped_gemm_autograd(
         K=K,
         use_sr_grad=use_sr_grad,
         kind="nvfp4_grouped_gemm",
+        use_outer_scale=use_outer_scale,
         context=(
             f"NVFP4GroupedGEMM shape={shape} dtype={data_type} "
-            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w}"
+            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w} outer={use_outer_scale}"
         ),
     )
 
@@ -182,8 +185,9 @@ def test_nvfp4_grouped_gemm_autograd(
     ((1024, 512, 512, 8), True,  False, False),
     ((1024, 512, 512, 8), False, False, True),
 ])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
-    shape, trans_weights, use_2dblock_x, use_2dblock_w,
+    shape, trans_weights, use_2dblock_x, use_2dblock_w, use_outer_scale,
 ):
     """NVFP4 and MXFP4 grouped forward paths should both track BF16 reference.
 
@@ -219,10 +223,9 @@ def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
         trans_weights=trans_weights,
     )
 
-    # Use analogous minimal grouped recipes for both format families.  In
-    # particular, do not enable MXFP4 clipping or macro-block scaling here:
-    # those are valuable recipe knobs, but this test is only a cross-format
-    # smoke/reference check for the common routed-expert shape.
+    # Minimal grouped recipes for both formats.  Intentional asymmetry: NVFP4
+    # sweeps ``use_outer_scale`` (two-level FP32 scaling path); MXFP4 stays
+    # fixed (no clipping, no macro-block).  Cross-format smoke/reference check.
     y_nv = nvfp4_grouped_gemm(
         inputs,
         expert_weights,
@@ -231,6 +234,7 @@ def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=False,
+        use_outer_scale=use_outer_scale,
     )
     y_mx = mxfp4_grouped_gemm(
         inputs,
@@ -248,14 +252,6 @@ def test_nvfp4_grouped_gemm_forward_compares_with_mxfp4(
 
     nv_snr = calc_snr(y_ref, y_nv)
     mx_snr = calc_snr(y_ref, y_mx)
-    print()
-    print(tabulate(
-        [
-            ["NVFP4", f"{nv_snr:.2f}", f"{calc_cossim(y_ref, y_nv):.6f}"],
-            ["MXFP4", f"{mx_snr:.2f}", f"{calc_cossim(y_ref, y_mx):.6f}"],
-        ],
-        headers=["Format", "SNR", "CosSim"], tablefmt="github",
-    ))
 
     assert torch.isfinite(y_nv).all()
     assert torch.isfinite(y_mx).all()
@@ -298,20 +294,20 @@ def test_nvfp4_grouped_gemm_boundary(M_multiplier, num_experts):
 
 # ---------------------------------------------------------------------------
 # Test 3 – focused recipe smoke for grouped-only knobs that are not covered by
-# the dense linear tests: grouped 2D-w, grouped PTS, grouped Hadamard, grouped
-# DGE, and their combination.
+# the dense linear tests: grouped 2D-w, grouped outer_scale, grouped Hadamard,
+# grouped DGE, and their combination.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("use_2dblock_x,use_2dblock_w,use_per_tensor_scale,use_hadamard,use_dge", [
+@pytest.mark.parametrize("use_2dblock_x,use_2dblock_w,use_outer_scale,use_hadamard,use_dge", [
     (False, False, False, False, False),  # plain baseline
     (False, True,  False, False, False),  # grouped weight 2D
-    (False, True,  True,  False, False),  # + PTS
+    (False, True,  True,  False, False),  # + outer_scale
     (False, True,  False, True,  False),  # + Hadamard
     (False, True,  False, False, True),   # + DGE
     (False, True,  False, True,  True),   # + Hadamard + DGE
 ])
 def test_nvfp4_grouped_gemm_recipe_variants_smoke(
-    use_2dblock_x, use_2dblock_w, use_per_tensor_scale, use_hadamard, use_dge,
+    use_2dblock_x, use_2dblock_w, use_outer_scale, use_hadamard, use_dge,
 ):
     """Grouped recipe variants should run end-to-end, produce finite outputs,
     and backprop finite gradients without silently falling back."""
@@ -332,7 +328,7 @@ def test_nvfp4_grouped_gemm_recipe_variants_smoke(
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=True,
-        use_per_tensor_scale=use_per_tensor_scale,
+        use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
     )
@@ -402,7 +398,7 @@ def test_nvfp4_grouped_gemm_single_expert_equals_linear():
     y_linear = _to_nvfp4_then_scaled_mm(
         x, w,
         use_2dblock_x=False, use_2dblock_w=False,
-        use_sr_grad=False, use_per_tensor_scale=False,
+        use_sr_grad=False, use_outer_scale=False,
     )
 
     # NVFP4 grouped GEMM: one expert, all tokens -> expert 0

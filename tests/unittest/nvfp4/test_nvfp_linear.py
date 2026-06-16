@@ -45,10 +45,10 @@ from .utils import prepare_data, calc_snr, calc_cossim
 @pytest.mark.parametrize("shape", [(128, 64), (4, 128, 64)])
 @pytest.mark.parametrize("axis", [-1, -2])
 @pytest.mark.parametrize("is_2d_block", [False, True])
-@pytest.mark.parametrize("use_per_tensor_scale", [False, True])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 @pytest.mark.parametrize("use_sr", [False, True])
 def test_nvfp4_qdq_roundtrip(
-    shape, axis, is_2d_block, use_per_tensor_scale, use_sr,
+    shape, axis, is_2d_block, use_outer_scale, use_sr,
 ):
     """Verify precision of a single NVFP4 quant -> dequant round-trip.
 
@@ -62,7 +62,7 @@ def test_nvfp4_qdq_roundtrip(
     x_qdq = _qdq(
         x, axis=axis,
         is_2d_block=is_2d_block,
-        use_per_tensor_scale=use_per_tensor_scale,
+        use_outer_scale=use_outer_scale,
         use_sr=use_sr,
     )
 
@@ -107,9 +107,10 @@ def test_nvfp4_qdq_roundtrip(
 @pytest.mark.parametrize("use_2dblock_x", [False, True])
 @pytest.mark.parametrize("use_2dblock_w", [False, True])
 @pytest.mark.parametrize("use_sr_grad", [False, True])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
 def test_nvfp4_linear_autograd_function(
-    shape, use_2dblock_x, use_2dblock_w, use_sr_grad, data_type,
+    shape, use_2dblock_x, use_2dblock_w, use_sr_grad, use_outer_scale, data_type,
 ):
     """Forward + dX + dW must match a BF16 nn.Linear reference in SNR.
 
@@ -131,17 +132,10 @@ def test_nvfp4_linear_autograd_function(
     grad_weights_ref = weights.grad.clone()
     inputs.grad.zero_(); weights.grad.zero_()
 
-    # NVFP4 QDQ path.  This is NOT a shared MXFP4/NVFP4 test; it is specific
-    # to NVFP4's autograd function.  We still keep
-    # ``use_per_tensor_scale=False`` here on purpose so the parity check stays
-    # focused on the shared 6-QDQ linear math (forward + dX + dW).  The
-    # tensor-wise scale path is exercised separately in the QDQ round-trip and
-    # quantization tests, where it can be isolated without broadening this
-    # matrix or coupling the SNR thresholds to an NVFP4-only knob.
     outputs = NVFP4LinearFunction.apply(
         inputs, weights,
         use_2dblock_x, use_2dblock_w, use_sr_grad,
-        False,  # use_per_tensor_scale
+        use_outer_scale,
     )
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
@@ -168,21 +162,22 @@ def test_nvfp4_linear_autograd_function(
         K=K,
         use_sr_grad=use_sr_grad,
         kind="nvfp4_linear",
+        use_outer_scale=use_outer_scale,
         context=(
             f"NVFP4Linear shape={shape} dtype={data_type} "
-            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w}"
+            f"x_2d={use_2dblock_x} w_2d={use_2dblock_w} outer={use_outer_scale}"
         ),
     )
 
 
 @pytest.mark.parametrize("shape,use_2dblock_x,use_2dblock_w", [
-    # Shared with both NVFP4 and MXFP4 linear-autograd test matrices.
     ((1, 512, 384, 128), False, False),
     ((1, 512, 384, 128), False, True),
     ((4, 1024, 1024, 2048), False, False),
 ])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 def test_nvfp4_linear_forward_compares_with_mxfp4_on_shared_cases(
-    shape, use_2dblock_x, use_2dblock_w,
+    shape, use_2dblock_x, use_2dblock_w, use_outer_scale,
 ):
     """NVFP4 and MXFP4 forward paths should both stay close to BF16 reference.
 
@@ -200,18 +195,16 @@ def test_nvfp4_linear_forward_compares_with_mxfp4_on_shared_cases(
     # "NVFP4 vs BF16" and "MXFP4 vs BF16", not "NVFP4 vs MXFP4".
     y_ref = torch.nn.functional.linear(x, w)
 
-    # Keep both recipes deliberately minimal and analogous: 1D block scales,
-    # deterministic rounding on the forward path, no clipping, no Hadamard,
-    # no DGE, no macro/outer scaling.  This keeps the test focused on whether
-    # each format family can run the same dense-linear shape and produce a
-    # finite output with reasonable forward error.
+    # Minimal forward config for both formats (1D blocks, RNE, no clip/Hadamard/
+    # DGE).  Intentional asymmetry: NVFP4 sweeps ``use_outer_scale`` to exercise
+    # its two-level FP32 scaling path; MXFP4 stays fixed (no macro-block).
     y_nv = _to_nvfp4_then_scaled_mm(
         x,
         w,
         use_2dblock_x=use_2dblock_x,
         use_2dblock_w=use_2dblock_w,
         use_sr_grad=False,
-        use_per_tensor_scale=False,
+        use_outer_scale=use_outer_scale,
     )
     y_mx = _to_mxfp4_then_scaled_mm(
         x,
@@ -227,14 +220,6 @@ def test_nvfp4_linear_forward_compares_with_mxfp4_on_shared_cases(
 
     nv_snr = calc_snr(y_ref, y_nv)
     mx_snr = calc_snr(y_ref, y_mx)
-    print()
-    print(tabulate(
-        [
-            ["NVFP4", f"{nv_snr:.2f}", f"{calc_cossim(y_ref, y_nv):.6f}"],
-            ["MXFP4", f"{mx_snr:.2f}", f"{calc_cossim(y_ref, y_mx):.6f}"],
-        ],
-        headers=["Format", "SNR", "Cosine Sim"], tablefmt="github",
-    ))
 
     assert torch.isfinite(y_nv).all()
     assert torch.isfinite(y_mx).all()
@@ -302,7 +287,7 @@ def test_nvfp4_linear_backward_handles_dtype_cross(x_dtype, w_dtype):
         False,  # use_2dblock_x
         False,  # use_2dblock_w
         False,  # use_sr_grad
-        False,  # use_per_tensor_scale
+        False,  # use_outer_scale
     )
     assert y.dtype == x_dtype
     y.sum().backward()

@@ -5,10 +5,10 @@
 import pytest
 import torch
 from alto.kernels.fp4.nvfp4.nvfp_quantization import (
-    _PTS_DIVZERO_FLOOR,
+    _OUTER_SCALE_DIVZERO_FLOOR,
     convert_to_nvfp4,
     convert_from_nvfp4,
-    compute_dynamic_per_tensor_scale,
+    compute_dynamic_outer_scale,
     is_cdna4,
 )
 
@@ -24,10 +24,10 @@ from .utils import (
 @pytest.mark.parametrize("is_2d_block", [False, True])
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_sr", [False, True])
-@pytest.mark.parametrize("use_per_tensor_scale", [False, True])
+@pytest.mark.parametrize("use_outer_scale", [False, True])
 @pytest.mark.parametrize("compile", [False])
 def test_nvfp4_quantization(tensor_shape, axis, is_2d_block, data_type,
-                            use_sr, use_per_tensor_scale, compile):
+                            use_sr, use_outer_scale, compile):
     block_size = 16
     device = torch.device("cuda")
 
@@ -40,26 +40,26 @@ def test_nvfp4_quantization(tensor_shape, axis, is_2d_block, data_type,
         quant_func = torch.ops.alto.convert_to_nvfp4
         dequant_func = torch.ops.alto.convert_from_nvfp4
 
-    if use_per_tensor_scale:
-        per_tensor_scale = torch.tensor([0.5], dtype=torch.float32, device=device)
+    if use_outer_scale:
+        outer_scale = torch.tensor([0.5], dtype=torch.float32, device=device)
     else:
-        per_tensor_scale = None
+        outer_scale = None
 
     x = prepare_data(tensor_shape, data_type)
 
     data_lp_ref, scales_ref = convert_to_nvfp4_pytorch(
         x, block_size=block_size, axis=axis, is_2d_block=is_2d_block,
-        per_tensor_scale=per_tensor_scale,
+        outer_scale=outer_scale,
     )
     x_dq_ref = convert_from_nvfp4_pytorch(
         data_lp_ref, scales_ref,
         output_dtype=data_type, block_size=block_size, axis=axis,
-        is_2d_block=is_2d_block, per_tensor_scale=per_tensor_scale,
+        is_2d_block=is_2d_block, outer_scale=outer_scale,
     )
 
     data_lp, scales = quant_func(
         x, block_size=block_size, axis=axis, is_2d_block=is_2d_block,
-        per_tensor_scale=per_tensor_scale, update_per_tensor_scale=False,
+        outer_scale=outer_scale, update_outer_scale=False,
         use_sr=use_sr,
     )
     # Both reference and kernel apply the same float32->float8_e4m3fn->float32
@@ -90,7 +90,7 @@ def test_nvfp4_quantization(tensor_shape, axis, is_2d_block, data_type,
     x_dq = dequant_func(
         data_lp, scales,
         output_dtype=data_type, block_size=block_size, axis=axis,
-        is_2d_block=is_2d_block, per_tensor_scale=per_tensor_scale,
+        is_2d_block=is_2d_block, outer_scale=outer_scale,
     )
 
     if not use_sr:
@@ -98,7 +98,7 @@ def test_nvfp4_quantization(tensor_shape, axis, is_2d_block, data_type,
             x_dq_cross = convert_from_nvfp4_pytorch(
                 data_lp, scales,
                 output_dtype=data_type, block_size=block_size, axis=axis,
-                is_2d_block=is_2d_block, per_tensor_scale=per_tensor_scale,
+                is_2d_block=is_2d_block, outer_scale=outer_scale,
             )
             assert torch.equal(x_dq_cross, x_dq), (
                 f"Dequant not bit-exact: "
@@ -115,30 +115,31 @@ def test_nvfp4_quantization(tensor_shape, axis, is_2d_block, data_type,
 @pytest.mark.parametrize("tensor_shape", [(128, 64), (2048, 2048)])
 @pytest.mark.parametrize("axis", [-1, -2])
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
-def test_nvfp4_dynamic_per_tensor_scale(tensor_shape, axis, data_type):
-    """Verify that ``update_per_tensor_scale=True`` refreshes the caller's
-    scale buffer in place, producing the same quantized output as explicitly
-    pre-computing the scale via :func:`compute_dynamic_per_tensor_scale`."""
+def test_nvfp4_dynamic_outer_scale(tensor_shape, axis, data_type):
+    """Verify that ``update_outer_scale=True`` refreshes the caller's scale
+    buffer in place, producing the same quantized output as explicitly
+    pre-computing the scale via :func:`compute_dynamic_outer_scale`."""
     block_size = 16
 
     x = prepare_data(tensor_shape, data_type)
 
     # Path 1: manual pre-compute, pass in, no update.
-    pts_manual = compute_dynamic_per_tensor_scale(x)
+    outer_scale_manual = compute_dynamic_outer_scale(x)
     data_lp_manual, scales_manual = convert_to_nvfp4(
         x, block_size=block_size, axis=axis,
-        per_tensor_scale=pts_manual, update_per_tensor_scale=False,
+        outer_scale=outer_scale_manual, update_outer_scale=False,
     )
 
     # Path 2: caller-owned buffer, dynamically refreshed in-place.
-    pts_dyn = torch.empty(1, dtype=torch.float32, device=x.device)
+    outer_scale_dyn = torch.empty(1, dtype=torch.float32, device=x.device)
     data_lp_dyn, scales_dyn = convert_to_nvfp4(
         x, block_size=block_size, axis=axis,
-        per_tensor_scale=pts_dyn, update_per_tensor_scale=True,
+        outer_scale=outer_scale_dyn, update_outer_scale=True,
     )
 
-    assert torch.equal(pts_manual, pts_dyn), (
-        f"Dynamic pts mismatch: {pts_manual.item()} vs {pts_dyn.item()}"
+    assert torch.equal(outer_scale_manual, outer_scale_dyn), (
+        f"Dynamic outer_scale mismatch: "
+        f"{outer_scale_manual.item()} vs {outer_scale_dyn.item()}"
     )
     assert torch.equal(data_lp_manual, data_lp_dyn)
     assert torch.equal(scales_manual, scales_dyn)
@@ -146,7 +147,7 @@ def test_nvfp4_dynamic_per_tensor_scale(tensor_shape, axis, data_type):
     x_dq = convert_from_nvfp4(
         data_lp_dyn, scales_dyn,
         output_dtype=data_type, block_size=block_size, axis=axis,
-        per_tensor_scale=pts_dyn,
+        outer_scale=outer_scale_dyn,
     )
     assert x_dq.shape == x.shape
     assert x_dq.dtype == data_type
@@ -154,7 +155,7 @@ def test_nvfp4_dynamic_per_tensor_scale(tensor_shape, axis, data_type):
     x_dq_ref = convert_from_nvfp4_pytorch(
         data_lp_dyn, scales_dyn,
         output_dtype=data_type, block_size=block_size, axis=axis,
-        per_tensor_scale=pts_dyn,
+        outer_scale=outer_scale_dyn,
     )
     is_hip = hasattr(torch.version, "hip") and torch.version.hip is not None
     if is_hip:
@@ -183,7 +184,7 @@ def test_nvfp4_special_values(tensor_shape, axis, data_type, pattern):
     )
 
     data_lp, scales = convert_to_nvfp4(
-        x, block_size=block_size, axis=axis, update_per_tensor_scale=False,
+        x, block_size=block_size, axis=axis, update_outer_scale=False,
     )
     assert torch.equal(scales_ref, scales), (
         f"Scale mismatch for pattern={pattern}: "
@@ -215,50 +216,51 @@ def test_nvfp4_special_values(tensor_shape, axis, data_type, pattern):
 
 
 @pytest.mark.parametrize("is_2d_block", [False, True])
-def test_nvfp4_zero_tensor_with_pts(is_2d_block):
-    """All-zero tensor on the PTS branch must round-trip to 0 with no
-    NaN/Inf, and the effective per-block divisor ``out_scale * pts`` must
-    stay in FP32 normal range.
+def test_nvfp4_zero_tensor_with_outer_scale(is_2d_block):
+    """All-zero tensor on the outer-scale branch must round-trip to 0 with
+    no NaN/Inf, and the effective per-block divisor
+    ``inner_scale * outer_scale`` must stay in FP32 normal range.
 
     Complements ``test_nvfp4_special_values["zeros"]`` which only covers
-    the non-PTS branch.
+    the non-outer-scale branch.
     """
     block_size = 16
     axis = -1
     data_type = torch.bfloat16
     x = prepare_data((128, 64), data_type, pattern="zeros")
 
-    pts_buf = torch.empty(1, dtype=torch.float32, device=x.device)
+    outer_scale_buf = torch.empty(1, dtype=torch.float32, device=x.device)
     data_lp, scales = convert_to_nvfp4(
         x, block_size=block_size, axis=axis, is_2d_block=is_2d_block,
-        per_tensor_scale=pts_buf, update_per_tensor_scale=True,
+        outer_scale=outer_scale_buf, update_outer_scale=True,
     )
 
-    expected_pts_fp32 = torch.tensor(
-        _PTS_DIVZERO_FLOOR, dtype=torch.float32
+    expected_floor_fp32 = torch.tensor(
+        _OUTER_SCALE_DIVZERO_FLOOR, dtype=torch.float32
     ).item()
-    pts = pts_buf.item()
-    assert pts == expected_pts_fp32, (
-        f"Zero-tensor PTS must be floored to _PTS_DIVZERO_FLOOR "
-        f"(FP32-rounded {expected_pts_fp32:.6e}), got {pts:.6e}"
+    outer_scale_value = outer_scale_buf.item()
+    assert outer_scale_value == expected_floor_fp32, (
+        f"Zero-tensor outer_scale must be floored to "
+        f"_OUTER_SCALE_DIVZERO_FLOOR (FP32-rounded {expected_floor_fp32:.6e}), "
+        f"got {outer_scale_value:.6e}"
     )
 
     fp32_min_normal = torch.finfo(torch.float32).tiny
-    eff_min = scales.min().item() * pts
+    eff_min = scales.min().item() * outer_scale_value
     assert eff_min >= fp32_min_normal, (
         f"Effective quant_scale ({eff_min:.6e}) fell into FP32 subnormal range; "
-        f"PTS_DIVZERO_FLOOR * E4M3_EPS would be flushed to zero under FTZ."
+        f"_OUTER_SCALE_DIVZERO_FLOOR * E4M3_EPS would be flushed to zero under FTZ."
     )
 
     x_dq = convert_from_nvfp4(
         data_lp, scales, output_dtype=data_type,
         block_size=block_size, axis=axis, is_2d_block=is_2d_block,
-        per_tensor_scale=pts_buf,
+        outer_scale=outer_scale_buf,
     )
     assert torch.isfinite(scales).all(), "stored block scale has NaN/Inf"
-    assert torch.isfinite(x_dq).all(), "PTS+zero dequant produced NaN/Inf"
-    assert (x_dq == 0).all(), "PTS+zero dequant must be exactly 0"
-    assert (data_lp == 0).all(), "PTS+zero packed FP4 must be all zero bins"
+    assert torch.isfinite(x_dq).all(), "outer_scale+zero dequant produced NaN/Inf"
+    assert (x_dq == 0).all(), "outer_scale+zero dequant must be exactly 0"
+    assert (data_lp == 0).all(), "outer_scale+zero packed FP4 must be all zero bins"
 
 
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
@@ -277,7 +279,7 @@ def test_nvfp4_non_aligned_m_no_nan_inf(data_type):
         block_size=16,
         axis=-1,
         is_2d_block=False,
-        update_per_tensor_scale=False,
+        update_outer_scale=False,
     )
     x_dq = convert_from_nvfp4(
         data_lp,

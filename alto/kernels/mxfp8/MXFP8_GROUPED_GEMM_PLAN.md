@@ -143,13 +143,11 @@ functional.py        # 暴露顶层入口
 **完成情况**：
 - `cg_forward.py` kernel body + wrapper 已实现。fp8 load 用 `other=0.0`；CDNA3 dequant 路径 `_dequantize_fp8` 一律传 `IS_2D_BLOCK=False`（scale 偏移已在 kernel 内展开为逐行 `[BLOCK, n_rep_k]`，与参考 `blockwise_mxfp8_gemm_kernel` 一致）。
 - wrapper 已补最小输入契约检查：`inputs`/`expert_weights` 维度、`expert_indices.numel() == M_total`、`M_total` 按 `ALIGN_SIZE_M` 对齐、`K % 32 == 0`、2D weight scale 的 `N % 32 == 0`、以及 input/weight scale shape 精确匹配。V1 仍不支持 padded buffer；如需支持，应像 mxfp4/nvfp4 一样显式区分 `M_bufferlen` 与 `M_total`。
-- wrapper 暴露了 `use_dot_scaled: Optional[bool] = None` 开关：`None` 时按设备自动选择（CDNA4→`tl.dot_scaled`，否则 dequant fallback），显式传 `False` 可在任意设备上强制走 CDNA3 dequant 路径用于测试。
-- 测试 `tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py` 共 **21 个**，主校验全部用 **dequant-then-matmul reference**（隔离 kernel 移植正确性 vs mxfp8 量化误差），cos-sim > 0.999 且 **SNR > 40 dB**（SNR 抓 cos-sim 看不到的幅度错误，如漏 scale / 错累加器），另加 bf16 宽松 sanity（> 0.99）：
-  - `test_forward`：2 shapes × 2D-block-x × 2D-block-w × `trans_weights` = 16 个正例。
-  - `test_forward_dequant_fallback_matches_dot_scaled`：强制 `use_dot_scaled=False`，无论运行设备都覆盖 `_dequantize_fp8 → tl.dot` 分支（真实 MI300 ground-truth 仍待 Step 7）。
-  - `test_forward_single_expert_matches_mxfp8_linear`：全部 token 路由到单 expert，与 `mxfp8_linear._to_mxfp8_then_scaled_mm` 交叉校验（SNR > 30 dB）。这是独立交叉验证——linear 路径用自己的 autograd Function 量化，能抓到 dequant-matmul reference 抓不到的量化 bug（后者与测试共用同一份 `convert_to_mxfp8` 输出，量化 bug 会两边同时错而仍通过）。
-  - 3 个负例：`expert_indices` 长度不匹配、`M_total` 未对齐 `ALIGN_SIZE_M`、`weight_scales` shape 错误。
-- 2026-06-02 在 `friendly_elgamal` 容器中验证：`is_cdna4()=True`，forward 默认走 **CDNA4 `tl.dot_scaled`** 路径。CDNA3 dequant 分支已由 `use_dot_scaled=False` 测试在 CI 中强制覆盖；真实 CDNA3/MI300 硬件 ground-truth 已于 2026-06-09 在 MI300X 复验（见 §6 验证记录）。
+- wrapper 暴露了 `use_dot_scaled: Optional[bool] = None` 开关：`None` 时按设备自动选择（CDNA4→`tl.dot_scaled`，否则 dequant fallback），显式传 `False` 可在任意设备上强制走 CDNA3 dequant 路径。
+- 测试见单文件 `tests/unittest/mxfp8/test_mxfp8_grouped_gemm.py` 的 forward section（2026-06-16 重构，详见 §6）。forward 主校验用 **dequant-then-matmul reference**（隔离 kernel 移植正确性 vs mxfp8 量化误差），cos-sim > 0.999 且 **SNR > 40 dB**，另加 bf16 宽松 sanity（> 0.99）：
+  - `test_forward`：2 shapes × 2D-block-x × 2D-block-w × `trans_weights` = 16 个正例。`use_dot_scaled` 不再做测试参数——走哪条路由底层 `is_cdna4()` 自动决定（对齐 linear/quantization 的做法），CDNA3 跑 fallback、CDNA4 跑 native，无需人为强制。
+  - `test_forward_single_expert_matches_mxfp8_linear`：全部 token 路由到单 expert，与 `mxfp8_linear._to_mxfp8_then_scaled_mm` 交叉校验（SNR > 30 dB）。独立交叉验证——linear 路径用自己的 autograd Function 量化，能抓 dequant-matmul reference 抓不到的量化 bug。
+- 2026-06-02 在 `friendly_elgamal` 容器中验证：`is_cdna4()=True`，forward 默认走 **CDNA4 `tl.dot_scaled`** 路径。真实 CDNA3/MI300 硬件 ground-truth 已于 2026-06-09 在 MI300X 复验（见 §6 验证记录）。
 
 ### Step 3 — Backward dgrad kernel ✅ 已完成
 基于 `mxfp4/cg_backward.py` 的 `_kernel_mxfp4_grouped_gemm_backward_dx`：
@@ -190,25 +188,34 @@ functional.py        # 暴露顶层入口
 
 ### Step 6 — 数值正确性测试 ⏳ 部分完成
 测试位置在 `tests/unittest/mxfp8/`：
-1. `test_mxfp8_grouped_gemm_forward.py`（**21 tests**）：见 Step 2 清单。
-2. `test_mxfp8_grouped_gemm_backward.py`（**31 tests**）：用 dequant-then-matmul reference（先 `convert_to_mxfp8`，再用 `convert_from_mxfp8_pytorch` 回 fp32，然后走 PyTorch 原生 GEMM）校验 dgrad/wgrad，并加 cos-sim > 0.999 + SNR > 40 dB 双重门槛；另覆盖 autograd 端到端 forward + backward。详见下方覆盖清单。
-3. `repro_mxfp8_dot_scaled.py` + `repro_mxfp8_dot_scaled.md`（见 §5 风险 2）：独立复现脚本，用一个最小 `tl.dot_scaled` kernel 对比 `convert_from_mxfp8(a) @ convert_from_mxfp8(b)`，验证「单次 `dot_scaled` 跨多个 32-wide scale group 会发散」这一约束。四个 case：`DOT_K=32` baseline、`DOT_K=32` over K=128 safe path、`DOT_K=64`（跨 2 group）与 `DOT_K=128`（跨 4 group）problem path，输入用 outlier-heavy 的 32-wide K block 放大 scale 差异，打印 `max_diff`/`mean_diff`/`relative_max_diff` 与 problem-vs-safe 的 mean_diff 比值。需在 CDNA4 环境手动运行（非 pytest 自动收集）。
-4. `test_e2e_moe.py`：toy MoE layer + optimizer step 仍未实现，设计与跟进见 §7。
+1. `test_mxfp8_grouped_gemm.py`（**52 tests**）：forward + autograd + dispatch 三段合一（2026-06-16 把原 forward/backward 两文件合并，对齐 mxfp4/nvfp4 的单文件结构）。详见下方覆盖清单。
+2. `repro_mxfp8_dot_scaled.py` + `repro_mxfp8_dot_scaled.md`（见 §5 风险 2）：独立复现脚本，用一个最小 `tl.dot_scaled` kernel 对比 `convert_from_mxfp8(a) @ convert_from_mxfp8(b)`，验证「单次 `dot_scaled` 跨多个 32-wide scale group 会发散」这一约束。四个 case：`DOT_K=32` baseline、`DOT_K=32` over K=128 safe path、`DOT_K=64`（跨 2 group）与 `DOT_K=128`（跨 4 group）problem path，输入用 outlier-heavy 的 32-wide K block 放大 scale 差异，打印 `max_diff`/`mean_diff`/`relative_max_diff` 与 problem-vs-safe 的 mean_diff 比值。需在 CDNA4 环境手动运行（非 pytest 自动收集）。
+3. `test_e2e_moe.py`（**2 tests**）：toy MoE 多步训练收敛 sanity（见 §7），独立文件——它测的是「多步训练不发散」，与上面的单步数值正确性正交，故不并入主文件。
 
-**backward 测试覆盖清单**：
-- `test_backward_inputs_matches_dequant_reference`：dgrad，`trans_weights` × 2D GO × 2D W × `use_dot_scaled∈{None, False}` = 16 个正例。
-- `test_backward_weights_matches_dequant_reference`：wgrad，`trans_weights` × 2D X × `use_dot_scaled∈{None, False}` = 8 个正例。
-- `test_mxfp8_grouped_gemm_autograd`：autograd 端到端，`trans_weights=True` 下 2D X/W 四种组合。
-- `test_mxfp8_grouped_gemm_autograd_trans_weights_false`：`trans_weights=False` 的 1D 路径（shape `(384,256,128,2)`）。
-- `test_backward_wrappers_reject_non_aligned_mtotal`：两个 backward wrapper 在 `M_total` 未对齐 `ALIGN_SIZE_M` 时 fail-fast 的负例。
-- `test_autograd_many_experts_with_empty_expert`：experts(8) > groups(2)，部分 expert 收到零 token，校验空 expert 的 `dW` 严格为 0、被路由 expert 的 `dW` 非零、且全程梯度有限，覆盖 wgrad「扫所有 group 判等」调度的空 expert 分支。
-- 其中 `use_dot_scaled=False` 的参数化在 CI 中强制覆盖了 CDNA3 `_dequantize_fp8 → tl.dot` fallback（任意设备可跑）。
+**`test_mxfp8_grouped_gemm.py` 覆盖清单**（2026-06-16 重构后）：
+
+forward section（kernel 级，喂预量化 fp8）：
+- `test_forward`：2 shapes × 2D-block-x × 2D-block-w × `trans_weights` = 16 个正例，dequant-then-matmul reference，cos-sim > 0.999 + SNR > 40 dB，另加 bf16 sanity > 0.99。
+- `test_forward_single_expert_matches_mxfp8_linear`：单 expert 与 mxfp8 linear 交叉校验（SNR > 30 dB）。
+
+autograd section（op 级，走用户入口 `mxfp8_grouped_gemm` 的真实 fwd+bwd）：
+- `test_mxfp8_grouped_gemm_autograd`：O/dX/dW 同测，对标 mxfp4/nvfp4 的 autograd 测试。网格 4 shapes（含大 K=2048、N≠K 非方阵）× `trans_weights` × 2D X × 2D W = **32 个正例**。vs BF16 autograd reference，SNR 门 **O>20 / dX>15 / dW>15 dB**（实测最小 O≈24.9、dX/dW≈19.0，留 4–5 dB 裕度），cossim>0.99 做方向兜底。**这一个 autograd 测试取代了原先分开的 dgrad/wgrad kernel-wrapper 单测**——用户入口内部量化，kernel 的 dgrad/wgrad 通过真实 backprop 被覆盖（与 mxfp4/nvfp4 的做法一致，它们也不单测 dgrad/wgrad）。
+- `test_autograd_many_experts_with_empty_expert`：experts(8) > groups(2)，部分 expert 零 token，校验空 expert `dW` 严格为 0、被路由 expert `dW` 非零、全程梯度有限，覆盖 wgrad「扫所有 group 判等」的空 expert 分支。
+
+dispatch section（offsets 入口 + padded buffer，对应 nvfp4 的 Test 6/7）：
+- `test_mxfp8_grouped_gemm_accepts_padded_buffer`：padded-vs-unpadded 自比（见 §8.1）。
+- `test_mxfp8_dispatch_entry_offsets_matches_indices`：offsets 入口与 indices 路径等价（SNR > 30 dB），验 `create_indices_from_offsets_nosync` round-trip。
+
+2026-06-16 重构的其它精简（功能等价，覆盖不降）：
+- `use_dot_scaled` 不再作为测试参数：CDNA3 上 `None` 与 `False` 解析到同一条 fallback，正交参数化只是把网格翻倍而零新增覆盖。改为底层 `is_cdna4()` 自动选路（对齐 linear/quantization）。
+- 删除 kernel 级入口契约负例（非对齐 `M_total`、错误 scale shape 的 reject 测试）：这些是 kernel 入口断言，mxfp4/nvfp4 在 op 级也不单测，正确性主测试已足够。
+- `make_indices`、`calc_snr`/`calc_cossim` 统一到 `mxfp8/utils.py` 共享（对齐 fp4 的随机 routing 约定 + 单一真源 `alto.kernels.fp4.testing_utils`）。
 
 **验证记录**：
-- 2026-06-05 在 `cranky_shockley` 容器（`wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`）中验证 backward，彼时 **17 passed**；之后扩充 `use_dot_scaled` 参数化与空 expert / 对齐负例。
-- 2026-06-09 在 MI300X（CDNA3）上重跑 forward + backward：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` 结果为 **52 passed（21 forward + 31 backward）, 14 warnings in 20.74s**。
-- 2026-06-10 在 MI355X（CDNA4 / m355）`gracious_lovelace` 容器（`wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`）中重跑 forward + backward：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` 结果为 **52 passed（21 forward + 31 backward）, 14 warnings in 18.51s**。环境确认：PyTorch `2.12.0a0+git78d5fb4`，`is_cdna4=True`。结论：m355 默认 `tl.dot_scaled` 路径的 grouped GEMM fwd / dgrad / wgrad 数值单测已通过。
-- 仍需补 toy MoE 训练 sanity；`use_dot_scaled=False` fallback 已在 CI 强制覆盖，CDNA4/m355 默认 `tl.dot_scaled` 路径已通过上述 52 个 grouped GEMM 单测。
+- 2026-06-05 在 `cranky_shockley` 容器（`wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`）中验证 backward，彼时 **17 passed**。
+- 2026-06-09 在 MI300X（CDNA3）重跑（重构前）：forward + backward **52 passed（21 forward + 31 backward）**。
+- 2026-06-10 在 MI355X（CDNA4 / m355）`gracious_lovelace` 容器重跑（重构前）：forward + backward **52 passed**。环境：PyTorch `2.12.0a0+git78d5fb4`，`is_cdna4=True`。结论：m355 默认 `tl.dot_scaled` 路径的 fwd / dgrad / wgrad 数值单测通过。
+- 2026-06-16 在 MI300X（CDNA3）上完成测试重构（合并两文件 + 上述精简）并复跑：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm.py tests/unittest/mxfp8/test_e2e_moe.py -q` → **54 passed**（52 grouped GEMM + 2 e2e）。CDNA4 默认 `tl.dot_scaled` 路径的数值正确性已由 2026-06-10 记录覆盖；本次重构 device-agnostic（仅测试组织变化，kernel 零改动）。
 
 ### Step 7 — MI300 fallback 验证 ✅ 已完成
 仅切 `USE_DOT_SCALED=False` 路径重跑 Step 6，确保 CDNA3 上数值与 CDNA4 一致（dequant + fp32 dot 是 ground truth）。
@@ -260,11 +267,11 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
 
 4. **`MXFP8GroupedGEMM` autograd**：结构无需改（已用 bufferlen 张量 + ctx 透传 indices）；仅需确认 M 轴量化 `convert_to_mxfp8(..., axis=0)` 在 bufferlen buffer 上成立（要求 `M_bufferlen % 32 == 0`，由新断言保证）。
 
-5. **测试**（`test_mxfp8_grouped_gemm_backward.py`）：新增 `test_mxfp8_grouped_gemm_accepts_padded_buffer`，采 **padded-vs-unpadded 自比**（最强校验，闭环证明 padding 零干扰）。**关键：固定 `use_sr_grad=False`** 使量化确定性，否则随机舍入令 `torch.equal` 偶发失败；routed 行两次跑应逐位相等。断言：`y_pad.shape==(M_bufferlen,N)`、`y_pad[M_routed:]` 全 0、`y_pad[:M_routed]==y_ref`、`inputs_pad.grad[M_routed:]` 全 0、`inputs_pad.grad[:M_routed]==inputs_ref.grad`、`w_pad.grad==w_ref.grad`；另加 offsets 入口 smoke test。
+5. **测试**（当时在 `test_mxfp8_grouped_gemm_backward.py`，2026-06-16 已合并入 `test_mxfp8_grouped_gemm.py`）：新增 `test_mxfp8_grouped_gemm_accepts_padded_buffer`，采 **padded-vs-unpadded 自比**（最强校验，闭环证明 padding 零干扰）。**关键：固定 `use_sr_grad=False`** 使量化确定性，否则随机舍入令 `torch.equal` 偶发失败；routed 行两次跑应逐位相等。断言：`y_pad.shape==(M_bufferlen,N)`、`y_pad[M_routed:]` 全 0、`y_pad[:M_routed]==y_ref`、`inputs_pad.grad[M_routed:]` 全 0、`inputs_pad.grad[:M_routed]==inputs_ref.grad`、`w_pad.grad==w_ref.grad`；另加 offsets 入口 smoke test。
 
 5b. **smoke test**：另加 `test_mxfp8_dispatch_entry_offsets_matches_indices`——同一路由下 offsets 入口与 indices 路径输出 SNR > 30 dB，验证 `create_indices_from_offsets_nosync` round-trip 正确。
 
-**验证记录**（2026-06-10，MI300X / CDNA3）：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` → **54 passed**（52 原有不回归 + 2 新增：padded-buffer 自比、offsets smoke）。padded-buffer 测试的 `y_pad.shape==(M_bufferlen,N)` 断言本身即负控——若 wrapper 仍按 `[M_total,N]` 分配则该断言失败，证明确实触发 padding 路径。本改动 device-agnostic（只动 wrapper/入口，Triton kernel 零改动）；CDNA4/m355 路试已于 2026-06-10 通过（见 §6 验证记录）。
+**验证记录**（2026-06-10，MI300X / CDNA3，文件合并前）：`python -m pytest tests/unittest/mxfp8/test_mxfp8_grouped_gemm_forward.py tests/unittest/mxfp8/test_mxfp8_grouped_gemm_backward.py -q` → **54 passed**（52 原有不回归 + 2 新增：padded-buffer 自比、offsets smoke）。padded-buffer 测试的 `y_pad.shape==(M_bufferlen,N)` 断言本身即负控——若 wrapper 仍按 `[M_total,N]` 分配则该断言失败，证明确实触发 padding 路径。本改动 device-agnostic（只动 wrapper/入口，Triton kernel 零改动）；CDNA4/m355 路试已于 2026-06-10 通过（见 §6 验证记录）。
 
 **后续（已于同日完成）**：dispatch `__torch_function__` subclass wiring（`alto/kernels/dispatch/tensor.py`，即 §8「接入形态对齐」）当时列为后续 PR，已于 2026-06-10 一并实施，见 §8.2。
 
@@ -279,7 +286,7 @@ V1「最小可用 kernel」在**算子数值正确性**这层基本达标（三 
 **验证记录**（2026-06-10，MI300X / CDNA3）：
 - 端到端 dispatch smoke：包一个 `MXFP8TrainingWeightWrapperTensor` 权重 `[E,K,N]`，`torch._grouped_mm(A, B, offs=[128,256,384,512])` → forward `(512,256)` finite、`.sum().backward()` 后 `A.grad` finite。
 - 边界：`mxfp8_e5m2` 与 `use_hadamard=True` 均被正确 `AssertionError` 拒绝。
-- 回归：`test_mxfp8_grouped_gemm_forward.py` + `_backward.py` **54 passed** 无回归。
+- 回归：`test_mxfp8_grouped_gemm_forward.py` + `_backward.py` **54 passed** 无回归（两文件 2026-06-16 已合并为 `test_mxfp8_grouped_gemm.py`，见 §6）。
 
 **接 GPT-OSS：无需再写代码，只改 recipe 配置。** `alto/models/gpt_oss/configs/lpt_recipe.yaml`（当前为 mxfp4）改成最小 e4m3 V1 需动 3 行（其余保持）：
 

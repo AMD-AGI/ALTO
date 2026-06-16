@@ -16,15 +16,7 @@ import torch
 from alto.kernels.mxfp8.mxfp8_grouped_gemm import mxfp8_grouped_gemm
 from alto.kernels.mxfp8.mxfp8_grouped_gemm.autotune import ALIGN_SIZE_M
 
-from .utils import prepare_data
-
-
-def _make_indices(num_groups, num_experts, device):
-    """Contiguous routing: group g -> expert (g % num_experts), aligned to ALIGN_SIZE_M."""
-    indices = torch.empty(num_groups * ALIGN_SIZE_M, dtype=torch.int32, device=device)
-    for g in range(num_groups):
-        indices[g * ALIGN_SIZE_M:(g + 1) * ALIGN_SIZE_M] = g % num_experts
-    return indices
+from .utils import prepare_data, make_indices
 
 
 def _bf16_grouped_matmul(inputs, expert_weights, indices):
@@ -68,7 +60,7 @@ def test_toy_moe_trains_and_tracks_bf16(num_experts):
     inputs = prepare_data((m_total, k_dim), dtype)
     target = prepare_data((m_total, n_dim), dtype)
     w_init = prepare_data((num_experts, n_dim, k_dim), dtype) * 0.1
-    indices = _make_indices(num_groups, num_experts, device)
+    indices = make_indices(num_groups, num_experts, device)
 
     mxfp8_losses = _train(
         lambda x, w, idx: mxfp8_grouped_gemm(x, w, idx, trans_weights=True),

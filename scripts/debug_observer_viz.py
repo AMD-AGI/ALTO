@@ -166,7 +166,12 @@ def plot_layer(
 
     # Remap baseline step numbers to match the run's step numbers by ordinal
     # position, so overlays work even when step counters differ between runs.
-    aligned_baseline = _align_baseline(layer_data, baseline_data) if baseline_data is not None else None
+    if baseline_data is not None:
+        aligned_baseline = _align_baseline(layer_data, baseline_data)
+        base_steps_found = sorted(s for s in aligned_baseline if isinstance(s, int))
+        print(f"  [debug] {fqn}: aligned baseline has {len(base_steps_found)} steps: {base_steps_found[:3]}...")
+    else:
+        aligned_baseline = None
 
     tensor_keys = sorted({
         k for step, tensors in layer_data.items()

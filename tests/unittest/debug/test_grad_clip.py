@@ -250,9 +250,14 @@ class TestGradientClippingModifierLifecycle:
             if isinstance(module, nn.Linear):
                 assert registry.get(id(module)) is not None
 
-    def test_initialize_sets_module_id_on_wrapped_weight(self, GradientClippingModifier):
-        """If the weight has a module_id attribute (simulating a wrapped tensor),
-        it should be set to id(module) after initialize."""
+    def test_forward_pre_hook_stamps_module_id(self, GradientClippingModifier):
+        """The forward_pre_hook must stamp module_id on the weight each forward.
+
+        At initialize time module_id is NOT set (FSDP drops instance attrs on
+        each all-gather). Instead, a forward_pre_hook re-stamps it before
+        __torch_function__ is called. Simulate that by running a forward pass
+        with a wrapped weight that has module_id=None before the hook fires.
+        """
 
         class _WrappedParam(nn.Parameter):
             module_id: int | None = None
@@ -261,8 +266,15 @@ class TestGradientClippingModifierLifecycle:
         stub = _WrappedParam(model.fc1.weight.data)
         stub.module_id = None
         model.fc1.weight = stub
+
         mod = self._make_modifier(GradientClippingModifier)
         mod.initialize([model])
+
+        # module_id is still None at this point — that's expected.
+        assert stub.module_id is None
+
+        # Trigger one forward pass; the pre-hook should stamp module_id.
+        model(torch.randn(2, 8))
         assert stub.module_id == id(model.fc1)
 
     def test_finalize_deregisters_all(self, GradientClippingModifier, registry):
@@ -273,6 +285,7 @@ class TestGradientClippingModifierLifecycle:
         mod.finalize([model])
         for mid in ids_before:
             assert registry.get(mid) is None
+        assert len(mod._hook_handles) == 0
 
 
 # ---------------------------------------------------------------------------

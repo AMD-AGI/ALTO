@@ -39,6 +39,7 @@ class GradientClippingModifier(Modifier):
     grad_weight_clip_value: Optional[float] = None
 
     _registered_ids: list[int] = PrivateAttr(default_factory=list)
+    _hook_handles: list = PrivateAttr(default_factory=list)
 
     def on_convert(self, model, **kwargs) -> bool:
         return True
@@ -57,13 +58,26 @@ class GradientClippingModifier(Modifier):
                 mid = id(module)
                 grad_clip_registry.register(mid, cfg)
                 self._registered_ids.append(mid)
-                # Wire the module_id onto the wrapped weight tensor so that
-                # MXFP4LinearFunction.backward can look up cfg via the registry.
-                if hasattr(module, "weight") and hasattr(module.weight, "module_id"):
-                    module.weight.module_id = mid
+
+                # FSDP's fsdp_post_all_gather rebuilds the weight tensor as a
+                # new object each forward pass, dropping any instance attribute
+                # set at initialize time. Register a forward_pre_hook instead:
+                # it fires after the all-gather so the freshly reconstructed
+                # weight tensor is already in place, and we re-stamp module_id
+                # before __torch_function__ is called.
+                def _stamp_module_id(mod, _args, _mid=mid):
+                    w = mod.weight
+                    if hasattr(w, "module_id"):
+                        w.module_id = _mid
+
+                handle = module.register_forward_pre_hook(_stamp_module_id)
+                self._hook_handles.append(handle)
         return True
 
     def on_finalize(self, model_parts: list[nn.Module], **kwargs) -> bool:
+        for handle in self._hook_handles:
+            handle.remove()
+        self._hook_handles.clear()
         for mid in self._registered_ids:
             grad_clip_registry.deregister(mid)
         self._registered_ids.clear()

@@ -24,6 +24,7 @@ __all__ = [
     "gpt_oss_20b_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_obs_lpt",
+    "gpt_oss_debugmodel_grad_clip_lpt_no_fsdp",
 ]
 
 
@@ -166,6 +167,15 @@ def gpt_oss_debugmodel_grad_clip_lpt() -> Trainer.Config:
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/grad_clip_lpt_recipe.yaml",),
     ],)
+    return config
+
+
+def gpt_oss_debugmodel_grad_clip_lpt_no_fsdp() -> Trainer.Config:
+    """Debugmodel + MXFP4 + gradient clipping, FSDP disabled. Single GPU,
+    no weight sharding — used to isolate whether FSDP is preventing the clip
+    from firing."""
+    config = gpt_oss_debugmodel_grad_clip_lpt()
+    config.parallelism.data_parallel_shard_degree = 1
     return config
 
 

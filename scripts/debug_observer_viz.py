@@ -236,6 +236,34 @@ def plot_layer(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _match_baseline_fqn(fqn: str, baseline_layers: dict) -> Optional[dict]:
+    """Look up baseline data for a given FQN.
+
+    Tries exact match first, then falls back to matching by the longest common
+    suffix so that FQN differences caused by wrapper modules (e.g. FSDP shards
+    or LPT submodule renaming) don't break the overlay.
+    """
+    if fqn in baseline_layers:
+        return baseline_layers[fqn]
+    # suffix match: find the baseline FQN whose suffix best matches
+    best_fqn, best_len = None, 0
+    for bfqn in baseline_layers:
+        # find longest common suffix component-by-component
+        fqn_parts = fqn.split(".")
+        bfqn_parts = bfqn.split(".")
+        common = 0
+        for a, b in zip(reversed(fqn_parts), reversed(bfqn_parts)):
+            if a == b:
+                common += 1
+            else:
+                break
+        if common > best_len:
+            best_len, best_fqn = common, bfqn
+    if best_len >= 2:  # require at least 2 matching suffix components
+        return baseline_layers[best_fqn]
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize DebugObserverModifier dumps")
     parser.add_argument("--dump", required=True, help="Path to the .pt dump file")
@@ -243,10 +271,25 @@ def main() -> None:
     parser.add_argument("--out-dir", default="./viz", help="Directory to write PNG files")
     parser.add_argument("--layer-regex", default=None, help="Regex to filter layer FQNs")
     parser.add_argument("--summary-only", action="store_true", help="Print summary, skip plotting")
+    parser.add_argument("--debug-fqns", action="store_true",
+                        help="Print FQNs from both dumps and their matches, then exit")
     args = parser.parse_args()
 
     layers, meta = load_dump(args.dump)
-    baseline_layers, _ = load_dump(args.baseline) if args.baseline else ({}, {})
+    baseline_layers, baseline_meta = load_dump(args.baseline) if args.baseline else ({}, {})
+
+    if args.debug_fqns:
+        print(f"\n=== FQNs in dump ({len(layers)}) ===")
+        for fqn in sorted(layers):
+            matched = _match_baseline_fqn(fqn, baseline_layers)
+            tag = "[matched]" if matched is not None else "[NO MATCH]"
+            print(f"  {tag}  {fqn}")
+        print(f"\n=== FQNs in baseline ({len(baseline_layers)}) ===")
+        for fqn in sorted(baseline_layers):
+            print(f"  {fqn}")
+        print(f"\ndump steps:     {meta.get('iterations_captured', [])}")
+        print(f"baseline steps: {baseline_meta.get('iterations_captured', [])}")
+        return
 
     if args.layer_regex:
         pat = re.compile(args.layer_regex)
@@ -262,7 +305,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for fqn, layer_data in sorted(layers.items()):
         print(f"Plotting {fqn} ...", end=" ", flush=True)
-        plot_layer(fqn, layer_data, out_dir, baseline_data=baseline_layers.get(fqn))
+        baseline_data = _match_baseline_fqn(fqn, baseline_layers)
+        plot_layer(fqn, layer_data, out_dir, baseline_data=baseline_data)
         print("done")
 
     print(f"\nPlots written to {out_dir}")

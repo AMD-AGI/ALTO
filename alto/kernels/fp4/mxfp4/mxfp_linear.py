@@ -19,6 +19,7 @@ import triton
 import triton.language as tl
 
 from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
+from alto.kernels.fp4.fp4_common.grad_clip_registry import apply_clip, get as get_grad_clip_cfg
 from alto.kernels.hadamard_transform import (HadamardTransform, HadamardFactory)
 from alto.kernels.dge import dge_bwd
 from .mxfp_quantization import (
@@ -274,6 +275,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         clip_mode,
         use_macro_block_scaling,
         hadamard_transform: Optional[HadamardTransform] = None,
+        module_id: Optional[int] = None,
     ):
         """
         Forward pass for the blockwise FP8 linear operation.
@@ -412,6 +414,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         ctx.use_dge = use_dge
         ctx.clip_mode = clip_mode
         ctx.use_macro_block_scaling = use_macro_block_scaling
+        ctx.module_id = module_id
 
         return y.view(*original_shape[:-1], -1)  # Reshape back to original
 
@@ -424,6 +427,12 @@ class MXFP4LinearFunction(torch.autograd.Function):
         # x_dq / w_dq (which were cast to ctx.original_dtype in forward). Use the dtype
         # committed by forward to keep the non-CDNA4 matmul below well-typed.
         original_dtype = ctx.original_dtype
+
+        # Site ①: clip grad_output before it enters the quantizer.
+        _clip_cfg = get_grad_clip_cfg(ctx.module_id)
+        if _clip_cfg is not None and _clip_cfg.clip_grad_output:
+            grad_output = apply_clip(grad_output, _clip_cfg.grad_output_max_norm,
+                                     _clip_cfg.grad_output_clip_value)
 
         if is_cdna4():
             inputs_mxfp4, input_scales, weight_mxfp4, weight_scales, x_mbs, w_mbs = ctx.saved_tensors
@@ -541,6 +550,11 @@ class MXFP4LinearFunction(torch.autograd.Function):
             grad_inputs = grad_output_dq @ w_dq
             grad_weights = grad_output_m_dq.T @ x_dq
 
+        # Site ②: clip grad_weights after the wgrad GEMM, before optimizer sees it.
+        if _clip_cfg is not None and _clip_cfg.clip_grad_weight:
+            grad_weights = apply_clip(grad_weights, _clip_cfg.grad_weight_max_norm,
+                                      _clip_cfg.grad_weight_clip_value)
+
         if ctx.use_dge:
             if ctx.use_2dblock_w:
                 scale_shape = [
@@ -562,7 +576,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
-        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None
+        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None, None
 
 
 def _to_mxfp4_then_scaled_mm(
@@ -575,6 +589,7 @@ def _to_mxfp4_then_scaled_mm(
     clip_mode: str,
     use_hadamard: bool,
     use_macro_block_scaling: bool = False,
+    module_id: Optional[int] = None,
 ) -> torch.Tensor:
     if use_hadamard:
         with torch.no_grad():
@@ -591,5 +606,6 @@ def _to_mxfp4_then_scaled_mm(
         clip_mode,
         use_macro_block_scaling,
         hadamard_transform,
+        module_id,
     )
     return y

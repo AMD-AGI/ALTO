@@ -211,6 +211,10 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
     based on the training config.
     """
 
+    # Set by GradientClippingModifier.on_initialize to wire this tensor back to
+    # its owning module so the backward pass can look up clipping config.
+    module_id: int | None = None
+
     @classmethod
     def __torch_function__(cls, func, types, args, kwargs={}):
         # grouped_mm op override
@@ -283,6 +287,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 clip_mode=config.clip_mode,
                 use_hadamard=config.use_hadamard,
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                module_id=getattr(B, "module_id", None),
             )
             if bias is not None:
                 Y = Y + bias

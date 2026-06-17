@@ -20,7 +20,10 @@ __all__ = [
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_pretrain_c4",
-    "gpt_oss_20b_lpt_c4"
+    "gpt_oss_20b_lpt_c4",
+    "gpt_oss_20b_grad_clip_lpt",
+    "gpt_oss_debugmodel_grad_clip_lpt",
+    "gpt_oss_debugmodel_grad_clip_obs_lpt",
 ]
 
 

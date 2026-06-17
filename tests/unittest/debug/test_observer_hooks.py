@@ -113,48 +113,37 @@ class TestLinearBwdHook:
         captures = _make_captures(fqn)
         step_ref = _step_ref(3)
         module = nn.Linear(4, 4, bias=False)
-        hook = hooks.make_linear_bwd_hook(captures, fqn, step_ref, capture_grad_output=True)
+        hook = hooks.make_linear_bwd_hook(
+            captures, fqn, step_ref, capture_grad_output=True, capture_grad_weight=False
+        )
         go = torch.randn(2, 4)
         hook(module, (None,), (go,))
         assert "grad_output" in captures[fqn][3]
         assert torch.allclose(captures[fqn][3]["grad_output"], go.detach().cpu())
+
+    def test_captures_grad_weight_from_grad_input(self, hooks):
+        fqn = "layers.0"
+        captures = _make_captures(fqn)
+        step_ref = _step_ref(3)
+        module = nn.Linear(4, 4, bias=False)
+        hook = hooks.make_linear_bwd_hook(
+            captures, fqn, step_ref, capture_grad_output=False, capture_grad_weight=True
+        )
+        gw = torch.randn(4, 4)
+        # grad_input = (grad_x, grad_weight) — mirrors what autograd.Function.backward returns
+        hook(module, (torch.randn(2, 4), gw), (torch.randn(2, 4),))
+        assert "grad_weight" in captures[fqn][3]
+        assert torch.allclose(captures[fqn][3]["grad_weight"], gw.detach().cpu())
 
     def test_inactive_gate_bwd(self, hooks):
         fqn = "l"
         captures = _make_captures(fqn, active=False)
         step_ref = _step_ref(0)
         module = nn.Linear(4, 4, bias=False)
-        hook = hooks.make_linear_bwd_hook(captures, fqn, step_ref, capture_grad_output=True)
-        hook(module, (None,), (torch.randn(2, 4),))
-        assert 0 not in captures[fqn]
-
-
-# ---------------------------------------------------------------------------
-# nn.Linear param grad hook
-# ---------------------------------------------------------------------------
-
-class TestLinearGradWeightHook:
-
-    def test_captures_grad_weight(self, hooks):
-        fqn = "linear"
-        captures = _make_captures(fqn)
-        step_ref = _step_ref(5)
-        hook_fn = hooks.make_linear_grad_weight_hook(
-            captures, fqn, step_ref, capture_grad_weight=True
+        hook = hooks.make_linear_bwd_hook(
+            captures, fqn, step_ref, capture_grad_output=True, capture_grad_weight=True
         )
-        gw = torch.randn(4, 4)
-        hook_fn(gw)
-        assert "grad_weight" in captures[fqn][5]
-        assert torch.allclose(captures[fqn][5]["grad_weight"], gw.detach().cpu())
-
-    def test_inactive_gate_grad_weight(self, hooks):
-        fqn = "l"
-        captures = _make_captures(fqn, active=False)
-        step_ref = _step_ref(0)
-        hook_fn = hooks.make_linear_grad_weight_hook(
-            captures, fqn, step_ref, capture_grad_weight=True
-        )
-        hook_fn(torch.randn(4, 4))
+        hook(module, (None, torch.randn(4, 4)), (torch.randn(2, 4),))
         assert 0 not in captures[fqn]
 
 

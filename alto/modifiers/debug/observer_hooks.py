@@ -86,33 +86,29 @@ def make_linear_fwd_pre_hook(
     return _hook
 
 
-def make_linear_bwd_hook(captures: dict, fqn: str, step_ref: list, capture_grad_output: bool):
-    """Full-backward hook for nn.Linear — captures grad_output[0]."""
+def make_linear_bwd_hook(
+    captures: dict, fqn: str, step_ref: list, capture_grad_output: bool, capture_grad_weight: bool = False
+):
+    """Full-backward hook for nn.Linear.
+
+    grad_input = (grad_x, grad_weight, grad_bias) — exactly what
+    MXFP4LinearFunction.backward returns, so grad_weight here is the
+    post-clip value, not the value accumulated into param.grad later.
+    grad_output = upstream gradient flowing into this layer's output.
+    """
 
     def _hook(module, grad_input, grad_output):
         if not captures[fqn]["active"]:
             return
-        if not capture_grad_output:
-            return
-        go = grad_output[0] if isinstance(grad_output, (list, tuple)) else grad_output
-        if go is None:
-            return
-        _store(captures, fqn, step_ref[0], "grad_output", go)
-
-    return _hook
-
-
-def make_linear_grad_weight_hook(
-    captures: dict, fqn: str, step_ref: list, capture_grad_weight: bool
-):
-    """Parameter grad hook for nn.Linear.weight — captures accumulated grad."""
-
-    def _hook(grad):
-        if not captures[fqn]["active"]:
-            return
-        if not capture_grad_weight:
-            return
-        _store(captures, fqn, step_ref[0], "grad_weight", grad)
+        step_idx = step_ref[0]
+        if capture_grad_output:
+            go = grad_output[0] if isinstance(grad_output, (list, tuple)) else grad_output
+            if go is not None:
+                _store(captures, fqn, step_idx, "grad_output", go)
+        if capture_grad_weight and isinstance(grad_input, (list, tuple)) and len(grad_input) > 1:
+            gw = grad_input[1]
+            if gw is not None:
+                _store(captures, fqn, step_idx, "grad_weight", gw)
 
     return _hook
 

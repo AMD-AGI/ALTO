@@ -15,8 +15,8 @@ training_stage:
       targets: ["Linear"]
       ignore: ["output", "re:.*\\.router\\.gate"]
       clip_grad_output: true
-      grad_output_max_norm: null
-      grad_output_clip_value: 0.0
+      grad_output_max_norm: 1.0
+      grad_output_clip_value: null
       clip_grad_weight: true
-      grad_weight_max_norm: null
-      grad_weight_clip_value: 0.0
+      grad_weight_max_norm: 1.0
+      grad_weight_clip_value: null

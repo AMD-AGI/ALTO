@@ -26,7 +26,6 @@ from alto.modifiers import Modifier
 from alto.modifiers.debug.observer_hooks import (
     make_linear_fwd_pre_hook,
     make_linear_bwd_hook,
-    make_linear_grad_weight_hook,
     make_grouped_experts_fwd_pre_hook,
     make_grouped_experts_bwd_hook,
     make_grouped_experts_grad_weight_hook,
@@ -97,17 +96,11 @@ class DebugObserverModifier(Modifier):
                     self.register_hook(
                         module,
                         make_linear_bwd_hook(
-                            self._captures, fqn, self._step_ref, self.capture_grad_output,
+                            self._captures, fqn, self._step_ref,
+                            self.capture_grad_output, self.capture_grad_weight,
                         ),
                         "full_backward",
                     )
-                    if self.capture_grad_weight and hasattr(module, "weight") and module.weight is not None:
-                        handle = module.weight.register_hook(
-                            make_linear_grad_weight_hook(
-                                self._captures, fqn, self._step_ref, self.capture_grad_weight,
-                            )
-                        )
-                        self._param_hook_handles.append(handle)
 
                 elif cls_name.endswith("GroupedExperts"):
                     self.register_hook(

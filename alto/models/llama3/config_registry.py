@@ -175,7 +175,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.dataloader.dataset = "c4_test"
     config.parallelism.expert_parallel_degree = 1
     config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 8
+    config.parallelism.tensor_parallel_degree = 1
     config.activation_checkpoint.mode = "none"
     config.checkpoint.enable = False
     config.checkpoint.interval = 10

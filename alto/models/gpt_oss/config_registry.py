@@ -123,7 +123,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.dataloader.dataset_path = ""
     config.parallelism.expert_parallel_degree = 4
     config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 4
+    config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2

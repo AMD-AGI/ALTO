@@ -70,7 +70,7 @@ class GradientClippingModifier(Modifier):
                     if hasattr(w, "module_id"):
                         w.module_id = _mid
 
-                handle = module.register_forward_pre_hook(_stamp_module_id)
+                handle = module.register_forward_pre_hook(_stamp_module_id, prepend=True)
                 self._hook_handles.append(handle)
         return True
 

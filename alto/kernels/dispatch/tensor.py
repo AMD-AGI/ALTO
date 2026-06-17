@@ -277,6 +277,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # logger.info(f"[MXFP4Linear]func: {func.__name__} config: {config}"
             #             f"A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}")
 
+            module_id = getattr(B, "module_id", None)
             Y = _to_mxfp4_then_scaled_mm(
                 A,
                 B if trans_b else B.T,
@@ -287,7 +288,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 clip_mode=config.clip_mode,
                 use_hadamard=config.use_hadamard,
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
-                module_id=getattr(B, "module_id", None),
+                module_id=module_id,
             )
             if bias is not None:
                 Y = Y + bias

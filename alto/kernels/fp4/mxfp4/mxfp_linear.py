@@ -430,6 +430,9 @@ class MXFP4LinearFunction(torch.autograd.Function):
 
         # Site ①: clip grad_output before it enters the quantizer.
         _clip_cfg = get_grad_clip_cfg(ctx.module_id)
+        if _clip_cfg is None:
+            from torchtitan.tools.logging import logger as _logger
+            _logger.warning(f"[grad_clip] backward: module_id={ctx.module_id!r} → no clip cfg found")
         if _clip_cfg is not None and _clip_cfg.clip_grad_output:
             grad_output = apply_clip(grad_output, _clip_cfg.grad_output_max_norm,
                                      _clip_cfg.grad_output_clip_value)

@@ -159,15 +159,24 @@ class DebugObserverModifier(Modifier):
         if self._detached:
             return True
 
-        # Check whether this step produced a capture
+        # Only count a step as captured if a gradient was actually written.
+        # Calibration runs only forward passes — input/weight are stored but
+        # grad_output/grad_weight are not.  Counting those would exhaust
+        # max_captures before any training backward fires.
         step_idx = self._step_idx
+        grad_keys = {"grad_output", "grad_weight", "grad_mlp1_weight", "grad_mlp2_weight"}
         captured_this_step = any(
-            step_idx in self._captures[fqn]
+            any(k in grad_keys for k in self._captures[fqn].get(step_idx, {}).keys())
             for fqn in self._captures
         )
         if captured_this_step:
             self._n_captured += 1
             logger.debug(f"DebugObserverModifier: captured step {step_idx} ({self._n_captured}/{self.max_captures})")
+        else:
+            # Forward-only step (calibration): discard the partial capture so
+            # it doesn't pollute the dump with gradient-free entries.
+            for fqn in self._captures:
+                self._captures[fqn].pop(step_idx, None)
 
         # Deactivate all gates
         for fqn in self._captures:

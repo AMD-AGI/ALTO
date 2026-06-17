@@ -140,9 +140,16 @@ def _plot_time_series(
     std_vals: list[float],
     label: str,
     color: str,
+    is_baseline: bool = False,
 ) -> None:
-    ax_absmax.plot(steps, absmax_vals, marker="o", label=label, color=color)
-    ax_std.plot(steps, std_vals, marker="o", label=label, color=color, linestyle="--")
+    lw = 1.5 if not is_baseline else 2.5
+    ls_abs = "-" if not is_baseline else "--"
+    ls_std = "--" if not is_baseline else ":"
+    marker = "o" if not is_baseline else "s"
+    ax_absmax.plot(steps, absmax_vals, marker=marker, label=label, color=color,
+                   linewidth=lw, linestyle=ls_abs, zorder=3 if is_baseline else 2)
+    ax_std.plot(steps, std_vals, marker=marker, label=label, color=color,
+                linewidth=lw, linestyle=ls_std, zorder=3 if is_baseline else 2)
 
 
 def _plot_histogram(ax, t: torch.Tensor, label: str, color: str, alpha: float = 0.5) -> None:
@@ -166,12 +173,7 @@ def plot_layer(
 
     # Remap baseline step numbers to match the run's step numbers by ordinal
     # position, so overlays work even when step counters differ between runs.
-    if baseline_data is not None:
-        aligned_baseline = _align_baseline(layer_data, baseline_data)
-        base_steps_found = sorted(s for s in aligned_baseline if isinstance(s, int))
-        print(f"  [debug] {fqn}: aligned baseline has {len(base_steps_found)} steps: {base_steps_found[:3]}...")
-    else:
-        aligned_baseline = None
+    aligned_baseline = _align_baseline(layer_data, baseline_data) if baseline_data is not None else None
 
     tensor_keys = sorted({
         k for step, tensors in layer_data.items()
@@ -195,7 +197,8 @@ def plot_layer(
         if aligned_baseline is not None:
             bsteps, babs, bstd = _collect_series(aligned_baseline, key)
             if bsteps:
-                _plot_time_series(ax_absmax, ax_std, bsteps, babs, bstd, label="baseline", color="red")
+                _plot_time_series(ax_absmax, ax_std, bsteps, babs, bstd,
+                                  label="baseline", color="red", is_baseline=True)
         ax_absmax.set_ylabel("absmax")
         ax_absmax.legend(fontsize=7)
         ax_absmax.grid(True, alpha=0.3)

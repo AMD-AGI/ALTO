@@ -69,6 +69,13 @@ class DebugObserverModifier(Modifier):
     # handles for parameter-level grad hooks (not managed by HooksMixin)
     _param_hook_handles: list = PrivateAttr(default_factory=list)
 
+    @property
+    def requires_training_mode(self) -> bool:
+        # Gradient tensors are only captured during backward passes, which only
+        # run when the trainer is in training mode.  Force training mode so the
+        # BF16 baseline recipe doesn't silently degrade to forward-only.
+        return True
+
     def on_convert(self, model: Module, **kwargs) -> bool:
         return True
 

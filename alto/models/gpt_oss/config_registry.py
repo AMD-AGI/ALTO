@@ -14,9 +14,11 @@ from alto.components.converter import ModelOptConverter
 __all__ = [
     "gpt_oss_debugmodel",
     "gpt_oss_debugmodel_lpt",
+    "gpt_oss_debugmodel_lpt_mxfp8",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
+    "gpt_oss_20b_lpt_mxfp8",
 ]
 
 
@@ -36,6 +38,14 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
     config = gpt_oss_debugmodel()
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_debugmodel_lpt_mxfp8() -> Trainer.Config:
+    config = gpt_oss_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_mxfp8.yaml",),
     ],)
     return config
 
@@ -113,5 +123,14 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_lpt_mxfp8() -> Trainer.Config:
+    config = gpt_oss_20b_pretrain()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp8e4m3gemm_1d2d-lr4e-4-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_mxfp8.yaml",),
     ],)
     return config

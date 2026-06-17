@@ -147,6 +147,38 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     return config
 
 
+def gpt_oss_20b_grad_clip_lpt() -> Trainer.Config:
+    """20b pretrain + MXFP4 + gradient clipping at the quantizer boundary."""
+    config = gpt_oss_20b_pretrain()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-grad-clip-lr4e-4-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/grad_clip_lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_debugmodel_grad_clip_lpt() -> Trainer.Config:
+    """Debugmodel + MXFP4 + gradient clipping. Use for config validation."""
+    config = gpt_oss_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/grad_clip_lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_debugmodel_grad_clip_obs_lpt() -> Trainer.Config:
+    """Debugmodel + MXFP4 + gradient clipping + DebugObserver. Produces tensor
+    dumps under outputs/debug_obs_grad_clip_lpt.pt for comparison against the
+    unclipped baseline."""
+    config = gpt_oss_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./alto/models/gpt_oss/configs/grad_clip_obs_lpt_recipe.yaml",
+        ),
+    ],)
+    return config
+
+
 def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
     """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
     config = gpt_oss_20b_pretrain()

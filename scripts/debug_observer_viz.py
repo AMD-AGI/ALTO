@@ -80,6 +80,25 @@ def _collect_series(layer_data: dict, key: str) -> tuple[list[int], list[float],
     return steps, abs_maxes, stds
 
 
+def _align_baseline(run_data: dict, baseline_data: dict) -> dict:
+    """Return a copy of baseline_data re-keyed to match run_data's step numbers.
+
+    BF16 and MXFP4 runs may capture at different absolute step indices (e.g.
+    the calibration pre-steps shift the MXFP4 counter).  We match by ordinal
+    position (1st capture ↔ 1st capture, 2nd ↔ 2nd, …) so overlays always
+    show the same training epoch regardless of step numbering.
+    """
+    run_steps = sorted(s for s in run_data if isinstance(s, int))
+    base_steps = sorted(s for s in baseline_data if isinstance(s, int))
+    remapped = {}
+    for run_step, base_step in zip(run_steps, base_steps):
+        remapped[run_step] = baseline_data[base_step]
+    # preserve the "active" gate key if present
+    if "active" in baseline_data:
+        remapped["active"] = baseline_data["active"]
+    return remapped
+
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
@@ -145,6 +164,10 @@ def plot_layer(
         print("matplotlib not installed; skipping plots", file=sys.stderr)
         return
 
+    # Remap baseline step numbers to match the run's step numbers by ordinal
+    # position, so overlays work even when step counters differ between runs.
+    aligned_baseline = _align_baseline(layer_data, baseline_data) if baseline_data is not None else None
+
     tensor_keys = sorted({
         k for step, tensors in layer_data.items()
         if isinstance(step, int)
@@ -164,8 +187,8 @@ def plot_layer(
         fig, (ax_absmax, ax_std) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
         fig.suptitle(f"{fqn}\n{key}", fontsize=9)
         _plot_time_series(ax_absmax, ax_std, steps, absmax_vals, std_vals, label="run", color="blue")
-        if baseline_data is not None:
-            bsteps, babs, bstd = _collect_series(baseline_data, key)
+        if aligned_baseline is not None:
+            bsteps, babs, bstd = _collect_series(aligned_baseline, key)
             if bsteps:
                 _plot_time_series(ax_absmax, ax_std, bsteps, babs, bstd, label="baseline", color="red")
         ax_absmax.set_ylabel("absmax")
@@ -193,8 +216,8 @@ def plot_layer(
                 ax.set_visible(False)
                 continue
             _plot_histogram(ax, t, label=f"step {step}", color="steelblue")
-            if baseline_data is not None and step in baseline_data:
-                bt = baseline_data[step].get(key)
+            if aligned_baseline is not None and step in aligned_baseline:
+                bt = aligned_baseline[step].get(key)
                 if bt is not None:
                     _plot_histogram(ax, bt, label="baseline", color="red")
             ax.set_title(f"step {step}", fontsize=7)

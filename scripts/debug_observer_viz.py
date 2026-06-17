@@ -152,9 +152,16 @@ def _plot_time_series(
                 linewidth=lw, linestyle=ls_std, zorder=3 if is_baseline else 2)
 
 
-def _plot_histogram(ax, t: torch.Tensor, label: str, color: str, alpha: float = 0.5) -> None:
+def _plot_histogram(ax, t: torch.Tensor, label: str, color: str,
+                    is_baseline: bool = False) -> None:
     vals = t.float().abs().flatten().numpy()
-    ax.hist(vals, bins=50, alpha=alpha, label=label, color=color, density=True)
+    if is_baseline:
+        # Unfilled step outline — visible even when perfectly overlapping the run.
+        ax.hist(vals, bins=50, histtype="step", color=color, density=True,
+                linewidth=2.0, label=label, linestyle="--")
+    else:
+        ax.hist(vals, bins=50, histtype="stepfilled", color=color, density=True,
+                alpha=0.45, label=label, edgecolor=color, linewidth=0.8)
 
 
 def plot_layer(
@@ -227,7 +234,7 @@ def plot_layer(
             if aligned_baseline is not None and step in aligned_baseline:
                 bt = aligned_baseline[step].get(key)
                 if bt is not None:
-                    _plot_histogram(ax, bt, label="baseline", color="red")
+                    _plot_histogram(ax, bt, label="baseline", color="red", is_baseline=True)
             ax.set_title(f"step {step}", fontsize=7)
             ax.legend(fontsize=6)
             ax.set_xlabel("|value|", fontsize=6)

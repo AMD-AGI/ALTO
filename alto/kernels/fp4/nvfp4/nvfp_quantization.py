@@ -232,13 +232,13 @@ def _calculate_nvfp4_scales(
 
     if USE_OUTER_SCALE:
         outer_scale = tl.load(outer_scale_ptr)
-        inner_scale_raw = max_abs / outer_scale / F4_E2M1_MAX
-        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale_raw = max_abs / outer_scale / 6.0
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, 0.015625), 448.0)
         inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
         quant_scale = inner_scale * outer_scale
     else:
-        inner_scale_raw = max_abs / F4_E2M1_MAX
-        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale_raw = max_abs / 6.0
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, 0.015625), 448.0)
         inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
         quant_scale = inner_scale
 

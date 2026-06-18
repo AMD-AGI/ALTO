@@ -129,7 +129,17 @@ class LowPrecisionTrainingModifier(Modifier):
                         swap_params(module, config=scheme_obj, target_parameter_name="v")
                         model.set_submodule(name, module, strict=True)
                     else:
-                        swap_params(module, config=scheme_obj, module_name=name)
+                        if 32 in tuple(module.weight.shape):
+                            logger.info(
+                                f"Skipping {name} for {scheme_obj.precision} because weight shape is {tuple(module.weight.shape)}"
+                            )
+                            continue
+                        swap_params(
+                            module,
+                            config=scheme_obj,
+                            module_name=name,
+                            target_parameter_name="weight",
+                        )
                 elif module.__class__.__name__.endswith("GroupedExperts"):
                     swap_params(module, config=scheme_obj, module_name=name)
                 else:

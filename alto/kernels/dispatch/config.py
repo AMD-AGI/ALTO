@@ -34,5 +34,19 @@ class TrainingOpConfig:
       * NVFP4: not implemented
     """
 
+    use_4o6: bool = False
+    """
+    Four Over Six adaptive block scaling for NVFP4 only.  When True, activation
+    quantization scales each block's max to either FP4's 4 or 6 (whichever has
+    lower per-block error), reducing rounding error on near-maximal values.
+    Applied to activations only; weights and gradients use standard NVFP4.
+    """
+
+    select_metric: Literal["mae", "mse"] = "mae"
+    """
+    Per-block error metric used by ``use_4o6`` to choose the 4-vs-6 scale.
+    ``mae`` is recommended for pre-training, ``mse`` for PTQ.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

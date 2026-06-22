@@ -75,6 +75,8 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         use_outer_scale: bool,
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
+        use_4o6: bool = False,
+        select_metric: str = "mae",
     ) -> torch.Tensor:
         M_bufferlen = inputs.shape[0]
         original_dtype = inputs.dtype
@@ -99,9 +101,13 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             check_grouped_loop_contract(M_total, where="NVFP4GroupedGEMM.forward")
             num_groups = M_total // ALIGN_SIZE_M
 
+        # Four Over Six is applied to *activations only* (paper recommendation):
+        # the expert input X uses adaptive 4/6 block scaling; expert weights and
+        # gradients stay on the standard NVFP4 (M=6) path.
         x_dq = _qdq(
             inputs, axis=-1, is_2d_block=use_2dblock_x,
             use_outer_scale=use_outer_scale,
+            use_4o6=use_4o6, select_metric=select_metric,
         )
         w_dq = _qdq(
             expert_weights, axis=_FPROP_AXIS_W, is_2d_block=use_2dblock_w,
@@ -148,6 +154,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             x_bwd = _qdq(
                 x_for_wgrad, axis=0, is_2d_block=False,
                 use_outer_scale=use_outer_scale,
+                use_4o6=use_4o6, select_metric=select_metric,
             )
         else:
             x_bwd = x_dq
@@ -234,5 +241,6 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         # Return grads with arity matching forward's positional inputs:
         #   (inputs, expert_weights, expert_indices, offs,
         #    use_2dblock_x, use_2dblock_w, use_sr_grad, use_outer_scale,
-        #    hadamard_transform, use_dge)
-        return grad_inputs, grad_weights, None, None, None, None, None, None, None, None
+        #    hadamard_transform, use_dge, use_4o6, select_metric)
+        return (grad_inputs, grad_weights, None, None, None, None, None, None,
+                None, None, None, None)

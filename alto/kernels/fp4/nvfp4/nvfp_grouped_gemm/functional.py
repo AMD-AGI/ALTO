@@ -43,6 +43,8 @@ def _nvfp4_grouped_gemm_impl(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    use_4o6: bool = False,
+    select_metric: str = "mae",
 ) -> torch.Tensor:
     """Normalized entrypoint shared by both public APIs.
 
@@ -70,6 +72,8 @@ def _nvfp4_grouped_gemm_impl(
         use_outer_scale,
         hadamard_transform,
         use_dge,
+        use_4o6,
+        select_metric,
     )
 
 
@@ -85,6 +89,8 @@ def nvfp4_grouped_gemm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    use_4o6: bool = False,
+    select_metric: str = "mae",
 ) -> torch.Tensor:
     """NVFP4 QDQ-emulated Grouped GEMM with full autograd support.
 
@@ -124,6 +130,8 @@ def nvfp4_grouped_gemm(
         use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
+        use_4o6=use_4o6,
+        select_metric=select_metric,
     )
 
 
@@ -137,6 +145,8 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    use_4o6: bool = False,
+    select_metric: str = "mae",
 ) -> torch.Tensor:
     """Drop-in for the dispatch layer, mirroring mxfp4's
     ``_quantize_then_mxfp4_scaled_grouped_mm``.
@@ -158,4 +168,6 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
         use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
+        use_4o6=use_4o6,
+        select_metric=select_metric,
     )

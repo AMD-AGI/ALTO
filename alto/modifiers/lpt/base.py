@@ -36,6 +36,8 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
+    use_4o6: bool = False
+    select_metric: Literal["mae", "mse"] = "mae"
     
     lora_rank: int = 0
     """
@@ -89,6 +91,23 @@ class LowPrecisionTrainingModifier(Modifier):
                     )
         return self
 
+    @model_validator(mode="after")
+    def validate_4o6(self):
+        # Four Over Six requires the 50%-larger (1.5x) block scale that only
+        # NVFP4's E4M3 scale can represent; MXFP4's E8M0 (power-of-2) scale
+        # cannot, so 4/6 is defined for NVFP4 only.
+        if not self.use_4o6:
+            return self
+        schemes = [self.scheme] if isinstance(self.scheme, str) else list(self.scheme)
+        non_nvfp4 = [s for s in schemes if s != "nvfp4"]
+        if non_nvfp4:
+            raise ValueError(
+                "use_4o6=True (Four Over Six) is only defined for scheme='nvfp4'; "
+                f"got incompatible scheme(s): {non_nvfp4}. MXFP4's E8M0 block "
+                "scale cannot represent the 4/6 scale; drop use_4o6 or use nvfp4."
+            )
+        return self
+
     @property
     def requires_training_mode(self) -> bool:
         return True
@@ -111,6 +130,8 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_dge=self.use_dge,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
+                    use_4o6=self.use_4o6,
+                    select_metric=self.select_metric,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

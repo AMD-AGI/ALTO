@@ -21,6 +21,13 @@ F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
 
+# Four Over Six (4/6) reduces the E4M3 ceiling used for the outer (global)
+# scale from 448 to 256 so the block holding the tensor amax can still pick
+# the M=4 ceiling without its E4M3 block scale (448 * 6 / 4 = 672) overflowing
+# E4M3's 448 maximum; with 256 the worst case is 256 * 6 / 4 = 384, exactly
+# representable in E4M3.  See Cook et al., "Four Over Six", arXiv:2512.02010.
+F8E4M3_4O6_CEIL = 256.0
+
 # Naming convention for the NVFP4 scale hierarchy:
 #   inner_scale -- per-block scale stored alongside the packed FP4 data
 #                  (NVFP4 spec ``s_block``).  Value lives on the E4M3 grid
@@ -187,6 +194,69 @@ def _unpack_fp4(
 # ---- scale calculation (NVFP4-specific) -----------------------------------
 
 @triton.jit
+def _nvfp4_one_candidate(max_abs, outer_scale, m_fp4, USE_OUTER_SCALE: tl.constexpr):
+    """Per-block ``(inner_scale, quant_scale)`` for a single FP4 ceiling ``m_fp4``.
+
+    ``m_fp4`` is 6 for standard NVFP4 and 4 for the Four Over Six alternative.
+    """
+    if USE_OUTER_SCALE:
+        inner_scale_raw = max_abs / outer_scale / m_fp4
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
+        quant_scale = inner_scale * outer_scale
+    else:
+        inner_scale_raw = max_abs / m_fp4
+        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, E4M3_EPS), F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
+        quant_scale = inner_scale
+    return inner_scale, quant_scale
+
+
+@triton.jit
+def _block_rtn_err(
+    x,
+    quant_scale,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    IS_2D_BLOCK: tl.constexpr,
+    USE_MSE_SELECT: tl.constexpr,
+):
+    """Per-block round-trip (RTN) quantization error used by 4/6 selection.
+
+    Packs ``x`` to FP4 with ``quant_scale`` (round-to-nearest, no SR),
+    dequantizes, and reduces the absolute (MAE) or squared (MSE) error over
+    each ``QUANT_BLOCK_SIZE`` block, yielding the same shape as the scales.
+    """
+    packed = _pack_fp4(
+        x, quant_scale, 0, 0,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+        IS_2D_BLOCK=IS_2D_BLOCK, USE_SR=False,
+    )
+    dequant = _unpack_fp4(
+        packed, quant_scale, tl.float32,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+        IS_2D_BLOCK=IS_2D_BLOCK,
+    )
+    diff = dequant - x.to(tl.float32)
+    if USE_MSE_SELECT:
+        diff = diff * diff
+    else:
+        diff = tl.abs(diff)
+
+    NEW_BLOCK_N: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
+    if IS_2D_BLOCK:
+        NEW_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
+        grouped = diff.reshape(NEW_BLOCK_M, QUANT_BLOCK_SIZE, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
+        err = tl.sum(grouped, axis=-1)
+        err = tl.sum(err, axis=-2)
+    else:
+        grouped = diff.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
+        err = tl.sum(grouped, axis=-1)
+    return err
+
+
+@triton.jit
 def _calculate_nvfp4_scales(
     x,
     outer_scale_ptr,
@@ -195,6 +265,8 @@ def _calculate_nvfp4_scales(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
     USE_OUTER_SCALE: tl.constexpr = False,
+    USE_4O6: tl.constexpr = False,
+    USE_MSE_SELECT: tl.constexpr = False,
 ):
     """Compute per-block E4M3-quantised scales for NVFP4 quantization.
 
@@ -229,6 +301,26 @@ def _calculate_nvfp4_scales(
     else:
         x_grouped = x.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
         max_abs = tl.max(tl.abs(x_grouped), axis=-1).to(tl.float32)
+
+    if USE_4O6:
+        # Four Over Six: quantize each block with both the M=6 and M=4 FP4
+        # ceilings, then keep whichever has the lower per-block RTN error.
+        if USE_OUTER_SCALE:
+            outer_scale = tl.load(outer_scale_ptr)
+        else:
+            outer_scale = 1.0
+        # Pass the FP4 ceilings as numeric literals (not the module-level
+        # ``F4_E2M1_MAX`` global) so Triton folds them as constexpr.
+        inner6, quant6 = _nvfp4_one_candidate(max_abs, outer_scale, 6.0, USE_OUTER_SCALE)
+        inner4, quant4 = _nvfp4_one_candidate(max_abs, outer_scale, 4.0, USE_OUTER_SCALE)
+        err6 = _block_rtn_err(x, quant6, BLOCK_M, BLOCK_N, QUANT_BLOCK_SIZE,
+                              IS_2D_BLOCK, USE_MSE_SELECT)
+        err4 = _block_rtn_err(x, quant4, BLOCK_M, BLOCK_N, QUANT_BLOCK_SIZE,
+                              IS_2D_BLOCK, USE_MSE_SELECT)
+        choose4 = err4 < err6
+        inner_scale = tl.where(choose4, inner4, inner6)
+        quant_scale = tl.where(choose4, quant4, quant6)
+        return inner_scale, quant_scale
 
     if USE_OUTER_SCALE:
         outer_scale = tl.load(outer_scale_ptr)
@@ -272,6 +364,8 @@ def _convert_to_nvfp4_kernel(
     IS_2D_BLOCK: tl.constexpr,
     USE_OUTER_SCALE: tl.constexpr,
     USE_SR: tl.constexpr,
+    USE_4O6: tl.constexpr = False,
+    USE_MSE_SELECT: tl.constexpr = False,
 ):
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
@@ -310,6 +404,8 @@ def _convert_to_nvfp4_kernel(
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_OUTER_SCALE=USE_OUTER_SCALE,
+        USE_4O6=USE_4O6,
+        USE_MSE_SELECT=USE_MSE_SELECT,
     )
 
     y = _pack_fp4(
@@ -414,6 +510,7 @@ def _convert_from_nvfp4_kernel(
 def compute_dynamic_outer_scale(
     data_hp: torch.Tensor,
     scale_format: str = "e4m3",
+    scale_ceiling: float = F8E4M3_MAX,
 ) -> torch.Tensor:
     """Compute the FP32 outer-level scale ``amax / (F8E4M3_MAX * F4_E2M1_MAX)``.
 
@@ -432,7 +529,7 @@ def compute_dynamic_outer_scale(
     """
     _check_scale_format(scale_format)
     amax = data_hp.float().abs().max()
-    outer_scale = (amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=_OUTER_SCALE_DIVZERO_FLOOR)
+    outer_scale = (amax / (scale_ceiling * F4_E2M1_MAX)).clamp(min=_OUTER_SCALE_DIVZERO_FLOOR)
     return outer_scale.to(dtype=torch.float32).reshape(1)
 
 
@@ -449,6 +546,8 @@ def convert_to_nvfp4(
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
     use_asm: Optional[bool] = None,
+    use_4o6: bool = False,
+    select_metric: str = "mae",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize a high-precision tensor to NVFP4 (E2M1) format.
 
@@ -477,6 +576,13 @@ def convert_to_nvfp4(
     compatibility but is not yet validated on hardware.
 
     ``use_asm`` is accepted for API consistency with MXFP4 but has no effect.
+
+    ``use_4o6`` enables Four Over Six adaptive block scaling: each block is
+    quantized with both the M=6 and M=4 FP4 ceilings and the lower-error
+    candidate (per ``select_metric``: ``"mae"`` for training, ``"mse"`` for
+    PTQ) is kept.  When enabled, internally-computed outer scales use the
+    256 E4M3 ceiling (``F8E4M3_4O6_CEIL``) so the amax block can select M=4
+    without overflowing.  Default off preserves the standard NVFP4 path.
     """
     torch._check(
         data_hp.shape[axis] % block_size == 0,
@@ -490,6 +596,13 @@ def convert_to_nvfp4(
         f"2D block requires dim -2 ({data_hp.size(-2)}) divisible by block_size ({block_size})"
     )
     _check_scale_format(scale_format)
+    assert select_metric in ("mae", "mse"), (
+        f"select_metric must be 'mae' or 'mse', got {select_metric!r}"
+    )
+    use_mse_select = select_metric == "mse"
+    # 4/6 needs extra E4M3 head-room in the outer scale so the amax block can
+    # pick M=4 without overflowing; see ``F8E4M3_4O6_CEIL``.
+    outer_scale_ceiling = F8E4M3_4O6_CEIL if use_4o6 else F8E4M3_MAX
 
     data_hp = data_hp.transpose(axis, -1)
     ori_shape = data_hp.shape
@@ -520,13 +633,15 @@ def convert_to_nvfp4(
         )
         if update_outer_scale:
             outer_scale.copy_(
-                compute_dynamic_outer_scale(data_hp).reshape_as(outer_scale)
+                compute_dynamic_outer_scale(
+                    data_hp, scale_ceiling=outer_scale_ceiling).reshape_as(outer_scale)
             )
         outer_scale_buf = outer_scale.reshape(())
         use_outer_scale = True
     elif update_outer_scale:
         # No buffer supplied — compute an ephemeral scale for this call.
-        outer_scale_buf = compute_dynamic_outer_scale(data_hp).reshape(())
+        outer_scale_buf = compute_dynamic_outer_scale(
+            data_hp, scale_ceiling=outer_scale_ceiling).reshape(())
         use_outer_scale = True
     else:
         outer_scale_buf = torch.ones((), dtype=torch.float32, device=data_hp.device)
@@ -570,6 +685,8 @@ def convert_to_nvfp4(
         IS_2D_BLOCK=is_2d_block,
         USE_OUTER_SCALE=use_outer_scale,
         USE_SR=use_sr,
+        USE_4O6=use_4o6,
+        USE_MSE_SELECT=use_mse_select,
     )
 
     return (
@@ -712,6 +829,8 @@ def _qdq(
     use_sr: bool = False,
     block_size: int = 16,
     return_raw: bool = False,
+    use_4o6: bool = False,
+    select_metric: str = "mae",
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Quantize to NVFP4 then immediately dequantize back (QDQ round-trip).
 
@@ -742,6 +861,8 @@ def _qdq(
         # without it, skip outer-level scaling entirely.
         update_outer_scale=use_outer_scale,
         use_sr=use_sr,
+        use_4o6=use_4o6,
+        select_metric=select_metric,
     )
     dq = convert_from_nvfp4(
         data_lp,

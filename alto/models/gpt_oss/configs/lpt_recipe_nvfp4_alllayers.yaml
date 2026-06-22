@@ -1,0 +1,24 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      # NVFP4 all-layers recipe used by the 16k-step from-scratch GPT-OSS-20B
+      # workload (RUN_TAG nvfp4_alllayers_8gpu_16k_20260608_085907).  Exact
+      # twin of lpt_recipe_mxfp4_alllayers.yaml except scheme + two_level_scaling.
+      #
+      # Full-model quantization: every Linear (attention + MLP) and every MoE
+      # expert is NVFP4; ONLY the LM head (output) and router gate stay BF16.
+      # No first/last BF16 layer boundary (that is the "test-2" variant).
+      # Compensation OFF (lora_rank=0).
+      scheme: "nvfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore:
+        - "output"
+        - "re:.*\\.router\\.gate"
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: tensorwise
+      lora_rank: 0

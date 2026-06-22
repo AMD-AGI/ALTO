@@ -1,0 +1,26 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      # NVFP4 baseline arm for the gpt-oss debug-model Four-Over-Six e2e study.
+      # Standard NVFP4 (use_4o6: false).  This is the exact twin of
+      # lpt_recipe_nvfp4_4o6_debug.yaml EXCEPT for use_4o6, so the only
+      # difference between the two NVFP4 arms is the 4/6 adaptive block-scale
+      # selection -- isolating both its convergence effect and its overhead.
+      #
+      # Full-model NVFP4: every Linear (attention + MLP) and every MoE expert
+      # is quantized; only the LM head (output) and router gate stay BF16.
+      scheme: "nvfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore:
+        - "output"
+        - "re:.*\\.router\\.gate"
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: tensorwise
+      use_4o6: false
+      select_metric: mae
+      lora_rank: 0

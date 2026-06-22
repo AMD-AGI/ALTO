@@ -1,0 +1,25 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      # NVFP4 + Four Over Six arm for the gpt-oss debug-model e2e study.
+      # Identical to lpt_recipe_nvfp4_debug.yaml EXCEPT use_4o6: true, so any
+      # delta vs the NVFP4 baseline arm (convergence or step-time) is
+      # attributable to 4/6 alone.
+      #
+      # 4/6 is applied to ACTIVATIONS ONLY (dense Linear path); weights,
+      # gradients, and the MoE grouped-GEMM experts use standard NVFP4.
+      scheme: "nvfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore:
+        - "output"
+        - "re:.*\\.router\\.gate"
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: tensorwise
+      use_4o6: true
+      select_metric: mae
+      lora_rank: 0

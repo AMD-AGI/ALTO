@@ -60,6 +60,8 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_outer_scale: bool,
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
+        use_4o6: bool = False,
+        select_metric: str = "mae",
     ):
         weight = unwrap_weight_wrapper(weight)
         # Align weight dtype with activation so saved QDQ tensors share a
@@ -73,10 +75,15 @@ class NVFP4LinearFunction(torch.autograd.Function):
 
         # Prepare the quantized views used by forward. These are the tensors
         # consumed by the simulated Fprop GEMM.
+        # Four Over Six is applied to *activations only* (paper recommendation):
+        # X uses adaptive 4/6 block scaling; weights and gradients stay on the
+        # standard NVFP4 (M=6) path.
         x_dq = _qdq(
             x_2d, axis=-1,
             is_2d_block=use_2dblock_x,
             use_outer_scale=use_outer_scale,
+            use_4o6=use_4o6,
+            select_metric=select_metric,
         )
         w_dq = _qdq(
             weight, axis=-1,
@@ -167,6 +174,8 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 x_for_axis0, axis=0,
                 is_2d_block=False,
                 use_outer_scale=use_outer_scale,
+                use_4o6=use_4o6,
+                select_metric=select_metric,
             )
         else:
             x_dq_axis0 = x_dq
@@ -259,7 +268,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
         return (
             grad_inputs.view(*original_shape[:-1], w_dq.shape[-1]),
             grad_weights,
-            None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None,
         )
 
 
@@ -272,6 +281,8 @@ def _to_nvfp4_then_scaled_mm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    use_4o6: bool = False,
+    select_metric: str = "mae",
 ) -> torch.Tensor:
     """Build the optional Hadamard transform and apply ``NVFP4LinearFunction``.
 
@@ -294,4 +305,6 @@ def _to_nvfp4_then_scaled_mm(
         use_outer_scale,
         hadamard_transform,
         use_dge,
+        use_4o6,
+        select_metric,
     )

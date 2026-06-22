@@ -352,6 +352,8 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_outer_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
+                use_4o6=config.use_4o6,
+                select_metric=config.select_metric,
             )
 
         # linear / mm overrides
@@ -388,6 +390,8 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_outer_scale=config.two_level_scaling == "tensorwise",
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
+                use_4o6=config.use_4o6,
+                select_metric=config.select_metric,
             )
             if bias is not None:
                 Y = Y + bias

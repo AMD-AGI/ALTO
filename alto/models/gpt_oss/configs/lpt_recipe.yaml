@@ -9,6 +9,18 @@ training_stage:
       use_2dblock_w: true
       use_hadamard: true
       use_sr_grad: true
+
+      # differential gradient estimation, disabled by default
       use_dge: false
+
+      # choices: none, static, dynamic
       clip_mode: none
+
+      # 2-level scaling, disabled by default
+      # NVFP4 requires tensorwise scaling or you will get overflow issues
       two_level_scaling: none
+
+      # weight de-oscillation, disabled by default
+      # deosc_step: 2000
+      # deosc_period: 200
+      # deosc_ratio: 4.0

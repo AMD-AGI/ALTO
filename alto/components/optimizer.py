@@ -436,6 +436,5 @@ def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillation
         "[de-osc] enabled "
         f"period={config.period} "
         f"ratio_threshold={config.ratio_threshold} "
-        f"log_freq={config.log_freq}; "
-        "scope=MXFP4/NVFP4 wrapped weights"
+        f"log_freq={config.log_freq}"
     )

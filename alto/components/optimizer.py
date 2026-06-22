@@ -442,6 +442,7 @@ def de_oscillation_enabled(optimizers: OptimizersContainer):
     Check if weight de-oscillation is enabled for any optimizer in the container.
     """
     for opt in optimizers.optimizers:
-        if any(isinstance(h, _DeOscillationHook) for h in opt._optimizer_step_post_hooks.values()):
+        hooks = getattr(opt, "_optimizer_step_post_hooks", {})
+        if any(isinstance(h, _DeOscillationHook) for h in hooks.values()):
             return True
     return False

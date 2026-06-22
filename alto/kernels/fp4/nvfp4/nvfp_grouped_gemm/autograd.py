@@ -75,6 +75,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         use_outer_scale: bool,
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
+        scale_format: str = "e4m3",
     ) -> torch.Tensor:
         M_bufferlen = inputs.shape[0]
         original_dtype = inputs.dtype
@@ -102,10 +103,12 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         x_dq = _qdq(
             inputs, axis=-1, is_2d_block=use_2dblock_x,
             use_outer_scale=use_outer_scale,
+            scale_format=scale_format,
         )
         w_dq = _qdq(
             expert_weights, axis=_FPROP_AXIS_W, is_2d_block=use_2dblock_w,
             use_outer_scale=use_outer_scale,
+            scale_format=scale_format,
         )
         y = _nvfp4_grouped_fprop(
             x_dq,
@@ -123,6 +126,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
                 axis=_DGRAD_AXIS_W,
                 is_2d_block=False,
                 use_outer_scale=use_outer_scale,
+                scale_format=scale_format,
                 return_raw=use_dge,
             )
             if use_dge:
@@ -137,6 +141,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
                     axis=_FPROP_AXIS_W,
                     is_2d_block=True,
                     use_outer_scale=use_outer_scale,
+                    scale_format=scale_format,
                     return_raw=True,
                 )
 
@@ -148,6 +153,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             x_bwd = _qdq(
                 x_for_wgrad, axis=0, is_2d_block=False,
                 use_outer_scale=use_outer_scale,
+                scale_format=scale_format,
             )
         else:
             x_bwd = x_dq
@@ -165,6 +171,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         ctx.original_dtype = original_dtype
         ctx.hadamard_transform = hadamard_transform
         ctx.use_dge = use_dge
+        ctx.scale_format = scale_format
         return y
 
     @staticmethod
@@ -191,6 +198,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         g_dq = _qdq(
             grad_output, axis=-1, is_2d_block=ctx.use_2dblock_x,
             use_outer_scale=ctx.use_outer_scale, use_sr=ctx.use_sr_grad,
+            scale_format=ctx.scale_format,
         )
         grad_inputs = _nvfp4_grouped_dgrad(
             g_dq,
@@ -215,6 +223,7 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             use_outer_scale=ctx.use_outer_scale,
             use_2dblock_x=ctx.use_2dblock_x,
             output_dtype=ctx.original_dtype,
+            scale_format=ctx.scale_format,
         )
 
         if ctx.use_dge:
@@ -234,5 +243,8 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         # Return grads with arity matching forward's positional inputs:
         #   (inputs, expert_weights, expert_indices, offs,
         #    use_2dblock_x, use_2dblock_w, use_sr_grad, use_outer_scale,
-        #    hadamard_transform, use_dge)
-        return grad_inputs, grad_weights, None, None, None, None, None, None, None, None
+        #    hadamard_transform, use_dge, scale_format)
+        return (
+            grad_inputs, grad_weights,
+            None, None, None, None, None, None, None, None, None,
+        )

@@ -389,9 +389,7 @@ class _DeOscillationHook:
             # Snap into the wrapper's underlying storage in place; the
             # FP4 GEMM dispatch on the next forward will read this new
             # value.
-            raw.copy_(
-                torch.where(reset_mask, w_qdq.to(raw.dtype), raw)
-            )
+            raw[reset_mask] = w_qdq[reset_mask]
             # Refresh the snapshot so the next period does not see the
             # snap-to-bin-center as a large FP movement on its first
             # step.

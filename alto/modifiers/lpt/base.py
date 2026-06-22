@@ -112,6 +112,30 @@ class LowPrecisionTrainingModifier(Modifier):
                     )
         return self
 
+    @field_validator("deosc_step", mode="after")
+    def validate_deosc_step(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("deosc_step must be non-negative")
+        return value
+    
+    @field_validator("deosc_period", mode="after")
+    def validate_deosc_period(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("deosc_period must be positive")
+        return value
+    
+    @field_validator("deosc_ratio", mode="after")
+    def validate_deosc_ratio(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("deosc_ratio must be positive")
+        return value
+    
+    @field_validator("deosc_log_freq", mode="after")
+    def validate_deosc_log_freq(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("deosc_log_freq must be non-negative")
+        return value
+
     @property
     def requires_training_mode(self) -> bool:
         return True

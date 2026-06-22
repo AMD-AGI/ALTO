@@ -28,6 +28,11 @@ Techniques used to narrow the gap versus BF16 include:
 - Randomized Hadamard Transform (RHT)
 - Stochastic Rounding (SR)
 - Differential Gradient Estimation (DGE)
+- Two-Level Scaling
+  - blockwise (128-dim macro-block for MXFP4)
+  - tensorwise (for NVFP4)
+- Weight De-Oscillation
+  - see [PR #25](https://github.com/AMD-AGI/ALTO/pull/25)
 
 ### Modifiers
 
@@ -141,10 +146,16 @@ training_stage:
       use_hadamard: true
       use_sr_grad: true
       use_dge: false
-      two_level_scaling: none  # use "tensorwise" to enable NVFP4's outer scale
+
+      # Use "tensorwise" to enable NVFP4's outer scale
+      two_level_scaling: none  
+
+      # Step to enable weight de-oscillation. 0 means disabled.
+      # If 0, weight de-oscillation is disabled.
+      deosc_step: 2000
 ```
 
-To train the same model with NVFP4 instead, set `scheme: "nvfp4"` and `two_level_scaling: "tensorwise"`. NVFP4 kernels require the environment variable `TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1` at launch.
+To train the same model with NVFP4 instead, set `scheme: "nvfp4"` and `two_level_scaling: "tensorwise"`.
 
 ## Export and evaluation
 

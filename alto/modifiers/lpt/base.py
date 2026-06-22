@@ -19,6 +19,7 @@ from alto.kernels.dispatch import (
 )
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 from alto.nn import DecomposedLinear
+from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation
 
 __all__ = ["LowPrecisionTrainingModifier"]
 
@@ -41,6 +42,28 @@ class LowPrecisionTrainingModifier(Modifier):
     """
     Lora rank for the decomposed linear layer.
     If 0, use the original linear layer.
+    """
+
+    deosc_step: int = 0
+    """
+    Step to enable weight de-oscillation.
+    If 0, weight de-oscillation is disabled.
+    """
+
+    deosc_period: int = 200
+    """
+    De-oscillation observation/update period.
+    """
+
+    deosc_ratio: float = 4.0
+    """
+    Score threshold to reset weights in de-oscillation.
+    """
+
+    deosc_log_freq: int = 1
+    """
+    Log frequency to report de-oscillation statistics.
+    If 0, weight de-oscillation statistics logging is disabled.
     """
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
@@ -88,6 +111,30 @@ class LowPrecisionTrainingModifier(Modifier):
                         f"lora_rank must be divisible by 32 for {scheme_name}, got {self.lora_rank}"
                     )
         return self
+
+    @field_validator("deosc_step", mode="after")
+    def validate_deosc_step(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("deosc_step must be non-negative")
+        return value
+    
+    @field_validator("deosc_period", mode="after")
+    def validate_deosc_period(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("deosc_period must be positive")
+        return value
+    
+    @field_validator("deosc_ratio", mode="after")
+    def validate_deosc_ratio(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("deosc_ratio must be positive")
+        return value
+    
+    @field_validator("deosc_log_freq", mode="after")
+    def validate_deosc_log_freq(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("deosc_log_freq must be non-negative")
+        return value
 
     @property
     def requires_training_mode(self) -> bool:
@@ -146,6 +193,19 @@ class LowPrecisionTrainingModifier(Modifier):
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
+        trainer = kwargs.get("trainer", None)
+
+        if self.deosc_step > 0:
+            if trainer is None:
+                raise ValueError("Trainer must be passed to the pre_step method to enable weight de-oscillation.")
+            if trainer.step >= self.deosc_step:
+                deosc_config = DeOscillationConfig(
+                    enable=True,
+                    period=self.deosc_period,
+                    ratio_threshold=self.deosc_ratio,
+                    log_freq=self.deosc_log_freq,
+                )
+                enable_de_oscillation(trainer.optimizers, deosc_config)
         return True
 
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:

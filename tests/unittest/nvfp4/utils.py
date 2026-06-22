@@ -326,3 +326,145 @@ def convert_from_nvfp4_pytorch(
     s_expanded = scales.reshape(scale_shape)
     result = (f32 * s_expanded).to(output_dtype).reshape(orig_hp_shape)
     return result.transpose(axis, -1)
+
+
+# ---------------------------------------------------------------------------
+# Four Over Six (4/6) NVFP4 reference implementation (P1 eager reference)
+#
+# FP4 E2M1 has no representable values in the open interval (4, 6), so under
+# the standard NVFP4 rule (scale each block's max to 6) the near-maximal
+# values that land around 5 incur large rounding error -- empirically the
+# dominant source of NVFP4 quantization error (Cook et al., "Four Over Six",
+# arXiv:2512.02010).  4/6 instead lets each block scale its max to *either* 4
+# or 6: it quantizes the block both ways, dequantizes, and keeps whichever has
+# the lower per-block error (MAE for pre-training, MSE for PTQ).
+#
+# Because 4/6 only changes how the stored ``(fp4_value, inner_scale)`` pair is
+# *chosen*, the dequantization path is unchanged: ``convert_from_nvfp4_pytorch``
+# reconstructs a 4/6-encoded tensor with no modification.
+#
+# The global/outer scale uses an E4M3 ceiling of 256 rather than 448 so that
+# the block holding the tensor amax can still pick M=4 without its block scale
+# (448 * 6 / 4 = 672) overflowing E4M3's 448 maximum; with 256 the worst case
+# is 256 * 6 / 4 = 384, which is exactly representable in E4M3.
+# ---------------------------------------------------------------------------
+
+F8E4M3_4O6_CEIL = 256.0
+
+
+def compute_dynamic_outer_scale_4o6_pytorch(
+    data_hp: torch.Tensor,
+    scale_ceiling: float = F8E4M3_4O6_CEIL,
+) -> torch.Tensor:
+    """4/6 outer (global) FP32 scale: ``amax / (scale_ceiling * F4_E2M1_MAX)``.
+
+    Uses ``scale_ceiling=256`` instead of the standard 448 so the amax block
+    can select M=4 without overflowing the E4M3 block scale.  Mirrors the
+    div-by-zero floor used by the production ``compute_dynamic_outer_scale``.
+    """
+    amax = data_hp.float().abs().max()
+    outer_scale = (amax / (scale_ceiling * F4_E2M1_MAX)).clamp(min=1.0e-30)
+    return outer_scale.to(dtype=torch.float32).reshape(1)
+
+
+def _nvfp4_quant_candidate(grouped, max_abs, outer_scale, m_fp4, is_2d_block):
+    """Quantize every block with a single FP4 ceiling ``m_fp4`` (4 or 6).
+
+    Returns ``(fp4_unpacked, inner_scale_e4m3, dequantized)`` so the caller can
+    compare per-block reconstruction error across the two ceilings.
+    """
+    if outer_scale is not None:
+        outer_scale = outer_scale.float().to(grouped.device)
+        inner_scale_raw = (max_abs / outer_scale / m_fp4).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        quant_scale = inner_scale * outer_scale
+    else:
+        inner_scale_raw = (max_abs / m_fp4).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
+        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        quant_scale = inner_scale
+
+    if is_2d_block:
+        quant_scale_exp = quant_scale.unsqueeze(-2).unsqueeze(-1)
+    else:
+        quant_scale_exp = quant_scale.unsqueeze(-1)
+
+    scaled = grouped / quant_scale_exp
+    fp4_unpacked = f32_to_f4_unpacked(scaled)
+    dequant = f4_unpacked_to_f32(fp4_unpacked) * quant_scale_exp
+    return fp4_unpacked, inner_scale, dequant
+
+
+def convert_to_nvfp4_4o6_pytorch(
+    data_hp: torch.Tensor,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+    axis: int = -1,
+    is_2d_block: bool = False,
+    outer_scale: torch.Tensor = None,
+    select_metric: str = "mae",
+    return_choice: bool = False,
+):
+    """PyTorch reference for NVFP4 quantization with Four Over Six block scaling.
+
+    Drop-in analogue of ``convert_to_nvfp4_pytorch`` whose output ``(data_lp,
+    inner_scale)`` is consumed by the *unchanged* ``convert_from_nvfp4_pytorch``.
+
+    Args:
+        select_metric: per-block selection rule, ``"mae"`` (best for
+            pre-training per the paper) or ``"mse"`` (best for PTQ).
+        return_choice: also return the boolean mask of blocks that selected
+            M=4 (useful for selection-correctness tests).
+    """
+    assert data_hp.dtype in [torch.float32, torch.bfloat16]
+    assert select_metric in ("mae", "mse"), f"unknown select_metric={select_metric!r}"
+
+    data_hp = data_hp.transpose(axis, -1)
+    ori_shape = data_hp.shape
+
+    if is_2d_block:
+        m_blocks = ori_shape[-2] // block_size
+        n_blocks = ori_shape[-1] // block_size
+        grouped = data_hp.reshape(
+            *ori_shape[:-2], m_blocks, block_size, n_blocks, block_size).float()
+        max_abs = grouped.abs().amax(dim=-1).amax(dim=-2)
+    else:
+        data_hp_2d = data_hp.reshape(-1, ori_shape[-1])
+        n_rows, n_cols = data_hp_2d.shape
+        num_blocks = n_cols // block_size
+        grouped = data_hp_2d.reshape(n_rows, num_blocks, block_size).float()
+        max_abs = grouped.abs().amax(dim=-1)
+
+    fp4_6, inner_6, dequant_6 = _nvfp4_quant_candidate(
+        grouped, max_abs, outer_scale, F4_E2M1_MAX, is_2d_block)
+    fp4_4, inner_4, dequant_4 = _nvfp4_quant_candidate(
+        grouped, max_abs, outer_scale, 4.0, is_2d_block)
+
+    def _per_block_err(dequant):
+        diff = dequant - grouped
+        diff = diff.abs() if select_metric == "mae" else diff * diff
+        if is_2d_block:
+            # reduce the two block_size dims, leaving [..., m_blocks, n_blocks]
+            return diff.mean(dim=-1).mean(dim=-2)
+        return diff.mean(dim=-1)
+
+    choose_4 = _per_block_err(dequant_4) < _per_block_err(dequant_6)
+
+    inner_scale = torch.where(choose_4, inner_4, inner_6)
+    if is_2d_block:
+        choose_4_q = choose_4.unsqueeze(-2).unsqueeze(-1).expand_as(fp4_6)
+    else:
+        choose_4_q = choose_4.unsqueeze(-1).expand_as(fp4_6)
+    fp4_unpacked = torch.where(choose_4_q, fp4_4, fp4_6)
+
+    if is_2d_block:
+        fp4_unpacked = fp4_unpacked.reshape(ori_shape)
+    else:
+        fp4_unpacked = fp4_unpacked.reshape(n_rows, n_cols).reshape(ori_shape)
+        inner_scale = inner_scale.reshape(*ori_shape[:-1], num_blocks)
+
+    data_lp = pack_uint4(fp4_unpacked)
+
+    data_lp = data_lp.transpose(axis, -1)
+    inner_scale = inner_scale.transpose(axis, -1)
+    if return_choice:
+        return data_lp, inner_scale, choose_4
+    return data_lp, inner_scale

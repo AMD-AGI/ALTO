@@ -75,7 +75,8 @@ def test_grouped_mm_routes_to_nvfp4_grouped_kernel(monkeypatch, device):
     calls = []
 
     def _mock_grouped(A, B, *, offs, use_2dblock_x, use_2dblock_w,
-                      use_sr_grad, use_outer_scale, use_hadamard, use_dge):
+                      use_sr_grad, use_outer_scale, use_hadamard, use_dge,
+                      use_4o6=False, select_metric="mae"):
         calls.append({
             "A": A,
             "B": B,
@@ -86,6 +87,8 @@ def test_grouped_mm_routes_to_nvfp4_grouped_kernel(monkeypatch, device):
             "use_outer_scale": use_outer_scale,
             "use_hadamard": use_hadamard,
             "use_dge": use_dge,
+            "use_4o6": use_4o6,
+            "select_metric": select_metric,
         })
         return A.new_full((A.shape[0], B.shape[-1]), 7.0)
 
@@ -190,7 +193,8 @@ def test_linear_routes_to_nvfp4_linear_kernel(monkeypatch, device):
     calls = []
 
     def _mock_linear(A, B, *, use_2dblock_x, use_2dblock_w, use_sr_grad,
-                     use_outer_scale, use_hadamard, use_dge):
+                     use_outer_scale, use_hadamard, use_dge,
+                     use_4o6=False, select_metric="mae"):
         calls.append({
             "A": A,
             "B": B,
@@ -200,6 +204,8 @@ def test_linear_routes_to_nvfp4_linear_kernel(monkeypatch, device):
             "use_outer_scale": use_outer_scale,
             "use_hadamard": use_hadamard,
             "use_dge": use_dge,
+            "use_4o6": use_4o6,
+            "select_metric": select_metric,
         })
         return A.new_full((A.shape[0], B.shape[0]), 5.0)
 

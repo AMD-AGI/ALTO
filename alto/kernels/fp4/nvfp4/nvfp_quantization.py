@@ -256,6 +256,12 @@ def _calculate_nvfp4_scales(
         x_grouped = x.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
         max_abs = tl.max(tl.abs(x_grouped), axis=-1).to(tl.float32)
 
+    # NaN defense: a NaN element makes the block amax NaN, which neither the
+    # clamp nor the E4M3 / UE5M3 cast strips (both formats reserve a NaN code),
+    # so it would contaminate the stored inner scale and every downstream GEMM
+    # input.  Sanitise the per-block amax to 0 here, before the scale math.
+    max_abs = tl.where(max_abs != max_abs, 0.0, max_abs)
+
     if SCALE_FORMAT_IS_UE5M3:
         SCALE_EPS: tl.constexpr = _UE5M3_EPS
         SCALE_MAX: tl.constexpr = _UE5M3_MAX

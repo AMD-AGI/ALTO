@@ -291,3 +291,49 @@ def test_nvfp4_non_aligned_m_no_nan_inf(data_type):
     )
     assert torch.isfinite(scales).all(), "non-aligned M produced Inf/NaN scales"
     assert torch.isfinite(x_dq).all(), "non-aligned M produced Inf/NaN dequant output"
+
+
+@pytest.mark.parametrize("scale_format", ["e4m3"])  # UE5M3 covered by amdfp4/test_amdfp_quantization
+@pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
+def test_nvfp4_quantization_nan_input_sanitized(scale_format, data_type):
+    """A NaN spike in the input MUST NOT propagate to inner scales / dequant.
+
+    The per-block NaN defense in ``_calculate_nvfp4_scales`` (Triton) sanitises
+    the NaN block ``max_abs`` to 0 before the clamp + inner-scale cast, so the
+    stored inner scale stays finite and downstream GEMM never sees a NaN.  The
+    guard is format-agnostic (E4M3 and UE5M3 both reserve a NaN code), mirroring
+    the industry "caller-side sanitize" pattern (TransformerEngine / vLLM /
+    TRT-LLM).
+    """
+    block_size = 16
+    x = prepare_data((128, 64), data_type)
+    # Inject a NaN spike into one block so that block's amax would propagate
+    # NaN without the defense layer.
+    x_nan = x.clone()
+    x_nan[0, 7] = float("nan")
+
+    data_lp, scales = convert_to_nvfp4(
+        x_nan,
+        block_size=block_size,
+        axis=-1,
+        is_2d_block=False,
+        update_outer_scale=False,
+        scale_format=scale_format,
+    )
+    assert torch.isfinite(scales.float()).all(), (
+        f"NaN input produced non-finite inner scales under {scale_format}; "
+        f"the per-block amax defense should have sanitised it."
+    )
+
+    x_dq = convert_from_nvfp4(
+        data_lp, scales,
+        output_dtype=data_type,
+        block_size=block_size,
+        axis=-1,
+        is_2d_block=False,
+        scale_format=scale_format,
+    )
+    assert torch.isfinite(x_dq).all(), (
+        f"NaN input contaminated dequant output under {scale_format}; "
+        f"defense layer must keep downstream GEMM input finite."
+    )

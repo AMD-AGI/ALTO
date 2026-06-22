@@ -1,6 +1,6 @@
 # ALTO: Advanced Low-precision Training and Optimization
 
-ALTO is a Python library for low-precision model training and optimization, built on top of the [TorchTitan fork](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto). It ships Triton-backed low-precision kernels (MXFP4, block-scaled FP8, and related utilities) and a configurable stack of **modifiers**—low-precision training (LPT)—wired into TorchTitan through a model-converter pipeline.
+ALTO is a Python library for low-precision model training and optimization, built on top of the [TorchTitan fork](https://github.com/AMD-AGI/torchtitan-amd/tree/dev/alto). It ships Triton-backed low-precision kernels (MXFP4, NVFP4, block-scaled FP8, and related utilities) and a configurable stack of **modifiers**—low-precision training (LPT)—wired into TorchTitan through a model-converter pipeline.
 
 ## Contents
 
@@ -20,6 +20,7 @@ Training-oriented kernels and schemes include:
 
 - **[Blockwise FP8](alto/kernels/blockwise_fp8)** — linear, grouped GEMM, and FlashAttention.
 - **[MXFP4](alto/kernels/fp4/mxfp4)** — linear, grouped GEMM, and FlashAttention.
+- **[NVFP4](alto/kernels/fp4/nvfp4)** — linear and grouped GEMM, using an E4M3 inner-block scale with an optional two-level (tensorwise) outer scale.
 
 Techniques used to narrow the gap versus BF16 include:
 
@@ -31,7 +32,7 @@ Techniques used to narrow the gap versus BF16 include:
   - blockwise (128-dim macro-block for MXFP4)
   - tensorwise (for NVFP4)
 - Weight De-Oscillation
-  - see PR #25
+  - see [PR #25](https://github.com/AMD-AGI/ALTO/pull/25)
 
 ### Modifiers
 
@@ -137,7 +138,7 @@ Illustrative recipe fragment:
 training_stage:
   lpt_modifiers:
     LowPrecisionTrainingModifier:
-      scheme: "mxfp4"
+      scheme: "mxfp4"          # also supports "nvfp4" (plus "mxfp8_e4m3" / "mxfp8_e5m2")
       targets: ["Linear", "GptOssGroupedExperts"]
       ignore: ["output", "re:.*\\.router\\.gate"]
       use_2dblock_x: false
@@ -146,10 +147,15 @@ training_stage:
       use_sr_grad: true
       use_dge: false
 
+      # Use "tensorwise" to enable NVFP4's outer scale
+      two_level_scaling: none  
+
       # Step to enable weight de-oscillation. 0 means disabled.
       # If 0, weight de-oscillation is disabled.
       deosc_step: 2000
 ```
+
+To train the same model with NVFP4 instead, set `scheme: "nvfp4"` and `two_level_scaling: "tensorwise"`.
 
 ## Export and evaluation
 

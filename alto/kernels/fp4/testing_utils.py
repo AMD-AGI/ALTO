@@ -50,20 +50,38 @@ def calc_cossim(x: torch.Tensor, y: torch.Tensor) -> float:
     return (torch.dot(x_flat, y_flat) / (x_flat.norm() * y_flat.norm())).item()
 
 
+# NVFP4 autograd SNR floors are empirical, not derived from a closed form.
+# Calibrated on MI355X by running the full op-level autograd matrix, then
+# setting each (kind, outer, K bucket, SR) tier to ~0.5–2 dB below observed
+# per-tensor mins and median(O,dX,dW), with pytest pass/fail tweaks.
+#
+# Partitioning: K>=1024 stress (SR noise ~sqrt(K)) gets lower hard floors;
+# use_outer_scale=True (production) is much tighter than inner-only; grouped
+# is slightly looser than linear on the same bucket.
+#
+# Used by check_nvfp4_autograd_snr: hard_floor guards every O/dX/dW; aggregate
+# floor guards median/mean so a low large-K SR hard floor does not weaken all cases.
+
+
 def _nvfp4_autograd_snr_thresholds(
     *,
     K: int,
     use_sr_grad: bool,
     kind: str,
+    use_outer_scale: bool = False,
 ) -> tuple[float, float]:
-    """Return ``(hard_floor, aggregate_floor)`` for NVFP4 autograd SNR tests.
-
-    The floors are intentionally K-aware.  Large reduction dimensions amplify
-    stochastic-rounding noise roughly as ``sqrt(K)``, so production-scale
-    stress cases such as K=2048 need a lower per-tensor hard floor while small
-    and medium cases should keep much tighter checks.
-    """
+    """Return ``(hard_floor, aggregate_floor)`` for NVFP4 autograd SNR tests."""
     if kind == "nvfp4_linear":
+        if use_outer_scale:
+            # Production default (outer + block scales).  Tighter than the
+            # historical inner-only large-K SR floor (3 dB) but with margin for
+            # 2D-block + SR stress (measured dX/dW can sit in the high single
+            # digits on grouped K=2048 + SR).
+            if K >= 1024:
+                return (9.0, 11.0) if use_sr_grad else (12.0, 14.0)
+            if K >= 256:
+                return (10.0, 12.0) if use_sr_grad else (14.0, 17.0)
+            return (12.0, 14.0) if use_sr_grad else (16.0, 17.5)
         if K >= 1024:
             return (3.0, 4.5) if use_sr_grad else (4.0, 8.0)
         if K >= 256:
@@ -71,6 +89,13 @@ def _nvfp4_autograd_snr_thresholds(
         return (12.0, 14.0) if use_sr_grad else (14.0, 15.0)
 
     if kind == "nvfp4_grouped_gemm":
+        if use_outer_scale:
+            # Grouped paths (especially 2D-block + large G) trail linear outer
+            # SNR slightly on dX/dW; keep ~1 dB margin below observed mins.
+            if K >= 1024:
+                # 2D-x+w at K=2048 can pull median dX/dW to ~12.5 dB (still >> inner-only).
+                return (9.0, 10.0) if use_sr_grad else (12.0, 12.5)
+            return (10.0, 12.0) if use_sr_grad else (13.0, 15.5)
         if K >= 1024:
             return (4.0, 6.0) if use_sr_grad else (7.0, 10.0)
         return (7.0, 10.0) if use_sr_grad else (10.0, 12.0)
@@ -84,6 +109,7 @@ def check_nvfp4_autograd_snr(
     K: int,
     use_sr_grad: bool,
     kind: str,
+    use_outer_scale: bool = False,
     context: str = "",
 ) -> None:
     """Validate NVFP4 autograd SNR with per-tensor and aggregate checks.
@@ -103,14 +129,16 @@ def check_nvfp4_autograd_snr(
         K=K,
         use_sr_grad=use_sr_grad,
         kind=kind,
+        use_outer_scale=use_outer_scale,
     )
     ctx = f"{context}: " if context else ""
+    outer_tag = ", use_outer_scale=True" if use_outer_scale else ""
 
     for name, value in snrs.items():
         assert value > hard_floor, (
             f"{ctx}{name} SNR too low: {value:.2f} dB "
             f"< hard_floor={hard_floor:.2f} dB "
-            f"(K={K}, use_sr_grad={use_sr_grad}, kind={kind}). "
+            f"(K={K}, use_sr_grad={use_sr_grad}, kind={kind}{outer_tag}). "
             "This likely indicates a real regression in quantization, "
             "axis alignment, scale handling, or gradient propagation."
         )
@@ -121,10 +149,10 @@ def check_nvfp4_autograd_snr(
     assert median_snr > aggregate_floor, (
         f"{ctx}median SNR too low: {median_snr:.2f} dB "
         f"< aggregate_floor={aggregate_floor:.2f} dB "
-        f"(values={snrs}, K={K}, use_sr_grad={use_sr_grad}, kind={kind})."
+        f"(values={snrs}, K={K}, use_sr_grad={use_sr_grad}, kind={kind}{outer_tag})."
     )
     assert mean_snr > aggregate_floor, (
         f"{ctx}mean SNR too low: {mean_snr:.2f} dB "
         f"< aggregate_floor={aggregate_floor:.2f} dB "
-        f"(values={snrs}, K={K}, use_sr_grad={use_sr_grad}, kind={kind})."
+        f"(values={snrs}, K={K}, use_sr_grad={use_sr_grad}, kind={kind}{outer_tag})."
     )

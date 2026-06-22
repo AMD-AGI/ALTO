@@ -18,6 +18,7 @@ __all__ = [
     "gpt_oss_debugmodel_obs_bf16",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
+    "gpt_oss_20b_adahop",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_pretrain_c4",
     "gpt_oss_20b_lpt_c4",
@@ -139,6 +140,15 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.activation_checkpoint.mode = "selective"
     config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
+    return config
+
+
+def gpt_oss_20b_adahop() -> Trainer.Config:
+    config = gpt_oss_20b_pretrain()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_recipe.yaml",),
+    ],)
     return config
 
 

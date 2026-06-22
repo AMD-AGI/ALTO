@@ -1,0 +1,32 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp4_adahop"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore: ["output", "re:.*\\.router\\.gate"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: none
+    AdaHOPModifier:
+      enabled: true
+      use_hadamard: true
+      use_randomized_hadamard: false
+      calibration_steps: 30
+      # GptOssGroupedExperts use a separate MXFP4 grouped-GEMM kernel that does
+      # not support per-slot Hadamard dispatch — exclude from AdaHOP calibration
+      # so they stay as plain MXFP4 wrappers (same as lpt_recipe.yaml).
+      ignore: ["re:.*\\.experts\\..*", "re:.*\\.router\\.gate", "output"]
+      layer_transform_config:
+        "row-row": "hadamard"
+        "row-none": "inner_outlier_extract_left"
+        "row-col": "inner_outlier_extract_right"
+        "col-row": "hadamard"
+        "col-none": "hadamard"
+        "col-col": "full_precision"
+        "none-row": "hadamard"
+        "none-none": "hadamard"
+        "none-col": "inner_outlier_extract_right"

@@ -4,9 +4,8 @@
 
 """Weight de-oscillation hook for FP4-aware AdamW.
 
-This module provides :class:`DeOscillationOptimizersContainer`, an
-:class:`OptimizersContainer` subclass that installs an optimizer
-``step_post_hook`` implementing the weight de-oscillation strategy.
+This module provides :class:`DeOscillationConfig` and :func:`enable_de_oscillation`,
+which install an optimizer ``step_post_hook`` implementing the weight de-oscillation strategy.
 
 Motivation
 ----------
@@ -59,7 +58,7 @@ forward / backward GEMMs see, with no axis inference duplicated here.
 
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -77,7 +76,7 @@ from alto.kernels.dispatch.tensor import (
 
 __all__ = [
     "DeOscillationConfig",
-    "DeOscillationOptimizersContainer",
+    "enable_de_oscillation",
 ]
 
 
@@ -427,7 +426,7 @@ class _DeOscillationHook:
 
 
 def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillationConfig) -> None:
-    if not config.enable:
+    if not config.enable or de_oscillation_enabled(optimizers):
         return
     hook = _DeOscillationHook(config)
     for opt in optimizers.optimizers:
@@ -438,3 +437,13 @@ def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillation
         f"ratio_threshold={config.ratio_threshold} "
         f"log_freq={config.log_freq}"
     )
+
+
+def de_oscillation_enabled(optimizers: OptimizersContainer):
+    """
+    Check if weight de-oscillation is enabled for any optimizer in the container.
+    """
+    for opt in optimizers.optimizers:
+        if any(isinstance(h, _DeOscillationHook) for h in opt._optimizer_step_post_hooks.values()):
+            return True
+    return False

@@ -174,7 +174,7 @@ class LowPrecisionTrainingModifier(Modifier):
         if self.deosc_step > 0:
             if trainer is None:
                 raise ValueError("Trainer must be passed to the pre_step method to enable weight de-oscillation.")
-            if trainer.step == self.deosc_step:
+            if trainer.step >= self.deosc_step:
                 deosc_config = DeOscillationConfig(
                     enable=True,
                     period=self.deosc_period,

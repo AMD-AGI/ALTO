@@ -27,6 +27,11 @@ Techniques used to narrow the gap versus BF16 include:
 - Randomized Hadamard Transform (RHT)
 - Stochastic Rounding (SR)
 - Differential Gradient Estimation (DGE)
+- Two-Level Scaling
+  - blockwise (128-dim macro-block for MXFP4)
+  - tensorwise (for NVFP4)
+- Weight De-Oscillation
+  - see PR #25
 
 ### Modifiers
 
@@ -140,6 +145,10 @@ training_stage:
       use_hadamard: true
       use_sr_grad: true
       use_dge: false
+
+      # Step to enable weight de-oscillation. 0 means disabled.
+      # If 0, weight de-oscillation is disabled.
+      deosc_step: 2000
 ```
 
 ## Export and evaluation

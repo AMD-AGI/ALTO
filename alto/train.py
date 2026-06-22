@@ -4,7 +4,6 @@
 
 from typing import Iterable, Any
 from contextlib import contextmanager
-import os
 import time
 import torch
 from torchtitan.components.loss import IGNORE_INDEX
@@ -13,7 +12,6 @@ from torchtitan.trainer import Trainer as TitanTrainer
 from torchtitan.experiments.forge.example_train import Trainer as ForgeTrainer, main as forge_main
 from torchtitan.components.metrics import MetricsProcessor
 from alto.components.converter import ModelOptConverter
-from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation
 from torchtitan.tools.logging import logger
 
 

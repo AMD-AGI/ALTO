@@ -125,7 +125,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.metrics.enable_tensorboard = True
     config.dataloader.dataset = "c4"
     config.dataloader.dataset_path = ""
-    config.parallelism.expert_parallel_degree = 4
+    config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
@@ -196,15 +196,10 @@ def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
     """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
     config = gpt_oss_20b_pretrain()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-outputs"
-    config.training.global_batch_size = 64
-    config.optimizer.lr = 4e-4
-    config.lr_scheduler.min_lr_factor = 0.04
     config.dataloader.dataset = "c4"
     config.dataloader.dataset_path = None
     config.validator.dataloader.dataset = "c4_validation"
     config.validator.dataloader.dataset_path = None
-    config.checkpoint.initial_load_in_hf = True
-    config.checkpoint.initial_load_in_hf_quantized = True
     return config
 
 def gpt_oss_20b_lpt_c4() -> Trainer.Config:

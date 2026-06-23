@@ -28,14 +28,17 @@ class DecomposedLinear(nn.Module):
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, lora_rank: int = 32):
+        # Read device/dtype from the underlying data before assigning weight,
+        # in case linear.weight is already a tensor subclass.
+        raw = linear.weight.data
+        device = raw.device
+        dtype = raw.dtype
         new_layer = cls(linear.in_features, linear.out_features, linear.bias is not None, lora_rank)
         new_layer.weight = linear.weight
         new_layer.bias = linear.bias
-        device = linear.weight.device
-        dtype = linear.weight.dtype
-        new_layer.u.data = new_layer.u.data.to(device=device, dtype=dtype)
-        new_layer.v.data = new_layer.v.data.to(device=device, dtype=dtype)
-        new_layer.sigma.data = new_layer.sigma.data.to(device=device, dtype=dtype)
+        new_layer.u = nn.Parameter(torch.empty(lora_rank, linear.out_features, device=device, dtype=dtype))
+        new_layer.v = nn.Parameter(torch.empty(linear.in_features, lora_rank, device=device, dtype=dtype))
+        new_layer.sigma = nn.Parameter(torch.empty(lora_rank, device=device, dtype=dtype))
         return new_layer
     
     def init_lora_weights(self, init_std: float = 0.02):

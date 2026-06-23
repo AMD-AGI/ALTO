@@ -12,4 +12,3 @@ training_stage:
       use_dge: false
       clip_mode: none
       two_level_scaling: none
-      lora_rank: 32

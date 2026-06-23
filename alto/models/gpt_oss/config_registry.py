@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+from logging import config
+
 from torchtitan.trainer import Trainer
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.models.gpt_oss.config_registry import (
@@ -18,14 +20,18 @@ __all__ = [
     "gpt_oss_debugmodel_obs_bf16",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
-    "gpt_oss_20b_adahop",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_pretrain_c4",
+    "gpt_oss_20b_pretrain_c4_bgs16",
     "gpt_oss_20b_lpt_c4",
+    "gpt_oss_20b_lpt_c4_bgs16",
+    "gpt_oss_debugmodel_adahop",
+    "gpt_oss_20b_adahop",
     "gpt_oss_20b_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_obs_lpt",
     "gpt_oss_debugmodel_grad_clip_lpt_no_fsdp",
+    "gpt_oss_20b_lpt_c4_bgs16_nolora",
 ]
 
 
@@ -45,6 +51,16 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
     config = gpt_oss_debugmodel()
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_debugmodel_adahop() -> Trainer.Config:
+    config = gpt_oss_debugmodel()
+    # 30 calibration steps + 5 post-calibration to exercise Phase-B wrappers.
+    config.training.steps = 35
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_recipe.yaml",),
     ],)
     return config
 
@@ -86,7 +102,7 @@ def gpt_oss_20b() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
     config.dataloader.dataset = "c4_test"
-    config.parallelism.expert_parallel_degree = 1
+    config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
@@ -124,32 +140,24 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
-    config.dataloader.dataset = "c4"
-    config.dataloader.dataset_path = ""
+    config.dataloader.dataset = "megatron"
+    config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
-    config.checkpoint.enable = True
+    config.checkpoint.enable = False
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2
     config.validator.enable = True
-    config.validator.dataloader.dataset = "wikitext_test"
-    config.validator.dataloader.dataset_path = ""
+    config.validator.dataloader.dataset = "megatron"
+    config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
     config.validator.freq = 768
     config.validator.steps = 64
-    config.activation_checkpoint.mode = "selective"
+    config.activation_checkpoint.mode = "none"
     config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 
-
-def gpt_oss_20b_adahop() -> Trainer.Config:
-    config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-outputs"
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_recipe.yaml",),
-    ],)
-    return config
 
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
@@ -206,6 +214,19 @@ def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
     """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
     config = gpt_oss_20b_pretrain()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-outputs"
+    config.training.global_batch_size = 64
+    config.optimizer.lr = 1e-3
+    config.lr_scheduler.min_lr_factor = 0.04
+    config.dataloader.dataset = "c4"
+    config.dataloader.dataset_path = None
+    config.validator.dataloader.dataset = "c4_validation"
+    config.validator.dataloader.dataset_path = None
+    return config
+
+def gpt_oss_20b_pretrain_c4_bgs16() -> Trainer.Config:
+    """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
+    config = gpt_oss_20b_pretrain()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-bg16-outputs"
     config.dataloader.dataset = "c4"
     config.dataloader.dataset_path = None
     config.validator.dataloader.dataset = "c4_validation"
@@ -217,5 +238,44 @@ def gpt_oss_20b_lpt_c4() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-mi300-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-rank32-c4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_lpt_c4_bgs16() -> Trainer.Config:
+    config = gpt_oss_20b_pretrain_c4_bgs16()
+    config.training.global_batch_size = 16
+    config.parallelism.expert_tensor_parallel_degree = 1
+    config.parallelism.tensor_parallel_degree = 1
+    config.parallelism.expert_parallel_degree = 8
+    config.training.local_batch_size = 1
+    config.activation_checkpoint.mode = "none"
+    config.dataloader.dataset = "c4"
+    config.dataloader.dataset_path = None
+    config.validator.dataloader.dataset = "c4_validation"
+    config.validator.dataloader.dataset_path = None
+    config.checkpoint.enable = True
+    config.checkpoint.initial_load_in_hf = False
+    config.checkpoint.initial_load_in_hf_quantized = False
+    config.checkpoint.interval = 1000
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_adahop() -> Trainer.Config:
+    config = gpt_oss_20b_pretrain_c4_bgs16()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_lpt_c4_bgs16_nolora() -> Trainer.Config:
+    config = gpt_oss_20b_lpt_c4_bgs16()
+    config.dump_folder = "gpt_oss_20b-mi300-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-rank32-c4-bgs16-nolora-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_nolora.yaml",),
     ],)
     return config

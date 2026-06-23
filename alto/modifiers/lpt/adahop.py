@@ -44,6 +44,7 @@ from alto.modifiers.lpt.adahop_internals.calibration_hooks import (
     make_forward_callback,
     write_modes_json,
 )
+from alto.nn import DecomposedLinear
 
 __all__ = ["AdaHOPModifier"]
 
@@ -269,7 +270,7 @@ class AdaHOPModifier(Modifier):
 
         for part in model_parts:
             for module_fqn, module in part.named_modules():
-                if not isinstance(module, nn.Linear):
+                if not isinstance(module, (nn.Linear, DecomposedLinear)):
                     continue
                 weight = getattr(module, "weight", None)
                 if weight is None:

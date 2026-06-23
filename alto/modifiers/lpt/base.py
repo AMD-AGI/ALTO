@@ -23,6 +23,19 @@ from alto.nn import DecomposedLinear
 __all__ = ["LowPrecisionTrainingModifier"]
 
 
+def _plain_mxfp4_config(config: TrainingOpConfig) -> TrainingOpConfig:
+    """Return a TrainingOpConfig with precision='mxfp4', copying all other fields.
+
+    Used so that u/v in DecomposedLinear are always wrapped as plain MXFP4
+    (MXFP4TrainingWeightWrapperTensor), never as an adahop calibration variant.
+    For a config that is already 'mxfp4' this is a no-op (returns the same object).
+    """
+    if config.precision == "mxfp4":
+        return config
+    from dataclasses import replace
+    return replace(config, precision="mxfp4")
+
+
 class LowPrecisionTrainingModifier(Modifier):
 
     scheme: str | dict[str, list[str]]
@@ -136,8 +149,14 @@ class LowPrecisionTrainingModifier(Modifier):
                     if self.lora_rank > 0:
                         module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)
                         swap_params(module, config=scheme_obj, target_parameter_name="weight", tensor_cls=tensor_cls)
-                        swap_params(module, config=scheme_obj, target_parameter_name="u", tensor_cls=tensor_cls)
-                        swap_params(module, config=scheme_obj, target_parameter_name="v", tensor_cls=tensor_cls)
+                        # u and v are quantized as plain MXFP4 regardless of scheme.
+                        # For mxfp4_adahop, tensor_cls is MXFP4CalibrationWrapper and
+                        # scheme_obj.precision is "mxfp4_adahop" — both wrong for u/v.
+                        # Derive a plain mxfp4 config and let swap_params pick the
+                        # default MXFP4TrainingWeightWrapperTensor class (tensor_cls=None).
+                        lora_config = _plain_mxfp4_config(scheme_obj)
+                        swap_params(module, config=lora_config, target_parameter_name="u", tensor_cls=None)
+                        swap_params(module, config=lora_config, target_parameter_name="v", tensor_cls=None)
                         model.set_submodule(name, module, strict=True)
                     else:
                         swap_params(module, config=scheme_obj, module_name=name, tensor_cls=tensor_cls)

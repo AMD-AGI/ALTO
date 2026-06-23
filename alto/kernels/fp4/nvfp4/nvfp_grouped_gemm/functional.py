@@ -111,9 +111,9 @@ def nvfp4_grouped_gemm(
         [M_total, N] output tensor.
     """
     if not trans_weights:
-        # User/dispatch stored weights as [E, K, N]; materialize the canonical
-        # [E, N, K] layout exactly once, here at the wrapper boundary.
-        expert_weights = expert_weights.transpose(-2, -1).contiguous()
+        # Downstream grouped kernels and _qdq both consume strided
+        # expert_weights, so no .contiguous() needed.
+        expert_weights = expert_weights.transpose(-2, -1)
     return _nvfp4_grouped_gemm_impl(
         inputs,
         expert_weights,
@@ -146,7 +146,8 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
     in dispatch layout ``[E, K, N]`` and is transposed once to the canonical
     ``[E, N, K]`` layout shared by the autograd function and its primitives.
     """
-    B_canonical = B.transpose(-2, -1).contiguous()
+    # Zero-copy stride view; see nvfp4_grouped_gemm for rationale.
+    B_canonical = B.transpose(-2, -1)
     return _nvfp4_grouped_gemm_impl(
         A,
         B_canonical,

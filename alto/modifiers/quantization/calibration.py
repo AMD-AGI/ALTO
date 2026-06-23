@@ -135,6 +135,11 @@ def update_weight_zp_scale(module: Module):
     if getattr_chain(module, "quantization_scheme.weights", None) is None:
         return
 
+    # Fully dynamic weights have no observer: their QDQ runs live in the patched
+    # forward on every pass, so there is no static scale to compute or bake.
+    if not hasattr(module, "weight_observer"):
+        return
+
     if getattr(module, "quantization_status", None) != QuantizationStatus.CALIBRATION:
         logger.warning("Attempting to calibrate weights of a module not in calibration mode")
 

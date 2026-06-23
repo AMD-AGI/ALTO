@@ -28,6 +28,8 @@ __all__ = [
     "llama3_8b_lpt",
     "llama3_1b_gptq",
     "llama3_1b_awq",
+    "llama3_1b_mx9_wa",
+    "llama3_1b_mx6_wa",
     "llama3_8b",
     "llama3_8b_gptq",
     "llama3_8b_rtn",
@@ -123,24 +125,34 @@ def llama3_1b_lpt() -> Trainer.Config:
 def llama3_8b_pretrain() -> Trainer.Config:
     config = llama3_8b_orig()
     config.hf_assets_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
+    config.dump_folder = "llama3_8b-mi308-pretrain-subset-gbs384-lr1e-4-outputs"
     config.metrics.log_freq = 1
+    config.metrics.enable_tensorboard = True
     config.profiling.enable_profiling = False
-    config.training.steps = 0
-    config.training.local_batch_size = 1
+    config.training.steps = 5000
+    config.training.local_batch_size = 2
+    config.training.global_batch_size = 384
     config.training.seq_len = 8192
-    config.dataloader.dataset = "c4_test"
+    config.optimizer.lr = 1e-4
+    config.lr_scheduler.min_lr_factor = 0.0
+    config.lr_scheduler.warmup_steps = 500
+    config.lr_scheduler.decay_ratio = 0.9
+    config.lr_scheduler.decay_type = "cosine"
+    config.dataloader.dataset = "megatron"
+    config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 1
     config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 8
+    config.parallelism.tensor_parallel_degree = 1
     config.activation_checkpoint.mode = "none"
     config.checkpoint.enable = False
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
     config.checkpoint.initial_load_in_hf = False
-    config.validator.enable = True
-    config.validator.dataloader.dataset = "wikitext_test"
-    config.validator.freq = 10
-    config.validator.steps = 10
+    config.validator.enable = False
+    config.validator.dataloader.dataset = "megatron"
+    config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
+    config.validator.freq = 768
+    config.validator.steps = 64
     config.debug.seed = 1234
     return config
 
@@ -156,7 +168,7 @@ def llama3_8b_opt() -> Trainer.Config:
 
 def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b_pretrain()
-    config.training.steps = 1000
+    config.dump_folder = "llama3_8b-mi308-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-gbs384-lr1e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
     return config
@@ -178,6 +190,26 @@ def llama3_1b_awq() -> Trainer.Config:
     config.optimizer = OptimizersContainer.Config(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/awq_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_1b_mx9_wa() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/mx9_wa_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_1b_mx6_wa() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1
+    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/mx6_wa_recipe.yaml",),
     ],)
     return config
 

@@ -19,8 +19,7 @@ from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_mxfp_scaled_grouped_mm
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
-    _quantize_then_nvfp4_scaled_grouped_mm,
-)
+    _quantize_then_nvfp4_scaled_grouped_mm,)
 from alto.kernels.mxfp8.mxfp8_linear import _to_mxfp8_then_scaled_mm
 from alto.kernels.mxfp8.mxfp8_grouped_gemm import _quantize_then_mxfp8_scaled_grouped_mm
 from .config import TrainingOpConfig
@@ -40,6 +39,8 @@ _ops_to_preserve_subclass = {
     torch.ops.aten.clone.default,
     torch.ops.aten.transpose.int,
     torch.ops.aten.t.default,
+    # required for TP - scatter_ is used to distribute weights
+    torch.ops.c10d.scatter_.default,
 }
 
 gemm_ops = ("linear", "mm.default", "matmul.default", "addmm.default", "matmul")
@@ -112,6 +113,10 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
         # detach is special case
         if func == torch.ops.aten.detach.default:
             return cls(args_unwrapped[0], config)
+        elif func.__name__ in gemm_ops or func.__name__ == "_grouped_mm":
+            raise ValueError("You have reached the __torch_dispatch__ method of low-precision GEMMs, "
+                             "which does not support Autograd Function."
+                             "This is commonly caused by unsupported tensor parallel.")
 
         # perform op
         out = func(*args_unwrapped, **kwargs_unwrapped)
@@ -328,14 +333,12 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert not isinstance(A, cls), f"A should not be a {cls.__name__}"
             assert isinstance(B, cls), f"B should be a {cls.__name__}"
             assert A.ndim == 2 and B.ndim == 3 and offs is not None, (
-                "Only 2d x 3d with offsets is supported for NVFP4 grouped_mm"
-            )
+                "Only 2d x 3d with offsets is supported for NVFP4 grouped_mm")
             assert bias is None, "Bias is not supported for grouped_mm"
 
             config = B.config
             assert config.precision == "nvfp4", (
-                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}"
-            )
+                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}")
 
             return _quantize_then_nvfp4_scaled_grouped_mm(
                 A,
@@ -442,21 +445,15 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 A, B = args[0], args[1]
                 bias = args[2] if len(args) > 2 else None
 
-            assert not isinstance(A, cls), (
-                f"A should not be a {cls.__name__} for func {func.__name__}"
-            )
-            assert isinstance(B, cls), (
-                f"B should be a {cls.__name__} for func {func.__name__}"
-            )
+            assert not isinstance(A, cls), (f"A should not be a {cls.__name__} for func {func.__name__}")
+            assert isinstance(B, cls), (f"B should be a {cls.__name__} for func {func.__name__}")
 
             config = B.config
             assert config.precision in cls._PRECISION_TO_FP8_VARIANT, (
                 "expected TrainingOpConfig with precision in "
-                f"{tuple(cls._PRECISION_TO_FP8_VARIANT)}, got {config.precision}"
-            )
+                f"{tuple(cls._PRECISION_TO_FP8_VARIANT)}, got {config.precision}")
             assert not config.use_hadamard and not config.use_dge, (
-                "MXFP8 dispatch does not support Hadamard or DGE options."
-            )
+                "MXFP8 dispatch does not support Hadamard or DGE options.")
 
             Y = _to_mxfp8_then_scaled_mm(
                 A,

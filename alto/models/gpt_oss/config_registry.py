@@ -10,7 +10,6 @@ from torchtitan.models.gpt_oss.config_registry import (
 )
 
 from alto.components.converter import ModelOptConverter
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 
 GPT_OSS_20B_TOKENIZER_PATH = "/wekafs/yuesun/workspace/hf_models/gpt-oss-20b"
 
@@ -91,7 +90,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.training.local_batch_size = 1
     config.training.global_batch_size = 16
     config.training.seq_len = 8192
-    config.optimizer.lr = 1e-4
+    config.optimizer.lr = 4e-4
     config.optimizer.weight_decay = 0.1
     config.optimizer.beta1 = 0.9
     config.optimizer.beta2 = 0.95
@@ -102,18 +101,21 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
-    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4")
-    config.parallelism.expert_parallel_degree = 4
+    config.dataloader.dataset = "megatron"
+    config.dataloader.dataset_path = "/wekafs/yuesun/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
+    config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 4
+    config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = False
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2
     config.validator.enable = True
-    config.validator.dataloader = HuggingFaceTextDataLoader.Config(dataset="wikitext_test")
+    config.validator.dataloader.dataset = "megatron"
+    config.validator.dataloader.dataset_path = "/wekafs/yuesun/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
     config.validator.freq = 768
     config.validator.steps = 64
-    config.activation_checkpoint.mode = "full"
+    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 

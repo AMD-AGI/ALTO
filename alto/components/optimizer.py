@@ -301,7 +301,7 @@ class _DeOscillationHook:
         if wrapper is None:
             return None
         cfg = wrapper.config
-        if cfg is None or cfg.precision not in ("mxfp4", "nvfp4"):
+        if cfg is None or cfg.precision not in ("mxfp4", "nvfp4", "amdfp4"):
             return None
         return wrapper
 

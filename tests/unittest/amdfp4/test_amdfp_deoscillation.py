@@ -24,8 +24,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from alto.components.optimizer import _make_qdq_fn_for
+from alto.components.optimizer import (
+    DeOscillationConfig,
+    _DeOscillationHook,
+    _make_qdq_fn_for,
+)
 from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.kernels.dispatch.tensor import NVFP4TrainingWeightWrapperTensor
 from alto.kernels.fp4 import convert_from_amdfp4, convert_to_amdfp4
 
 
@@ -103,3 +108,44 @@ def test_amdfp4_qdq_matches_direct_ue5m3_convert(device):
         axis=-1, is_2d_block=True, outer_scale=outer_scale,
     )
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# Hook-level wiring (the eligibility gate, not just the QDQ factory)
+# ---------------------------------------------------------------------------
+
+def test_amdfp4_param_is_deosc_eligible():
+    """The hook's eligibility gate must accept amdfp4-wrapped params.  Before
+    this fix it only allowed mxfp4/nvfp4, so AMD-FP4 weights were silently
+    skipped even though ``_make_qdq_fn_for`` supports them — i.e. the path was
+    not actually open end to end."""
+    hook = _DeOscillationHook(DeOscillationConfig(enable=True))
+    w = torch.randn(32, 32, dtype=torch.bfloat16)
+    param = torch.nn.Parameter(
+        NVFP4TrainingWeightWrapperTensor(w, _make_config("amdfp4")),
+        requires_grad=True,
+    )
+    wrapper = hook._wrapper_if_eligible(param)
+    assert wrapper is not None, "amdfp4 param must be eligible for de-oscillation"
+    assert isinstance(wrapper, NVFP4TrainingWeightWrapperTensor)
+    assert wrapper.config.precision == "amdfp4"
+
+
+def test_amdfp4_deosc_hook_tracks_param(device):
+    """End-to-end through the hook: an amdfp4 wrapper is seeded then QDQ-tracked
+    across a period without raising, proving the gate + factory + hook chain is
+    wired for AMD-FP4."""
+    hook = _DeOscillationHook(DeOscillationConfig(enable=True, period=2))
+    w = torch.randn(32, 32, dtype=torch.bfloat16, device=device)
+    wrapper = NVFP4TrainingWeightWrapperTensor(w, _make_config("amdfp4"))
+    state: dict = {}
+
+    # First call seeds the period (no before/after pair yet).
+    assert hook._step_param(wrapper, state) == (0, 0, False)
+    assert _DeOscillationHook.KEY_PREV in state
+
+    # Move the underlying weight, then take a tracked step.
+    wrapper._data.add_(torch.randn_like(wrapper._data) * 0.01)
+    hook._step_param(wrapper, state)
+    dist_qdq = state[_DeOscillationHook.KEY_DIST_QDQ]
+    assert torch.isfinite(dist_qdq).all()

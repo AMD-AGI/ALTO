@@ -154,10 +154,11 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.dataloader.dataset_path = None
     config.validator.dataloader.dataset = "c4_validation"
     config.validator.dataloader.dataset_path = None
-    config.checkpoint.enable = False
+    config.checkpoint.enable = True                 # save checkpoints so we can resume later
+    config.checkpoint.initial_load_path = None      # fresh run: do NOT load any checkpoint
     config.checkpoint.initial_load_in_hf = False
     config.checkpoint.initial_load_in_hf_quantized = False
-    config.checkpoint.interval = 1000
+    config.checkpoint.interval = 1000               # save every 1000 steps
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop.yaml",),

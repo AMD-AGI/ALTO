@@ -4,6 +4,7 @@
 
 - Added
     - Weight De-Oscillation for FP4
+    - AMDFP4 (ue5m3 scales) support
 - Fixed
     - NVFP4 triton kernels without `TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1`
 

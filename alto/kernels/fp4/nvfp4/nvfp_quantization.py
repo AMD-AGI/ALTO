@@ -10,9 +10,12 @@ import triton.language as tl
 from torch.library import triton_op, wrap_triton
 
 from alto.kernels.fp4.fp4_common import (
+    UE5M3_EPS,
+    UE5M3_MAX,
     make_dequantize_e2m1,
     make_generate_philox_randval_2x,
     make_quantize_e2m1,
+    quantize_ue5m3,
 )
 
 
@@ -23,12 +26,23 @@ F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
 
+# Per-block inner-scale dtype options.  NVFP4 uses E4M3 (max 448); AMD-FP4
+# uses UE5M3 (max 114688, ~256x wider dynamic range, same 3-bit mantissa).
+# ``(eps, max)`` clamp bounds keyed by ``scale_format``.
+_SCALE_FORMAT_TABLE = {
+    "e4m3": (float(E4M3_EPS), float(F8E4M3_MAX)),
+    "ue5m3": (float(UE5M3_EPS), float(UE5M3_MAX)),
+}
+SUPPORTED_SCALE_FORMATS = tuple(_SCALE_FORMAT_TABLE.keys())
+
 # ``@triton.jit`` kernels cannot read plain (non-constexpr) module globals on
 # triton >=3.6 (raises NameError), so expose ``tl.constexpr`` mirrors for
 # kernel-side use only. Keep these in sync with the host-facing values above.
 _F4_E2M1_MAX = tl.constexpr(F4_E2M1_MAX)
 _F8E4M3_MAX = tl.constexpr(F8E4M3_MAX)
 _E4M3_EPS = tl.constexpr(E4M3_EPS)
+_UE5M3_MAX = tl.constexpr(float(UE5M3_MAX))
+_UE5M3_EPS = tl.constexpr(float(UE5M3_EPS))
 
 # Naming convention for the NVFP4 scale hierarchy:
 #   inner_scale -- per-block scale stored alongside the packed FP4 data
@@ -51,13 +65,10 @@ _E4M3_EPS = tl.constexpr(E4M3_EPS)
 #   1e-30 * 2**-6 ≈ 1.56e-32  >  FP32 smallest normal (~1.18e-38)
 _OUTER_SCALE_DIVZERO_FLOOR = 1.0e-30
 
-SUPPORTED_SCALE_FORMATS = ("e4m3",)
-
-
 def _check_scale_format(scale_format: str) -> None:
-    if scale_format != "e4m3":
+    if scale_format not in _SCALE_FORMAT_TABLE:
         raise NotImplementedError(
-            f"scale_format={scale_format!r} is not yet supported. "
+            f"scale_format={scale_format!r} is not supported. "
             f"Currently supported: {SUPPORTED_SCALE_FORMATS}"
         )
 _dequantize_e2m1 = make_dequantize_e2m1()
@@ -204,8 +215,14 @@ def _calculate_nvfp4_scales(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
     USE_OUTER_SCALE: tl.constexpr = False,
+    SCALE_FORMAT_IS_UE5M3: tl.constexpr = False,
 ):
-    """Compute per-block E4M3-quantised scales for NVFP4 quantization.
+    """Compute per-block quantised scales for NVFP4 / AMD-FP4 quantization.
+
+    ``SCALE_FORMAT_IS_UE5M3`` selects the inner-block scale grid: the default
+    (False) rounds the stored block scale to E4M3 (max 448, NVFP4); True
+    rounds it to UE5M3 (max 114688, AMD-FP4) via ``quantize_ue5m3``.  The
+    clamp bounds switch accordingly so the wider UE5M3 range is usable.
 
     The returned ``inner_scale`` is the NVFP4 spec ``s_block``; the
     ``outer_scale`` operand is the spec ``s_global``.  See the
@@ -239,16 +256,34 @@ def _calculate_nvfp4_scales(
         x_grouped = x.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
         max_abs = tl.max(tl.abs(x_grouped), axis=-1).to(tl.float32)
 
+    # NaN defense: a NaN element makes the block amax NaN, which neither the
+    # clamp nor the E4M3 / UE5M3 cast strips (both formats reserve a NaN code),
+    # so it would contaminate the stored inner scale and every downstream GEMM
+    # input.  Sanitise the per-block amax to 0 here, before the scale math.
+    max_abs = tl.where(max_abs != max_abs, 0.0, max_abs)
+
+    if SCALE_FORMAT_IS_UE5M3:
+        SCALE_EPS: tl.constexpr = _UE5M3_EPS
+        SCALE_MAX: tl.constexpr = _UE5M3_MAX
+    else:
+        SCALE_EPS: tl.constexpr = _E4M3_EPS
+        SCALE_MAX: tl.constexpr = _F8E4M3_MAX
+
     if USE_OUTER_SCALE:
         outer_scale = tl.load(outer_scale_ptr)
         inner_scale_raw = max_abs / outer_scale / _F4_E2M1_MAX
-        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, _E4M3_EPS), _F8E4M3_MAX)
-        inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
-        quant_scale = inner_scale * outer_scale
     else:
         inner_scale_raw = max_abs / _F4_E2M1_MAX
-        inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, _E4M3_EPS), _F8E4M3_MAX)
+
+    inner_scale_raw = tl.minimum(tl.maximum(inner_scale_raw, SCALE_EPS), SCALE_MAX)
+    if SCALE_FORMAT_IS_UE5M3:
+        inner_scale = quantize_ue5m3(inner_scale_raw)
+    else:
         inner_scale = inner_scale_raw.to(tl.float8e4nv).to(tl.float32)
+
+    if USE_OUTER_SCALE:
+        quant_scale = inner_scale * outer_scale
+    else:
         quant_scale = inner_scale
 
     return inner_scale, quant_scale
@@ -281,6 +316,7 @@ def _convert_to_nvfp4_kernel(
     IS_2D_BLOCK: tl.constexpr,
     USE_OUTER_SCALE: tl.constexpr,
     USE_SR: tl.constexpr,
+    SCALE_FORMAT_IS_UE5M3: tl.constexpr = False,
 ):
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
@@ -319,6 +355,7 @@ def _convert_to_nvfp4_kernel(
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_OUTER_SCALE=USE_OUTER_SCALE,
+        SCALE_FORMAT_IS_UE5M3=SCALE_FORMAT_IS_UE5M3,
     )
 
     y = _pack_fp4(
@@ -436,12 +473,17 @@ def compute_dynamic_outer_scale(
     Per spec, the outer scale stays in FP32 with only a
     ``_OUTER_SCALE_DIVZERO_FLOOR`` div-by-zero guard (``amax == 0``).
 
-    The *scale_format* parameter is reserved for future scale representations
-    (e.g. ``"e5m3"``).  Currently only ``"e4m3"`` is supported.
+    *scale_format* selects the inner-block scale grid (``"e4m3"`` for NVFP4,
+    ``"ue5m3"`` for AMD-FP4); the outer scale is normalised by that grid's
+    max representable value so the per-block inner scale lands in range.
     """
     _check_scale_format(scale_format)
-    amax = data_hp.float().abs().max()
-    outer_scale = (amax / (F8E4M3_MAX * F4_E2M1_MAX)).clamp(min=_OUTER_SCALE_DIVZERO_FLOOR)
+    _, scale_max = _SCALE_FORMAT_TABLE[scale_format]
+    # ``clamp`` does not strip NaN, so sanitise the amax first: a NaN in the
+    # data would otherwise produce a NaN outer scale that contaminates every
+    # downstream per-block divisor.
+    amax = torch.nan_to_num(data_hp.float().abs().max(), nan=0.0)
+    outer_scale = (amax / (scale_max * F4_E2M1_MAX)).clamp(min=_OUTER_SCALE_DIVZERO_FLOOR)
     return outer_scale.to(dtype=torch.float32).reshape(1)
 
 
@@ -529,13 +571,13 @@ def convert_to_nvfp4(
         )
         if update_outer_scale:
             outer_scale.copy_(
-                compute_dynamic_outer_scale(data_hp).reshape_as(outer_scale)
+                compute_dynamic_outer_scale(data_hp, scale_format).reshape_as(outer_scale)
             )
         outer_scale_buf = outer_scale.reshape(())
         use_outer_scale = True
     elif update_outer_scale:
         # No buffer supplied — compute an ephemeral scale for this call.
-        outer_scale_buf = compute_dynamic_outer_scale(data_hp).reshape(())
+        outer_scale_buf = compute_dynamic_outer_scale(data_hp, scale_format).reshape(())
         use_outer_scale = True
     else:
         outer_scale_buf = torch.ones((), dtype=torch.float32, device=data_hp.device)
@@ -579,6 +621,7 @@ def convert_to_nvfp4(
         IS_2D_BLOCK=is_2d_block,
         USE_OUTER_SCALE=use_outer_scale,
         USE_SR=use_sr,
+        SCALE_FORMAT_IS_UE5M3=(scale_format == "ue5m3"),
     )
 
     return (
@@ -721,6 +764,7 @@ def _qdq(
     use_sr: bool = False,
     block_size: int = 16,
     return_raw: bool = False,
+    scale_format: str = "e4m3",
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Quantize to NVFP4 then immediately dequantize back (QDQ round-trip).
 
@@ -750,6 +794,7 @@ def _qdq(
         # With ``outer_scale`` provided, refresh it in-place from tensor.amax();
         # without it, skip outer-level scaling entirely.
         update_outer_scale=use_outer_scale,
+        scale_format=scale_format,
         use_sr=use_sr,
     )
     dq = convert_from_nvfp4(
@@ -760,6 +805,7 @@ def _qdq(
         axis=axis,
         is_2d_block=is_2d_block,
         outer_scale=outer_scale,
+        scale_format=scale_format,
     )
     if return_raw:
         return dq, data_lp, scales

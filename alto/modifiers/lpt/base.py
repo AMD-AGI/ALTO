@@ -81,7 +81,7 @@ class LowPrecisionTrainingModifier(Modifier):
 
     @field_validator("scheme", mode="before")
     def validate_scheme(cls, value: str | dict[str, str | list[str]]) -> str | dict[str, list[str]]:
-        if isinstance(value, str) and value not in ["mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]:
+        if isinstance(value, str) and value not in ["mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4", "amdfp4"]:
             raise ValueError(f"Unsupported training op scheme: {value}")
 
         if isinstance(value, dict):
@@ -100,10 +100,10 @@ class LowPrecisionTrainingModifier(Modifier):
 
         schemes = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
         for scheme_name in schemes:
-            if scheme_name == "nvfp4":
+            if scheme_name in ("nvfp4", "amdfp4"):
                 if self.lora_rank % 16 != 0:
                     raise ValueError(
-                        f"lora_rank must be divisible by 16 for nvfp4, got {self.lora_rank}"
+                        f"lora_rank must be divisible by 16 for {scheme_name}, got {self.lora_rank}"
                     )
             elif scheme_name in ("mxfp4", "mxfp8_e4m3", "mxfp8_e5m2"):
                 if self.lora_rank % 32 != 0:

@@ -31,7 +31,9 @@ def _get_tensor_cls_for_config(config: TrainingOpConfig) -> Type[torch.Tensor]:
         return MXFP4TrainingWeightWrapperTensor
     elif config.precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
         return MXFP8TrainingWeightWrapperTensor
-    elif config.precision == "nvfp4":
+    elif config.precision in ("nvfp4", "amdfp4"):
+        # AMD-FP4 reuses the NVFP4 wrapper; it re-dispatches on
+        # ``config.precision`` internally to pin the UE5M3 inner grid.
         return NVFP4TrainingWeightWrapperTensor
     else:
         raise ValueError(f"Unsupported training op config: {config}")

@@ -4,7 +4,12 @@
 
 import torch
 from torch import Tensor
-from alto.kernels.fp4.nvfp4.nvfp_quantization import BLOCK_SIZE_DEFAULT
+from alto.kernels.fp4.nvfp4.nvfp_quantization import (
+    BLOCK_SIZE_DEFAULT,
+    SUPPORTED_SCALE_FORMATS,
+    _SCALE_FORMAT_TABLE,
+)
+from alto.kernels.fp4.fp4_common import quantize_to_ue5m3
 
 # Re-exported so existing ``from .utils import calc_snr, calc_cossim``
 # call-sites keep working; the single source of truth lives in
@@ -15,6 +20,28 @@ from alto.kernels.fp4.testing_utils import calc_snr, calc_cossim  # noqa: F401
 F4_E2M1_MAX = 6.0
 F8E4M3_MAX = 448.0
 E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
+
+
+def _quantize_inner_scale(inner_scale_raw: Tensor, scale_format: str) -> Tensor:
+    """Snap per-block inner scales to the selected inner grid (FP32 out).
+
+    NaN / +-Inf are sanitised to ``[fmt_eps, fmt_max]`` before the cast so a
+    NaN never propagates a 0xFF (UE5M3 NaN / E4M3 NaN) code into downstream
+    GEMM scales -- mirroring the TransformerEngine / vLLM / TRT-LLM pattern.
+    """
+    if scale_format not in _SCALE_FORMAT_TABLE:
+        raise ValueError(
+            f"scale_format={scale_format!r} not supported; "
+            f"expected one of {SUPPORTED_SCALE_FORMATS}"
+        )
+    fmt_eps, fmt_max = _SCALE_FORMAT_TABLE[scale_format]
+    inner_scale_raw = torch.nan_to_num(
+        inner_scale_raw, nan=fmt_eps, posinf=fmt_max, neginf=fmt_eps,
+    )
+    clamped = inner_scale_raw.clamp(min=fmt_eps, max=fmt_max)
+    if scale_format == "ue5m3":
+        return quantize_to_ue5m3(clamped.float())
+    return clamped.float().to(torch.float8_e4m3fn).to(torch.float32)
 
 
 def prepare_data(tensor_shape, data_type, pattern="random"):
@@ -41,6 +68,20 @@ def prepare_data(tensor_shape, data_type, pattern="random"):
         x = torch.zeros(tensor_shape, dtype=data_type, device=device)
     elif pattern == "large":
         x = torch.ones(tensor_shape, dtype=data_type, device=device) * 5000.0
+    elif pattern == "hot_channel":
+        x = torch.randn(tensor_shape, dtype=data_type, device=device)
+        col = tensor_shape[-1] // 2
+        x[..., col] = 300.0
+    elif pattern == "lognormal":
+        x = torch.exp(torch.randn(tensor_shape, dtype=data_type, device=device) * 1.5)
+    elif pattern == "near_overflow":
+        x = torch.ones(tensor_shape, dtype=data_type, device=device) * 1.0e4
+    elif pattern == "near_underflow":
+        x = torch.ones(tensor_shape, dtype=data_type, device=device) * 1.0e-4
+    elif pattern == "single_spike":
+        x = torch.zeros(tensor_shape, dtype=data_type, device=device)
+        flat = x.reshape(-1)
+        flat[flat.numel() // 2] = 5000.0
     else:
         raise ValueError(f"Unknown pattern: {pattern}")
 
@@ -244,7 +285,7 @@ def convert_to_nvfp4_pytorch(
     scale_format: str = "e4m3",
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
-    assert scale_format == "e4m3", f"scale_format={scale_format!r} not yet supported"
+    fmt_eps, fmt_max = _SCALE_FORMAT_TABLE[scale_format]
 
     data_hp = data_hp.transpose(axis, -1)
     ori_shape = data_hp.shape
@@ -268,12 +309,12 @@ def convert_to_nvfp4_pytorch(
     # final stored value.
     if outer_scale is not None:
         outer_scale = outer_scale.float().to(data_hp.device)
-        inner_scale_raw = (max_abs / outer_scale / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
-        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        inner_scale_raw = (max_abs / outer_scale / F4_E2M1_MAX).clamp(min=fmt_eps, max=fmt_max)
+        inner_scale = _quantize_inner_scale(inner_scale_raw, scale_format)
         quant_scale = inner_scale * outer_scale
     else:
-        inner_scale_raw = (max_abs / F4_E2M1_MAX).clamp(min=E4M3_EPS, max=F8E4M3_MAX)
-        inner_scale = inner_scale_raw.to(torch.float8_e4m3fn).to(torch.float32)
+        inner_scale_raw = (max_abs / F4_E2M1_MAX).clamp(min=fmt_eps, max=fmt_max)
+        inner_scale = _quantize_inner_scale(inner_scale_raw, scale_format)
         quant_scale = inner_scale
 
     if is_2d_block:

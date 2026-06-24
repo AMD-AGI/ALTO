@@ -20,6 +20,10 @@ from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_m
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,)
+from alto.kernels.fp4.amdfp4 import (
+    _quantize_then_amdfp4_scaled_grouped_mm,
+    _to_amdfp4_then_scaled_mm,
+)
 from alto.kernels.mxfp8.mxfp8_linear import _to_mxfp8_then_scaled_mm
 from .config import TrainingOpConfig
 
@@ -336,12 +340,11 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert bias is None, "Bias is not supported for grouped_mm"
 
             config = B.config
-            assert config.precision == "nvfp4", (
-                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}")
+            assert config.precision in ("nvfp4", "amdfp4"), (
+                "expected TrainingOpConfig with precision in {'nvfp4','amdfp4'}, "
+                f"got {config.precision}")
 
-            return _quantize_then_nvfp4_scaled_grouped_mm(
-                A,
-                B,
+            common_kwargs = dict(
                 offs=offs,
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
@@ -350,6 +353,16 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )
+            # ``precision`` is the single source of truth for the inner-scale
+            # grid: each helper pins its own grid internally (nvfp4 → E4M3,
+            # amdfp4 → UE5M3), so no ``scale_format`` is threaded here.  The
+            # dict is built at call time so that test monkeypatching of either
+            # helper on this module is honoured.
+            grouped_fn = {
+                "nvfp4": _quantize_then_nvfp4_scaled_grouped_mm,
+                "amdfp4": _quantize_then_amdfp4_scaled_grouped_mm,
+            }[config.precision]
+            return grouped_fn(A, B, **common_kwargs)
 
         # linear / mm overrides
         elif func.__name__ in gemm_ops:
@@ -364,8 +377,9 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert isinstance(B, cls), (f"B should be a {cls.__name__} for func {func.__name__}")
 
             config = B.config
-            assert config.precision == "nvfp4", (
-                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}")
+            assert config.precision in ("nvfp4", "amdfp4"), (
+                "expected TrainingOpConfig with precision in {'nvfp4','amdfp4'}, "
+                f"got {config.precision}")
 
             # Pass the wrapper tensor itself into the autograd function —
             # matching the MXFP4 path — so that any upstream subclass
@@ -376,9 +390,7 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # entry, so the autograd tape and downstream QDQ ops still see
             # plain tensors.
             W = B if trans_b else B.T
-            Y = _to_nvfp4_then_scaled_mm(
-                A,
-                W,
+            common_kwargs = dict(
                 use_2dblock_x=config.use_2dblock_x,
                 use_2dblock_w=config.use_2dblock_w,
                 use_sr_grad=config.use_sr_grad,
@@ -386,6 +398,14 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )
+            # See the grouped-mm branch: ``precision`` selects the kernel
+            # family (and thus the inner-scale grid) directly; the chosen
+            # helper pins its own grid, so no ``scale_format`` is threaded.
+            linear_fn = {
+                "nvfp4": _to_nvfp4_then_scaled_mm,
+                "amdfp4": _to_amdfp4_then_scaled_mm,
+            }[config.precision]
+            Y = linear_fn(A, W, **common_kwargs)
             if bias is not None:
                 Y = Y + bias
             return Y

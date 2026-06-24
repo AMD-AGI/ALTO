@@ -132,8 +132,10 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
     grouped-MM expert weights (axis ``-2``) that share a config.
     """
     from alto.kernels.fp4 import (
+        convert_from_amdfp4,
         convert_from_mxfp4,
         convert_from_nvfp4,
+        convert_to_amdfp4,
         convert_to_mxfp4,
         convert_to_nvfp4,
     )
@@ -165,8 +167,17 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 dequantized = dequantized[:original_rows, :]
             return dequantized
 
-    elif cfg.precision == "nvfp4":
+    elif cfg.precision in ("nvfp4", "amdfp4"):
         use_outer_scale = cfg.two_level_scaling == "tensorwise"
+        # AMD-FP4 shares the NVFP4 micro-block layout (16-element blocks +
+        # FP32 outer scale); the only difference is the inner-scale grid,
+        # which is pinned by *which* convert ops we call (amdfp4 → UE5M3,
+        # nvfp4 → E4M3).  Everything else (padding, outer scale, axis) is
+        # identical, so the closure below is shared.
+        if cfg.precision == "amdfp4":
+            convert_to_fp4, convert_from_fp4 = convert_to_amdfp4, convert_from_amdfp4
+        else:
+            convert_to_fp4, convert_from_fp4 = convert_to_nvfp4, convert_from_nvfp4
 
         def qdq(w: torch.Tensor, axis: int) -> torch.Tensor:
             # hotfix for GPT-OSS 20B model
@@ -182,12 +193,12 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 else None
             )
 
-            data_lp, scales = convert_to_nvfp4(
+            data_lp, scales = convert_to_fp4(
                 w, axis=axis, is_2d_block=is_2d_block,
                 outer_scale=outer_scale,
                 update_outer_scale=use_outer_scale,
             )
-            dequantized = convert_from_nvfp4(
+            dequantized = convert_from_fp4(
                 data_lp,
                 scales,
                 output_dtype=w.dtype,

@@ -21,6 +21,7 @@ CUDA / ROCm is required.  The whole module is skipped otherwise.
 
 from __future__ import annotations
 
+import hashlib
 import math
 
 import pytest
@@ -129,9 +130,20 @@ def test_triton_parity_random_1m(seed):
 # Parity on the AMD-FP4 stress pattern matrix
 # ---------------------------------------------------------------------------
 
+def _stable_seed(name: str) -> int:
+    """Deterministic per-name seed.
+
+    Python's built-in ``hash()`` of a ``str`` is salted per process
+    (PYTHONHASHSEED), so seeding off it makes the stress patterns differ
+    between runs and breaks reproducibility.  Derive the seed from a stable
+    digest instead so a given pattern name always yields the same tensor.
+    """
+    return int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "big")
+
+
 def _make_pattern(name: str, n: int) -> torch.Tensor:
     """Build one of the named stress patterns used across AMD-FP4 tests."""
-    torch.manual_seed(hash(name) & 0xFFFFFFFF)
+    torch.manual_seed(_stable_seed(name))
     if name == "zeros":
         return torch.zeros(n, dtype=torch.float32)
     if name == "small_random":

@@ -8,9 +8,9 @@ These tests lock down the AMD-FP4 entry of
 :class:`alto.kernels.dispatch.tensor.NVFP4TrainingWeightWrapperTensor` (the
 NVFP4 / AMD-FP4 family share one wrapper class):
 
-* ``TrainingOpConfig(precision='amdfp4')`` forces ``inner_scale_format``
-  to ``"ue5m3"`` via ``__post_init__`` (``"e4m3"`` default is silently
-  upgraded; any explicit non-UE5M3 value is rejected).
+* ``precision`` is the single source of truth for the inner-scale grid:
+  ``precision='amdfp4'`` implies the UE5M3 grid with no separate knob to set
+  or mis-set (there is no ``inner_scale_format`` field).
 * Linear / grouped_mm dispatch under ``precision='amdfp4'`` routes to the
   AMD-FP4 thin wrappers (``_to_amdfp4_then_scaled_mm`` /
   ``_quantize_then_amdfp4_scaled_grouped_mm``), not the NVFP4 ones.
@@ -54,16 +54,13 @@ def device() -> torch.device:
 # Config-level invariants
 # ---------------------------------------------------------------------------
 
-def test_amdfp4_config_default_inner_scale_format_promoted_to_ue5m3():
-    """Caller didn't set ``inner_scale_format`` -> it must be silently
-    promoted to ``"ue5m3"`` (AMD-FP4 = NVFP4 spec + UE5M3)."""
+def test_amdfp4_config_has_no_inner_scale_format_knob():
+    """The inner-scale grid is implied by ``precision`` alone — there is no
+    separate ``inner_scale_format`` field to set or mis-set.  This locks in
+    the design decision (precision is the single source of truth)."""
     cfg = _make_amdfp4_config()
-    assert cfg.inner_scale_format == "ue5m3"
-
-
-def test_amdfp4_config_explicit_ue5m3_is_accepted():
-    cfg = _make_amdfp4_config(inner_scale_format="ue5m3")
-    assert cfg.inner_scale_format == "ue5m3"
+    assert cfg.precision == "amdfp4"
+    assert not hasattr(cfg, "inner_scale_format")
 
 
 def test_amdfp4_swap_params_wraps_linear_weight():
@@ -87,29 +84,6 @@ def test_amdfp4_swap_params_wraps_linear_weight():
         "NVFP4/AMD-FP4 family wrapper tensor"
     )
     assert linear.weight.data.config.precision == "amdfp4"
-    assert linear.weight.data.config.inner_scale_format == "ue5m3"
-
-
-def test_amdfp4_config_rejects_explicit_non_ue5m3_inner_scale_format():
-    """Explicit ``e4m3`` request under ``precision='amdfp4'`` would silently
-    flip the recipe to NVFP4-on-an-AMD-FP4-label.  ``__post_init__`` must
-    reject it.  We construct via the dataclass directly to bypass our
-    helper's silent default."""
-    with pytest.raises(ValueError, match="inner_scale_format"):
-        TrainingOpConfig(
-            precision="amdfp4",
-            use_2dblock_x=False,
-            use_2dblock_w=False,
-            use_hadamard=False,
-            use_sr_grad=False,
-            use_dge=False,
-            # The dataclass default is ``"e4m3"``, but that gets silently
-            # promoted; any *other* explicit value fails.  Pick a value
-            # outside the Literal to demonstrate.  ``inner_scale_format``
-            # uses ``Literal["e4m3","ue5m3"]`` so we use the runtime
-            # validator rather than mypy's static check here.
-            inner_scale_format="bogus",  # type: ignore[arg-type]
-        )
 
 
 # ---------------------------------------------------------------------------

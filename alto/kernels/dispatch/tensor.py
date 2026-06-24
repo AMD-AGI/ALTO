@@ -353,17 +353,16 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )
-            if config.precision == "amdfp4":
-                # Inner grid is hard-pinned to UE5M3 inside the wrapper.
-                return _quantize_then_amdfp4_scaled_grouped_mm(A, B, **common_kwargs)
-            return _quantize_then_nvfp4_scaled_grouped_mm(
-                A,
-                B,
-                # ``inner_scale_format`` is the NVFP4 inner-grid selector
-                # (E4M3 default, optional UE5M3); orthogonal to ``precision``.
-                scale_format=config.inner_scale_format,
-                **common_kwargs,
-            )
+            # ``precision`` is the single source of truth for the inner-scale
+            # grid: each helper pins its own grid internally (nvfp4 → E4M3,
+            # amdfp4 → UE5M3), so no ``scale_format`` is threaded here.  The
+            # dict is built at call time so that test monkeypatching of either
+            # helper on this module is honoured.
+            grouped_fn = {
+                "nvfp4": _quantize_then_nvfp4_scaled_grouped_mm,
+                "amdfp4": _quantize_then_amdfp4_scaled_grouped_mm,
+            }[config.precision]
+            return grouped_fn(A, B, **common_kwargs)
 
         # linear / mm overrides
         elif func.__name__ in gemm_ops:
@@ -399,12 +398,14 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_hadamard=config.use_hadamard,
                 use_dge=config.use_dge,
             )
-            if config.precision == "amdfp4":
-                Y = _to_amdfp4_then_scaled_mm(A, W, **common_kwargs)
-            else:
-                Y = _to_nvfp4_then_scaled_mm(
-                    A, W, scale_format=config.inner_scale_format, **common_kwargs,
-                )
+            # See the grouped-mm branch: ``precision`` selects the kernel
+            # family (and thus the inner-scale grid) directly; the chosen
+            # helper pins its own grid, so no ``scale_format`` is threaded.
+            linear_fn = {
+                "nvfp4": _to_nvfp4_then_scaled_mm,
+                "amdfp4": _to_amdfp4_then_scaled_mm,
+            }[config.precision]
+            Y = linear_fn(A, W, **common_kwargs)
             if bias is not None:
                 Y = Y + bias
             return Y

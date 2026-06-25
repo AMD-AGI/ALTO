@@ -2,6 +2,8 @@
 
 ## v0.0.2 [dev]
 
+- Changed
+    - **[BREAKING CHANGE]** rewind validation dataloader each step
 - Added
     - Weight De-Oscillation for FP4
     - AMDFP4 (ue5m3 scales) support

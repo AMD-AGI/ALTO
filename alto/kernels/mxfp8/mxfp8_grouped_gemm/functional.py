@@ -29,6 +29,8 @@ def mxfp8_grouped_gemm(
     """
     if expert_indices.dtype != torch.int32:
         expert_indices = expert_indices.to(torch.int32)
+    if not expert_indices.is_contiguous():
+        expert_indices = expert_indices.contiguous()
 
     return MXFP8GroupedGEMM.apply(
         inputs,

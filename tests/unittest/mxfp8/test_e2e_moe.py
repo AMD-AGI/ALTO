@@ -4,7 +4,7 @@
 """toy MoE training sanity for mxfp8 grouped GEMM (PLAN.md §7).
 
 Single-step autograd correctness is already covered in
-test_mxfp8_grouped_gemm_backward.py. This file validates the §0 assumption that
+test_mxfp8_grouped_gemm.py. This file validates the §0 assumption that
 V1 all-e4m3 is good enough to *train* a toy MoE for ~100 steps without diverging:
 loss must stay finite, trend down, and track a bf16 baseline run with the same
 init / data / routing.

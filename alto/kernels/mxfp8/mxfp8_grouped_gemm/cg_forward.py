@@ -125,6 +125,14 @@ def _kernel_mxfp8_grouped_gemm_forward(
             else:
                 offs_n_scale = offs_n
 
+            # Determine the expert group index and load expert ID.
+            # Constant for the whole (M, N) tile, so hoist out of the K loop.
+            group_idx = m_start // GROUP_SIZE_M
+            expert_idx = tl.load(indices_ptr + group_idx * GROUP_SIZE_M)
+
+            mask_m = offs_m < M_TOTAL
+            mask_n = offs_n < N
+
             accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
             for ki in range(k_tiles):
 
@@ -132,16 +140,10 @@ def _kernel_mxfp8_grouped_gemm_forward(
                 offs_k_scale = ki * n_rep_k + tl.arange(0, n_rep_k)
                 mask_k_scale = offs_k_scale < Ks
 
-                mask_m = offs_m < M_TOTAL
-                mask_n = offs_n < N
                 mask_k = offs_k < K
 
                 mask_a = mask_m[:, None] & mask_k[None, :]
                 mask_b = mask_k[:, None] & mask_n[None, :]
-
-                # Determine the expert group index and load expert ID
-                group_idx = m_start // GROUP_SIZE_M
-                expert_idx = tl.load(indices_ptr + group_idx * GROUP_SIZE_M)
 
                 # Load inputs A [BLOCK_M, BLOCK_K]
                 a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak

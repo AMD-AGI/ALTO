@@ -88,6 +88,20 @@ def _nvfp4_autograd_snr_thresholds(
             return (10.0, 12.0) if use_sr_grad else (12.0, 14.0)
         return (12.0, 14.0) if use_sr_grad else (14.0, 15.0)
 
+    if kind == "nvfp4_linear_outer_block":
+        # Outer-block scaling on a per-128 grid contains every outlier within
+        # a single FP32 outer scale, so the inner E4M3 scale always sits in
+        # its sweet spot.  Empirically this is +2 dB tighter than the PTS
+        # linear path; reflect that in the regression contract so a quiet
+        # regression on the outer-block QDQ path (e.g. a clamp bug, a
+        # mismatched axis) is caught even when the broader nvfp4_linear
+        # thresholds would still pass.
+        if K >= 1024:
+            return (5.0, 6.5) if use_sr_grad else (6.0, 10.0)
+        if K >= 256:
+            return (12.0, 14.0) if use_sr_grad else (14.0, 16.0)
+        return (14.0, 16.0) if use_sr_grad else (16.0, 17.0)
+
     if kind == "nvfp4_grouped_gemm":
         if use_outer_scale:
             # Grouped paths (especially 2D-block + large G) trail linear outer

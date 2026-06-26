@@ -25,6 +25,7 @@ from alto.kernels.fp4.amdfp4 import (
     _to_amdfp4_then_scaled_mm,
 )
 from alto.kernels.mxfp8.mxfp8_linear import _to_mxfp8_then_scaled_mm
+from alto.kernels.mxfp8.mxfp8_grouped_gemm import _quantize_then_mxfp8_scaled_grouped_mm
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten
@@ -426,8 +427,35 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
     @classmethod
     def __torch_function__(cls, func, types, args, kwargs={}):
         if func.__name__ == "_grouped_mm":
-            raise NotImplementedError("MXFP8 _grouped_mm is not supported by this dispatch path; "
-                                      "restrict MXFP8 schemes to Linear targets.")
+            # Routed-expert MoE path: 2d activations x 3d weights with offsets.
+            A, B = args[0], args[1]
+            bias = kwargs.get("bias", None)
+            offs = kwargs.get("offs", None)
+
+            assert not isinstance(A, cls), f"A should not be a {cls.__name__}"
+            assert isinstance(B, cls), f"B should be a {cls.__name__}"
+            assert A.ndim == 2 and B.ndim == 3 and offs is not None, (
+                "Only 2d x 3d with offsets is supported for MXFP8 grouped_mm"
+            )
+            assert bias is None, "Bias is not supported for grouped_mm"
+
+            config = B.config
+            assert config.precision == "mxfp8_e4m3", (
+                "MXFP8 grouped_mm V1 supports only mxfp8_e4m3; "
+                f"got {config.precision} (e5m2 grouped path is not yet validated)"
+            )
+            assert not config.use_hadamard and not config.use_dge, (
+                "MXFP8 grouped_mm V1 does not support Hadamard or DGE options."
+            )
+
+            return _quantize_then_mxfp8_scaled_grouped_mm(
+                A,
+                B,
+                offs=offs,
+                use_2dblock_x=config.use_2dblock_x,
+                use_2dblock_w=config.use_2dblock_w,
+                use_sr_grad=config.use_sr_grad,
+            )
 
         if func.__name__ in gemm_ops:
             trans_b = func.__name__ == "linear"

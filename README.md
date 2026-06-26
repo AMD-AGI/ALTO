@@ -20,6 +20,7 @@ Training-oriented kernels and schemes include:
 
 - **[Blockwise FP8](alto/kernels/blockwise_fp8)** — linear, grouped GEMM, and FlashAttention.
 - **[MXFP4](alto/kernels/fp4/mxfp4)** — linear, grouped GEMM, and FlashAttention.
+- **[MXFP8](alto/kernels/mxfp8)** — linear and grouped GEMM (block-scaled E4M3, with E5M2 reserved for gradients).
 - **[NVFP4](alto/kernels/fp4/nvfp4)** — linear and grouped GEMM, using an E4M3 inner-block scale with an optional two-level (tensorwise) outer scale.
 
 Techniques used to narrow the gap versus BF16 include:

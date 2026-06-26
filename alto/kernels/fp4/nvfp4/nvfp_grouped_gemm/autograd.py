@@ -30,7 +30,11 @@ import torch
 
 from alto.kernels.dge import dge_bwd
 from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
-from alto.kernels.fp4.nvfp4.nvfp_quantization import _qdq, convert_from_nvfp4
+from alto.kernels.fp4.nvfp4.nvfp_quantization import (
+    OUTER_BLOCK_SIZE_DEFAULT,
+    _qdq,
+    convert_from_nvfp4,
+)
 from alto.kernels.hadamard_transform import HadamardTransform
 from .autotune import ALIGN_SIZE_M
 from .cg_backward import _nvfp4_grouped_dgrad, _nvfp4_grouped_wgrad
@@ -76,7 +80,24 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
         scale_format: str = "e4m3",
+        use_outer_block_scale: bool = False,
+        use_outer_2dblock_w: bool = False,
+        outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
     ) -> torch.Tensor:
+        # Outer-block scaling for grouped GEMM (v1): per-expert/per-tile FP32
+        # outer scale instead of one tensorwise scalar over [E, N, K].
+        # Activations use a 1D outer block (1 x outer_block_size over K); weights
+        # use ``use_outer_2dblock_w`` (per-expert 2D tiles).  Tensorwise and
+        # outer-block are mutually exclusive; DGE is unsupported with outer-block
+        # (mirrors the dense NVFP4LinearFunction contract).
+        torch._check(
+            not (use_outer_scale and use_outer_block_scale),
+            lambda: "grouped NVFP4: tensorwise and outer-block scale are mutually exclusive.",
+        )
+        torch._check(
+            not (use_dge and use_outer_block_scale),
+            lambda: "grouped NVFP4 outer-block scaling does not support DGE.",
+        )
         M_bufferlen = inputs.shape[0]
         original_dtype = inputs.dtype
         expert_weights = unwrap_weight_wrapper(expert_weights)
@@ -104,11 +125,15 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             inputs, axis=-1, is_2d_block=use_2dblock_x,
             use_outer_scale=use_outer_scale,
             scale_format=scale_format,
+            use_outer_block_scale=use_outer_block_scale,
+            is_2d_outer=False, outer_block_size=outer_block_size,
         )
         w_dq = _qdq(
             expert_weights, axis=_FPROP_AXIS_W, is_2d_block=use_2dblock_w,
             use_outer_scale=use_outer_scale,
             scale_format=scale_format,
+            use_outer_block_scale=use_outer_block_scale,
+            is_2d_outer=use_outer_2dblock_w, outer_block_size=outer_block_size,
         )
         y = _nvfp4_grouped_fprop(
             x_dq,
@@ -127,6 +152,9 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
                 is_2d_block=False,
                 use_outer_scale=use_outer_scale,
                 scale_format=scale_format,
+                use_outer_block_scale=use_outer_block_scale,
+                is_2d_outer=use_outer_2dblock_w,
+                outer_block_size=outer_block_size,
                 return_raw=use_dge,
             )
             if use_dge:
@@ -154,6 +182,8 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
                 x_for_wgrad, axis=0, is_2d_block=False,
                 use_outer_scale=use_outer_scale,
                 scale_format=scale_format,
+                use_outer_block_scale=use_outer_block_scale,
+                is_2d_outer=False, outer_block_size=outer_block_size,
             )
         else:
             x_bwd = x_dq
@@ -166,6 +196,9 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         ctx.use_2dblock_w = use_2dblock_w
         ctx.use_sr_grad = use_sr_grad
         ctx.use_outer_scale = use_outer_scale
+        ctx.use_outer_block_scale = use_outer_block_scale
+        ctx.use_outer_2dblock_w = use_outer_2dblock_w
+        ctx.outer_block_size = outer_block_size
         ctx.num_experts = num_experts
         ctx.num_groups = num_groups
         ctx.original_dtype = original_dtype
@@ -199,6 +232,8 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             grad_output, axis=-1, is_2d_block=ctx.use_2dblock_x,
             use_outer_scale=ctx.use_outer_scale, use_sr=ctx.use_sr_grad,
             scale_format=ctx.scale_format,
+            use_outer_block_scale=ctx.use_outer_block_scale,
+            is_2d_outer=False, outer_block_size=ctx.outer_block_size,
         )
         grad_inputs = _nvfp4_grouped_dgrad(
             g_dq,
@@ -224,6 +259,8 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
             use_2dblock_x=ctx.use_2dblock_x,
             output_dtype=ctx.original_dtype,
             scale_format=ctx.scale_format,
+            use_outer_block_scale=ctx.use_outer_block_scale,
+            outer_block_size=ctx.outer_block_size,
         )
 
         if ctx.use_dge:
@@ -243,8 +280,11 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
         # Return grads with arity matching forward's positional inputs:
         #   (inputs, expert_weights, expert_indices, offs,
         #    use_2dblock_x, use_2dblock_w, use_sr_grad, use_outer_scale,
-        #    hadamard_transform, use_dge, scale_format)
+        #    hadamard_transform, use_dge, scale_format,
+        #    use_outer_block_scale, use_outer_2dblock_w, outer_block_size)
+        #    -> 14 inputs, 12 None grad slots after the two tensor grads.
         return (
             grad_inputs, grad_weights,
-            None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None,
+            None, None,
         )

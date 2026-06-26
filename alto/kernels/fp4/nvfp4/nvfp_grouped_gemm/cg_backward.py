@@ -14,7 +14,7 @@ from alto.kernels.blockwise_fp8.grouped_gemm.cg_backward import (
     cg_grouped_gemm_backward_inputs,
     cg_grouped_gemm_backward_weights,
 )
-from alto.kernels.fp4.nvfp4.nvfp_quantization import _qdq
+from alto.kernels.fp4.nvfp4.nvfp_quantization import OUTER_BLOCK_SIZE_DEFAULT, _qdq
 
 from alto.kernels.fp4.fp4_common import (
     check_grouped_loop_contract,
@@ -93,24 +93,33 @@ def _nvfp4_grouped_wgrad(
     use_2dblock_x: bool,
     output_dtype: torch.dtype,
     scale_format: str = "e4m3",
+    use_outer_block_scale: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> torch.Tensor:
     """Quantize ``grad_output`` and compute the grouped weight gradient.
 
     Returns ``dW`` in the canonical ``[E, N, K]`` layout, matching both
     ``cg_grouped_gemm_backward_weights`` (CDNA4 native) and the autograd
     function's internal weight layout. No post-transpose needed.
+
+    ``grad_output`` is activation-like, so outer-block scaling uses a 1D outer
+    block (``is_2d_outer=False``) -- consistent with the activation path.
     """
     if use_2dblock_x:
         g_m_dq = _qdq(
             grad_output, axis=-1, is_2d_block=True,
             use_outer_scale=use_outer_scale, use_sr=use_sr_grad,
             scale_format=scale_format,
+            use_outer_block_scale=use_outer_block_scale,
+            is_2d_outer=False, outer_block_size=outer_block_size,
         )
     else:
         g_m_dq = _qdq(
             grad_output, axis=0, is_2d_block=False,
             use_outer_scale=use_outer_scale, use_sr=use_sr_grad,
             scale_format=scale_format,
+            use_outer_block_scale=use_outer_block_scale,
+            is_2d_outer=False, outer_block_size=outer_block_size,
         )
 
     if use_cdna4_grouped_backend():

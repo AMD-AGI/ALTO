@@ -154,8 +154,12 @@ class LowPrecisionTrainingModifier(Modifier):
         back to ``swap_params``' default (looked up from the config precision)."""
         scheme_name = getattr(self, "_scheme_tag", {}).get(scheme_obj)
         if scheme_name == "mxfp4_adahop":
-            from alto.kernels.dispatch.adahop_tensor import MXFP4CalibrationWrapper
-            return MXFP4CalibrationWrapper
+            # Single-wrapper design: wrap with the AdaHOP wrapper from convert
+            # time (modes default "none" == plain MXFP4 during calibration). The
+            # AdaHOPModifier flips the modes in place at Phase B so they take
+            # effect on the FSDP-owned tensor.
+            from alto.kernels.dispatch.adahop_tensor import MXFP4AdaHOPWrapper
+            return MXFP4AdaHOPWrapper
         return None
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:

@@ -35,21 +35,31 @@ def helpers():
     return _load_helpers()
 
 
-def test_forward_callback_writes_x_and_w_patterns(helpers):
+class _Det:
+    """Stand-in tensor that echoes a string from .detach()."""
+
+    def __init__(self, v):
+        self.v = v
+
+    def detach(self):
+        return self.v
+
+
+def test_forward_pre_hook_writes_x_and_w_patterns(helpers):
+    # module.weight.data._data is the underlying tensor the hook inspects.
+    weight = SimpleNamespace(data=SimpleNamespace(_data=_Det("col")))
+    module = SimpleNamespace(weight=weight)
     modifier = SimpleNamespace(_per_step_patterns=[{}])
 
-    def detect(t):
-        return t  # echo back; tests pass strings as "tensors"
-
-    cb = helpers.make_forward_callback(modifier, "layers.0.wq", detect)
-    cb("row", "col")
+    hook = helpers.make_forward_pre_hook(modifier, "layers.0.wq", lambda t: t)
+    hook(module, (_Det("row"),))
     assert modifier._per_step_patterns[-1]["layers.0.wq"] == {"x": "row", "w": "col"}
 
 
-def test_forward_callback_noop_when_no_step_dict(helpers):
+def test_forward_pre_hook_noop_when_no_step_dict(helpers):
     modifier = SimpleNamespace(_per_step_patterns=[])
-    cb = helpers.make_forward_callback(modifier, "layers.0.wq", lambda t: t)
-    cb("row", "col")
+    hook = helpers.make_forward_pre_hook(modifier, "layers.0.wq", lambda t: t)
+    hook(object(), (_Det("row"),))  # early-returns before touching module
     assert modifier._per_step_patterns == []
 
 

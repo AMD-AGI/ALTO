@@ -35,7 +35,7 @@ def _import_alto_kernel_free(name: str, path_parts: list[str]):
 pytest.importorskip("triton")  # adahop_tensor imports through alto.kernels.fp4 -> triton
 
 try:
-    from alto.kernels.dispatch.adahop_tensor import MXFP4AdaHOPWrapper, MXFP4CalibrationWrapper
+    from alto.kernels.dispatch.adahop_tensor import MXFP4AdaHOPWrapper
     from alto.kernels.dispatch.config import TrainingOpConfig
 except RuntimeError as exc:
     # ALTO's kernels init triton at import; on a no-GPU box that raises
@@ -55,13 +55,27 @@ def mxfp4_config():
     )
 
 
-def test_calibration_wrapper_accepts_optional_callback(mxfp4_config):
+def test_wrapper_defaults_to_calibrating_none_modes(mxfp4_config):
     t = torch.randn(8, 8)
-    w = MXFP4CalibrationWrapper(t, mxfp4_config)
-    assert w._calibration_callback is None
-    seen = []
-    w.attach_calibration_callback(lambda x, ww: seen.append((x.shape, ww.shape)))
-    assert w._calibration_callback is not None
+    w = MXFP4AdaHOPWrapper(t, mxfp4_config)
+    # Default (Phase-A) state: all modes "none" == plain MXFP4.
+    assert w._forward_y_mode == "none"
+    assert w._backward_gx_mode == "none"
+    assert w._backward_gw_mode == "none"
+    assert w.is_calibrating is True
+
+
+def test_wrapper_set_modes_in_place(mxfp4_config):
+    t = torch.randn(8, 8)
+    w = MXFP4AdaHOPWrapper(t, mxfp4_config)
+    w.set_modes(
+        forward_y_mode="hadamard",
+        backward_gx_mode="none",
+        backward_gw_mode="full_precision",
+    )
+    assert w._forward_y_mode == "hadamard"
+    assert w._backward_gw_mode == "full_precision"
+    assert w.is_calibrating is False
 
 
 def test_adahop_wrapper_rejects_unsupported_mode(mxfp4_config):

@@ -51,9 +51,18 @@ def _blockwise_mxfp4_gemm_or_dequant(
     output_dtype: torch.dtype,
     trans_a: bool = False,
     trans_b: bool = False,
+    a_axis: int = -1,
+    b_axis: int = -1,
 ) -> torch.Tensor:
     """Triton MXFP4 GEMM on cdna4, dequant-then-bf16-matmul fallback on cdna3.
-    Mirrors ``alto/kernels/fp4/mxfp4/mxfp_linear.py:321-353``."""
+    Mirrors ``alto/kernels/fp4/mxfp4/mxfp_linear.py:321-402``.
+
+    ``a_axis`` / ``b_axis`` give the axis each operand was PACKED along by
+    ``convert_to_mxfp4`` (== the GEMM contraction axis K). The cdna3 dequant must
+    unpack along that same axis; the cdna4 kernel infers it from the scale layout.
+    Defaults (-1) are correct for the forward; the backward GEMMs pack the weight
+    / activation along axis 0, so those operands need axis=0. Mismatching this
+    leaves the packed dim half-size, e.g. ``(8192x32) @ (16x5760)``."""
     if is_cdna4():
         return torch.ops.torchtitan.blockwise_mxfp4_gemm(
             a_mxfp4,
@@ -65,10 +74,10 @@ def _blockwise_mxfp4_gemm_or_dequant(
             output_dtype=output_dtype,
         )
     a_dq = torch.ops.torchtitan.convert_from_mxfp4(
-        a_mxfp4, a_scale, output_dtype, axis=-1, is_2d_block=False,
+        a_mxfp4, a_scale, output_dtype, axis=a_axis, is_2d_block=False,
     )
     b_dq = torch.ops.torchtitan.convert_from_mxfp4(
-        b_mxfp4, b_scale, output_dtype, axis=-1, is_2d_block=False,
+        b_mxfp4, b_scale, output_dtype, axis=b_axis, is_2d_block=False,
     )
     if trans_a:
         a_dq = a_dq.T
@@ -464,6 +473,7 @@ def _backward_gx(
     grad_inputs = _blockwise_mxfp4_gemm_or_dequant(
         g_mxfp4, g_scale, w, w_scale,
         output_dtype=original_dtype,
+        b_axis=0,  # weight packed along axis 0 (= contraction axis "out")
     )
     if mode == "outer_hadamard":
         grad_inputs = hadamard_transform(hadamard_transform(grad_inputs, left_mul=True))
@@ -526,6 +536,7 @@ def _backward_gw(
     grad_weights = _blockwise_mxfp4_gemm_or_dequant(
         g_mxfp4, g_scale, x, x_scale,
         trans_a=True, output_dtype=original_dtype,
+        a_axis=0, b_axis=0,  # grad_output and x both packed along axis 0 (= "M")
     )
     if mode == "outer_hadamard":
         grad_weights = hadamard_transform(hadamard_transform(grad_weights, left_mul=True))

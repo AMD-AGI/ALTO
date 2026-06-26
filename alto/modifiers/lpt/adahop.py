@@ -3,30 +3,36 @@
 # SPDX-License-Identifier: MIT
 """AdaHOP calibration + per-slot Hadamard mode selection modifier.
 
-Orchestrates the two-phase swap described in ADAHOP_TO_ALTO_INTEGRATION_PLAN.md:
+Strategy-2 design (see /home/alirezak/han_branch/porting_notes.txt). A SINGLE
+wrapper class (:class:`MXFP4AdaHOPWrapper`) is used from model-conversion time.
+During calibration its modes are all ``"none"`` (== plain MXFP4); when
+calibration finishes the modes are set IN PLACE (no wrapper-type swap, no new
+``nn.Parameter``), so optimizer state references stay valid.
 
-1. **Phase A** is set up by ``LowPrecisionTrainingModifier`` when ``scheme="mxfp4_adahop"``
-   is used in the recipe — all targeted weights wrapped in
-   :class:`MXFP4CalibrationWrapper`. Identical dispatch to plain MXFP4.
-2. **Phase A → Phase B transition** is owned by this modifier:
+Lifecycle:
 
-   * ``on_initialize`` walks the model, finds every ``MXFP4CalibrationWrapper``
-     weight, attaches an outlier-pattern observation callback (forward path),
-     and registers a backward hook on the parent linear module for
-     ``grad_output`` observation. The layer FQN is closed over in both
-     closures so the wrapper itself stays FQN-agnostic.
-   * ``on_pre_step`` opens a fresh per-step pattern dict and increments the
-     step counter.
-   * ``on_post_step`` does nothing until step == ``calibration_steps``, then:
-     aggregates per-layer majority patterns, maps pattern pairs to per-slot
-     ``TransformMode`` triples via the recipe's ``layer_transform_config``,
-     and re-swaps every calibration wrapper as
-     :class:`MXFP4AdaHOPWrapper` carrying the frozen modes. Observation
-     hooks are removed.
+1. ``LowPrecisionTrainingModifier`` (scheme=``"mxfp4_adahop"``) wraps every
+   targeted weight in :class:`MXFP4AdaHOPWrapper` (modes ``"none"``).
+2. This modifier owns the Phase-A -> Phase-B transition:
 
-A ``transform_config_path`` shortcut accepts a pre-baked JSON
-(``{layer_fqn: {forward_y, backward_gx, backward_gw}}``) and skips
-calibration entirely — the re-swap happens at ``on_initialize`` instead.
+   * ``on_convert`` configures the HadamardFactory.
+   * ``on_initialize`` discovers the wrapped linears. (If ``transform_config_path``
+     is set, pre-baked modes are applied here and calibration is skipped.)
+   * ``on_pre_step`` — on the FIRST call (which happens AFTER
+     ``checkpointer.load`` in the forge trainer), it inspects the checkpointed
+     :class:`CalibrationStateManager`:
+       - calibration already completed -> apply the restored modes in place and
+         skip calibration (clean resume);
+       - otherwise -> arm transient *module* observation hooks and begin
+         calibration. It then opens a fresh per-step pattern bucket.
+   * ``on_post_step`` aggregates after ``calibration_steps``, maps patterns to
+     per-slot modes, applies them in place, records them in the
+     CalibrationStateManager (so they ride the next checkpoint), writes the
+     JSON artifact, and removes the observation hooks.
+
+Calibration observation uses transient forward-pre / full-backward hooks on the
+``nn.Linear`` modules — no closures are stored on tensors, so checkpoints remain
+picklable.
 """
 
 from typing import Any, Callable, Dict, List, Optional
@@ -41,11 +47,18 @@ from alto.modifiers import Modifier
 from alto.modifiers.lpt.adahop_internals.calibration_hooks import (
     load_modes_from_json,
     make_backward_hook,
-    make_forward_callback,
+    make_forward_pre_hook,
     write_modes_json,
+)
+from alto.modifiers.lpt.adahop_internals.calibration_state import (
+    get_calibration_modes,
+    is_calibration_completed,
+    set_calibration_result,
 )
 
 __all__ = ["AdaHOPModifier"]
+
+_NONE_MODES = {"forward_y": "none", "backward_gx": "none", "backward_gw": "none"}
 
 
 class AdaHOPModifier(Modifier):
@@ -74,18 +87,19 @@ class AdaHOPModifier(Modifier):
     _per_step_patterns: List[Dict[str, Dict[str, str]]] = PrivateAttr(default_factory=list)
     _fqn_to_wrapper: Dict[str, Any] = PrivateAttr(default_factory=dict)
     _fqn_to_module: Dict[str, nn.Module] = PrivateAttr(default_factory=dict)
-    _backward_handles: List[Any] = PrivateAttr(default_factory=list)
-    _hadamard_transform: Any = PrivateAttr(default=None)
+    _handles: List[Any] = PrivateAttr(default_factory=list)
     _phase_b_done: bool = PrivateAttr(default=False)
+    _resume_decided: bool = PrivateAttr(default=False)
+    _calibration_armed: bool = PrivateAttr(default=False)
 
     @property
     def requires_training_mode(self) -> bool:
         return True
 
     def on_convert(self, model: Module, **kwargs) -> bool:
-        # The Phase-A wrapper swap is performed by LowPrecisionTrainingModifier
-        # when scheme="mxfp4_adahop". Configure the HadamardFactory here so
-        # the transform object is available at re-swap time.
+        # The wrapper swap (to MXFP4AdaHOPWrapper, modes "none") is performed by
+        # LowPrecisionTrainingModifier when scheme="mxfp4_adahop". Configure the
+        # HadamardFactory here so the transform object is available later.
         if not self.enabled:
             logger.info("[AdaHOP] Modifier disabled (enabled=False); pass-through only.")
             return True
@@ -106,48 +120,51 @@ class AdaHOPModifier(Modifier):
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
         if not self.enabled:
             return True
-        from alto.kernels.dispatch.adahop_tensor import MXFP4CalibrationWrapper
+        from alto.kernels.dispatch.adahop_tensor import MXFP4AdaHOPWrapper
 
-        self._collect_calibration_wrappers(model_parts, MXFP4CalibrationWrapper)
+        self._collect_wrappers(model_parts, MXFP4AdaHOPWrapper)
         n_wrappers = len(self._fqn_to_wrapper)
-        logger.info(f"[AdaHOP] Phase A: discovered {n_wrappers} MXFP4CalibrationWrapper-wrapped linears.")
+        logger.info(f"[AdaHOP] Discovered {n_wrappers} MXFP4AdaHOPWrapper-wrapped linears.")
         if n_wrappers > 0:
             sample = list(self._fqn_to_wrapper.keys())[:5]
             logger.info(f"[AdaHOP] First {len(sample)} FQNs: {', '.join(sample)}"
                         f"{' ...' if n_wrappers > 5 else ''}")
+        elif not self._fqn_to_wrapper:
+            logger.warning("[AdaHOP] No MXFP4AdaHOPWrapper found; "
+                           "is LowPrecisionTrainingModifier(scheme='mxfp4_adahop') in the recipe?")
 
+        # Manual pre-baked modes override: applied now (before checkpointer.load),
+        # in place. Calibration is then skipped entirely.
         if self.transform_config_path is not None:
             modes_by_fqn = load_modes_from_json(self.transform_config_path)
-            logger.info(f"[AdaHOP] Phase B (JSON-load): {len(modes_by_fqn)} modes loaded from "
-                        f"{self.transform_config_path}; re-swap starting (calibration skipped).")
+            logger.info(f"[AdaHOP] Pre-baked modes: {len(modes_by_fqn)} loaded from "
+                        f"{self.transform_config_path}; applying in place (calibration skipped).")
             self._log_mode_table(modes_by_fqn, aggregated=None)
-            self._do_phase_b_reswap(modes_by_fqn)
-            return True
-
-        if not self._fqn_to_wrapper:
-            logger.warning("[AdaHOP] No MXFP4CalibrationWrapper found; "
-                           "is LowPrecisionTrainingModifier(scheme='mxfp4_adahop') in the recipe?")
-            return True
-
-        from alto._adahop_bridge import detect_outlier_pattern
-
-        for fqn, wrapper in self._fqn_to_wrapper.items():
-            wrapper.attach_calibration_callback(make_forward_callback(self, fqn, detect_outlier_pattern))
-
-        for fqn, module in self._fqn_to_module.items():
-            handle = module.register_full_backward_hook(make_backward_hook(self, fqn, detect_outlier_pattern))
-            self._backward_handles.append(handle)
-
-        logger.info(f"[AdaHOP] Calibration armed: {n_wrappers} layers, {self.calibration_steps} steps. "
-                    f"Forward callbacks attached. Backward hooks registered. "
-                    f"Patterns will be observed every step.")
+            self._apply_modes_in_place(modes_by_fqn)
+            self._resume_decided = True
+        # Otherwise: defer the calibrate-vs-resume decision to the first
+        # on_pre_step, which runs AFTER checkpointer.load() so the restored
+        # CalibrationStateManager is visible.
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         if not self.enabled or self._phase_b_done:
             return True
-        if self.transform_config_path is not None:
-            return True
+
+        # First step after checkpointer.load(): decide resume vs. calibrate.
+        if not self._resume_decided:
+            self._resume_decided = True
+            if is_calibration_completed():
+                modes_by_fqn = get_calibration_modes()
+                logger.info(f"[AdaHOP] Calibration restored from checkpoint "
+                            f"({len(modes_by_fqn)} layers). Applying modes in place; "
+                            f"skipping re-calibration.")
+                self._log_mode_table(modes_by_fqn, aggregated=None)
+                self._apply_modes_in_place(modes_by_fqn)
+                return True
+            # Fresh calibration.
+            self._arm_calibration()
+
         if self._step_idx >= self.calibration_steps:
             return True
         # Open a fresh dict for this step's pattern observations.
@@ -158,7 +175,7 @@ class AdaHOPModifier(Modifier):
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         if not self.enabled or self._phase_b_done:
             return True
-        if self.transform_config_path is not None:
+        if not self._calibration_armed:
             return True
         self._step_idx += 1
 
@@ -189,11 +206,14 @@ class AdaHOPModifier(Modifier):
         write_modes_json(effective_dump_path, aggregated, modes_by_fqn)
         logger.info(f"[AdaHOP] JSON dump: wrote {len(modes_by_fqn)} layer modes to {effective_dump_path}")
 
-        logger.info("[AdaHOP] Phase B re-swap starting...")
-        self._do_phase_b_reswap(modes_by_fqn)
+        logger.info("[AdaHOP] Phase B (in-place mode application) starting...")
+        self._apply_modes_in_place(modes_by_fqn)
         self._detach_observation_hooks()
-        logger.info(f"[AdaHOP] Phase B complete. Forward path now uses MXFP4AdaHOPLinearFunction "
-                    f"with frozen modes for {len(modes_by_fqn)} layers. Observation hooks detached.")
+        # Record into the checkpointable calibration state so the next checkpoint
+        # carries the modes and a resume can skip calibration.
+        set_calibration_result(modes_by_fqn, self._step_idx)
+        logger.info(f"[AdaHOP] Phase B complete. Modes set in place for {len(modes_by_fqn)} layers; "
+                    f"recorded in CalibrationStateManager. Observation hooks detached.")
         return True
 
     def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
@@ -225,24 +245,47 @@ class AdaHOPModifier(Modifier):
 
     # ------------------------------------------------------------------ helpers
 
-    def _collect_calibration_wrappers(self, model_parts, cal_wrapper_cls) -> None:
-        # CRITICAL: attach to the canonical instance F.linear will see.
+    def _arm_calibration(self) -> None:
+        """Register transient module observation hooks and begin Phase A."""
+        if self._calibration_armed:
+            return
+        from alto._adahop_bridge import detect_outlier_pattern
+
+        for fqn, module in self._fqn_to_module.items():
+            h_fwd = module.register_forward_pre_hook(
+                make_forward_pre_hook(self, fqn, detect_outlier_pattern)
+            )
+            h_bwd = module.register_full_backward_hook(
+                make_backward_hook(self, fqn, detect_outlier_pattern)
+            )
+            self._handles.append(h_fwd)
+            self._handles.append(h_bwd)
+        self._calibration_armed = True
+        logger.info(f"[AdaHOP] Calibration armed: {len(self._fqn_to_module)} layers, "
+                    f"{self.calibration_steps} steps. Module forward-pre + backward hooks registered.")
+
+    def _make_ht_resolver(self) -> Callable[[torch.device], Any]:
+        if not self.use_hadamard:
+            return lambda _dev: None
+        from alto._adahop_bridge import HadamardFactory
+        ht_cache: Dict[torch.device, Any] = {}
+
+        def _get_ht(device):
+            if device not in ht_cache:
+                ht_cache[device] = HadamardFactory.create_transform(device=device)
+            return ht_cache[device]
+
+        return _get_ht
+
+    def _collect_wrappers(self, model_parts, wrapper_cls) -> None:
+        # Attach to the canonical instance F.linear will see (see long comment
+        # below). Same discovery logic as before; only the target class changed
+        # to the single MXFP4AdaHOPWrapper.
         #
-        # No-FSDP path: `module.weight` IS the subclass (Parameter of a
-        # tensor subclass IS the subclass). Use that directly.
-        # `module.weight.data` triggers a detach in __torch_dispatch__ and
-        # returns a FRESH wrapper (different Python object); callbacks on
-        # that transient are invisible to F.linear.
-        #
-        # FSDP path: fully_shard swaps module.weight for a sharded DTensor
-        # whose _local_tensor is a FSDP-owned wrapper, distinct from any
-        # wrapper reachable through module.weight at discovery time. The
-        # canonical instance lives at
-        #   fsdp_state._fsdp_param_group.fsdp_params[i]._sharded_local_tensor
-        # (a property returning `cast(DTensor, sharded_param)._local_tensor`).
-        # That's what FSDP later passes as `self` into fsdp_post_all_gather
-        # and where state must be stamped for FSDP's all-gather rewrap to
-        # propagate it onto the unsharded param used in forward.
+        # No-FSDP path: `module.weight` IS the subclass. FSDP path: the
+        # canonical instance lives at fsdp_param._sharded_local_tensor and is
+        # the one FSDP later passes into fsdp_post_all_gather; in-place mode
+        # updates there propagate to the unsharded param used in forward.
         from torch.distributed.tensor import DTensor
         try:
             from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
@@ -252,9 +295,6 @@ class AdaHOPModifier(Modifier):
         self._fqn_to_wrapper.clear()
         self._fqn_to_module.clear()
 
-        # Pre-build a map from nn.Module → FSDPParam by walking every FSDP
-        # state and its param group. Each FSDPParam knows its origin module
-        # via _module_info.module and parameter name via _module_info.param_name.
         module_param_to_fsdp_param = {}
         for part in model_parts:
             for _m in part.modules():
@@ -278,7 +318,7 @@ class AdaHOPModifier(Modifier):
                 fp = module_param_to_fsdp_param.get((id(module), "weight"))
                 if fp is not None:
                     inner = fp._sharded_local_tensor
-                elif isinstance(weight, cal_wrapper_cls):
+                elif isinstance(weight, wrapper_cls):
                     inner = weight
                 else:
                     raw = weight.data
@@ -287,74 +327,31 @@ class AdaHOPModifier(Modifier):
                     else:
                         inner = raw
 
-                if not isinstance(inner, cal_wrapper_cls):
+                if not isinstance(inner, wrapper_cls):
                     continue
                 self._fqn_to_wrapper[module_fqn] = inner
                 self._fqn_to_module[module_fqn] = module
 
-    def _do_phase_b_reswap(self, modes_by_fqn: Dict[str, Dict[str, str]]) -> None:
-        from alto.kernels.dispatch.adahop_tensor import MXFP4AdaHOPWrapper
-
-        ht = None
-        if self.use_hadamard:
-            from alto._adahop_bridge import HadamardFactory
-            # Lazy construction; the modifier doesn't know the device until
-            # weights actually live somewhere, so build per-device on demand.
-            ht_cache: Dict[torch.device, Any] = {}
-
-            def _get_ht(device):
-                if device not in ht_cache:
-                    ht_cache[device] = HadamardFactory.create_transform(device=device)
-                return ht_cache[device]
-
-            ht_resolver: Callable[[torch.device], Any] = _get_ht
-        else:
-            ht_resolver = lambda _dev: None  # noqa: E731
-
-        from torch.distributed.tensor import DTensor
-
+    def _apply_modes_in_place(self, modes_by_fqn: Dict[str, Dict[str, str]]) -> None:
+        """Set per-slot modes on every wrapper IN PLACE (no Parameter swap)."""
+        ht_resolver = self._make_ht_resolver()
+        n = 0
         for fqn, wrapper in self._fqn_to_wrapper.items():
-            modes = modes_by_fqn.get(fqn, {"forward_y": "none", "backward_gx": "none", "backward_gw": "none"})
-            module = self._fqn_to_module[fqn]
-            old_param = module.weight
-            data = wrapper._data
-            ht = ht_resolver(data.device)
-            new_wrapper = MXFP4AdaHOPWrapper(
-                data,
-                wrapper.config,
-                hadamard_transform=ht,
+            modes = modes_by_fqn.get(fqn, _NONE_MODES)
+            ht = ht_resolver(wrapper._data.device)
+            wrapper.set_modes(
                 forward_y_mode=modes.get("forward_y", "none"),
                 backward_gx_mode=modes.get("backward_gx", "none"),
                 backward_gw_mode=modes.get("backward_gw", "none"),
+                hadamard_transform=ht,
             )
-            if isinstance(old_param.data, DTensor):
-                # Preserve FSDP sharding: rebuild the DTensor around the new local wrapper
-                # using the same device mesh and placements as the existing param.
-                old_dt = old_param.data
-                new_dt = DTensor.from_local(
-                    new_wrapper,
-                    device_mesh=old_dt.device_mesh,
-                    placements=old_dt.placements,
-                    run_check=False,
-                    shape=old_dt.shape,
-                    stride=old_dt.stride(),
-                )
-                module.weight = nn.Parameter(new_dt, requires_grad=old_param.requires_grad)
-            else:
-                module.weight = nn.Parameter(new_wrapper, requires_grad=old_param.requires_grad)
-            ht_state = "attached" if ht is not None else "none"
-            logger.info(f"  [AdaHOP] re-swapped {fqn}: MXFP4CalibrationWrapper → "
-                        f"MXFP4AdaHOPWrapper(forward_y={new_wrapper._forward_y_mode}, "
-                        f"backward_gx={new_wrapper._backward_gx_mode}, "
-                        f"backward_gw={new_wrapper._backward_gw_mode}, "
-                        f"hadamard={ht_state})")
-
+            n += 1
+        ht_state = "attached" if self.use_hadamard else "none"
+        logger.info(f"[AdaHOP] Applied modes in place for {n} layers (hadamard={ht_state}).")
         self._phase_b_done = True
 
     def _detach_observation_hooks(self) -> None:
-        for handle in self._backward_handles:
+        for handle in self._handles:
             handle.remove()
-        self._backward_handles.clear()
-        for wrapper in self._fqn_to_wrapper.values():
-            if hasattr(wrapper, "attach_calibration_callback"):
-                wrapper.attach_calibration_callback(None)
+        self._handles.clear()
+        self._calibration_armed = False

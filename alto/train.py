@@ -84,6 +84,30 @@ class Trainer(ForgeTrainer):
     def __init__(self, config: TitanTrainer.Config):
         super().__init__(config)
 
+        # AdaHOP (Strategy-2 port): if an AdaHOPModifier is in the recipe,
+        # register its checkpointable calibration state with the checkpointer so
+        # per-layer transform modes are saved/restored alongside model/optimizer
+        # state. CheckpointManager.states is a live, mutable dict iterated by
+        # save()/load(); injecting here (after super().__init__, before
+        # train()->checkpointer.load) keeps the whole change inside alto/.
+        try:
+            from alto.modifiers.lpt.adahop import AdaHOPModifier
+            from alto.modifiers.lpt.adahop_internals.calibration_state import (
+                get_adahop_calibration_state,
+            )
+            has_adahop = any(
+                isinstance(m, AdaHOPModifier)
+                for conv in self.model_converters.converters
+                if isinstance(conv, ModelOptConverter)
+                for m in getattr(conv, "recipe", None).modifiers
+            ) if not self.model_converters.is_empty() else False
+            if has_adahop and getattr(self, "checkpointer", None) is not None:
+                self.checkpointer.states["adahop_calibration"] = get_adahop_calibration_state()
+                logger.info("[AdaHOP] Registered CalibrationStateManager with checkpointer "
+                            "(states key='adahop_calibration').")
+        except Exception as e:  # never let this break trainer construction
+            logger.warning(f"[AdaHOP] Could not register calibration state with checkpointer: {e}")
+
         self.training_mode = True
         self.enable_data_cache = False
 

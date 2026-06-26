@@ -116,6 +116,13 @@ def test_amdfp4_linear_autograd_function(
         False,    # use_outer_scale
         None,     # hadamard_transform
         False,    # use_dge
+        # ``scale_format`` is the LAST positional arg of the forward (appended
+        # after the outer-block params); apply() takes no kwargs, so the
+        # intervening outer-block params are filled with their defaults here.
+        False,    # use_outer_block_scale
+        False,    # use_outer_2dblock_x
+        False,    # use_outer_2dblock_w
+        128,      # outer_block_size (OUTER_BLOCK_SIZE_DEFAULT)
         "ue5m3",  # scale_format pinned to AMD-FP4 inner grid
     )
     loss = torch.nn.functional.mse_loss(outputs, target)
@@ -205,4 +212,48 @@ def test_amdfp4_to_scaled_mm_wrapper_pins_ue5m3(use_2dblock_x, use_2dblock_w):
     assert not torch.equal(y_amd, y_nv_e4m3), (
         "AMD-FP4 wrapper output must differ from the E4M3 NVFP4 path; "
         "identical output suggests scale_format pinning was lost"
+    )
+
+
+@pytest.mark.parametrize("use_outer_2dblock_w", [False, True])
+def test_amdfp4_to_scaled_mm_wrapper_outer_block(use_outer_2dblock_w):
+    """AMD-FP4 outer-block scaling shares the NVFP4 outer-block code path.
+
+    The AMD-FP4 wrapper must thread BOTH the outer-block knobs and the UE5M3
+    inner grid into ``_to_nvfp4_then_scaled_mm``, so its output must be
+    bit-identical to the NVFP4 helper called with ``scale_format="ue5m3"`` and
+    the same outer-block config.
+
+    NOTE: under outer-block scaling the per-outer-block FP32 scale normalizes
+    by the inner grid's max (448 for E4M3, 114688 for UE5M3 -- a factor of
+    256 = 2**8).  Because that factor is an exact power of two and both grids
+    share the same 3-bit mantissa, the E4M3 and UE5M3 outer-block paths produce
+    bit-identical results on well-ranged data (the grid choice is absorbed by
+    the outer scale).  We therefore assert UE5M3 parity but do NOT assert
+    divergence from E4M3 here -- that divergence only appears at intra-outer-
+    block dynamic ranges wide enough to underflow one grid but not the other.
+    """
+    torch.manual_seed(0)
+    # Dims chosen so the outer grids are non-degenerate at outer_block_size=128:
+    # K > 128 (1D outer on activations) and N,K > 128 (2D outer on weights).
+    M, N, K = 256, 256, 256
+    a = torch.randn((M, K), device="cuda").to(torch.bfloat16)
+    w = torch.randn((N, K), device="cuda").to(torch.bfloat16)
+
+    ob = dict(
+        use_2dblock_x=False,
+        use_2dblock_w=False,
+        use_sr_grad=False,
+        use_outer_block_scale=True,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        outer_block_size=128,
+    )
+    y_amd = _to_amdfp4_then_scaled_mm(a, w, **ob)
+    y_nv_ue5m3 = _to_nvfp4_then_scaled_mm(a, w, scale_format="ue5m3", **ob)
+
+    assert y_amd.shape == (M, N)
+    assert torch.isfinite(y_amd).all()
+    assert torch.equal(y_amd, y_nv_ue5m3), (
+        "_to_amdfp4_then_scaled_mm outer-block output must be bit-identical to "
+        "_to_nvfp4_then_scaled_mm(scale_format='ue5m3') with the same outer-block config"
     )

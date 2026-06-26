@@ -1,0 +1,27 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "amdfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      # AMD-FP4 (UE5M3 inner grid) with per-outer-block FP32 scale (incl. MoE
+      # experts).  Exact mirror of lpt_recipe_outer_block.yaml (NVFP4) except
+      # scheme="amdfp4": the outer-block code path is shared across both inner
+      # grids, only the per-outer-block normalization denominator differs
+      # (E4M3 max 448 vs UE5M3 max 114688).
+      ignore:
+        - "output"
+        - "re:.*\\.router\\.gate"
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: outer_block
+      use_outer_2dblock_x: false
+      use_outer_2dblock_w: true
+      # outer_block_size must divide every quantized reduction dim and be a
+      # multiple of the NVFP4 inner block (16).  GPT-OSS hidden=2880 is not
+      # divisible by 128, so use 64 (2880/64=45; debug dim=256, 256/64=4).
+      outer_block_size: 64
+      lora_rank: 0

@@ -1,0 +1,25 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "nvfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      # All-layers NVFP4 with per-outer-block FP32 scale (incl. MoE experts),
+      # instead of one tensorwise scalar.  Exact mirror of the tensorwise
+      # all-layers recipe except two_level_scaling + the outer-block knobs.
+      ignore:
+        - "output"
+        - "re:.*\\.router\\.gate"
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: outer_block
+      use_outer_2dblock_x: false
+      use_outer_2dblock_w: true
+      # outer_block_size must divide every quantized reduction dim; GPT-OSS
+      # hidden=2880 is not divisible by 128, so use 64 (2880/64=45) -- still a
+      # multiple of the NVFP4 inner block (16).
+      outer_block_size: 64
+      lora_rank: 0

@@ -13,6 +13,7 @@ init / data / routing.
 import pytest
 import torch
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device is required.")
 from alto.kernels.mxfp8.mxfp8_grouped_gemm import mxfp8_grouped_gemm
 from alto.kernels.mxfp8.mxfp8_grouped_gemm.autotune import ALIGN_SIZE_M
 

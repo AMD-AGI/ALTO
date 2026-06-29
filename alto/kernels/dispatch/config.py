@@ -38,7 +38,7 @@ class TrainingOpConfig:
     * dynamic: dynamic clipped scale based on the mean and std of the input tensor (only supported for mxfp4)
     """
 
-    two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
+    two_level_scaling: Literal["none", "tensorwise", "blockwise", "outer_block"] = "none"
     """
     apply an extra scaling factor besides the default blockwise scales of MXFP4/NVFP4.
     * none: no extra scaling
@@ -46,7 +46,11 @@ class TrainingOpConfig:
     * blockwise:
       * MXFP4: apply a blockwise scale factor containing shared mantissa to each block
       * NVFP4: not implemented
+    * outer_block: apply a per-super-block FP32 scale before NVFP4 E4M3 block scales
     """
+    use_outer_2dblock_x: bool = False
+    use_outer_2dblock_w: bool = False
+    outer_block_size: int = 128
 
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

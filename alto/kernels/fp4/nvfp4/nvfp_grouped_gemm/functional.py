@@ -28,6 +28,7 @@ from __future__ import annotations
 import torch
 
 from alto.kernels.fp4.fp4_common import build_hadamard_transform_if_needed
+from alto.kernels.fp4.nvfp4.nvfp_quantization import OUTER_BLOCK_SIZE_DEFAULT
 from .autograd import NVFP4GroupedGEMM
 
 
@@ -44,6 +45,9 @@ def _nvfp4_grouped_gemm_impl(
     use_hadamard: bool = False,
     use_dge: bool = False,
     scale_format: str = "e4m3",
+    use_outer_block_scale: bool = False,
+    use_outer_2dblock_w: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> torch.Tensor:
     """Normalized entrypoint shared by both public APIs.
 
@@ -72,6 +76,9 @@ def _nvfp4_grouped_gemm_impl(
         hadamard_transform,
         use_dge,
         scale_format,
+        use_outer_block_scale,
+        use_outer_2dblock_w,
+        outer_block_size,
     )
 
 
@@ -88,6 +95,9 @@ def nvfp4_grouped_gemm(
     use_hadamard: bool = False,
     use_dge: bool = False,
     scale_format: str = "e4m3",
+    use_outer_block_scale: bool = False,
+    use_outer_2dblock_w: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> torch.Tensor:
     """NVFP4 QDQ-emulated Grouped GEMM with full autograd support.
 
@@ -128,6 +138,9 @@ def nvfp4_grouped_gemm(
         use_hadamard=use_hadamard,
         use_dge=use_dge,
         scale_format=scale_format,
+        use_outer_block_scale=use_outer_block_scale,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        outer_block_size=outer_block_size,
     )
 
 
@@ -142,6 +155,9 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
     use_hadamard: bool = False,
     use_dge: bool = False,
     scale_format: str = "e4m3",
+    use_outer_block_scale: bool = False,
+    use_outer_2dblock_w: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> torch.Tensor:
     """Drop-in for the dispatch layer, mirroring mxfp4's
     ``_quantize_then_mxfp4_scaled_grouped_mm``.
@@ -164,4 +180,7 @@ def _quantize_then_nvfp4_scaled_grouped_mm(
         use_hadamard=use_hadamard,
         use_dge=use_dge,
         scale_format=scale_format,
+        use_outer_block_scale=use_outer_block_scale,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        outer_block_size=outer_block_size,
     )

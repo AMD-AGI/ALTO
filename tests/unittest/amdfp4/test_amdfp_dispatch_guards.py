@@ -96,7 +96,9 @@ def test_amdfp4_linear_routes_to_amdfp4_thin_wrapper(monkeypatch, device):
     calls = []
 
     def _mock_amdfp4(A, W, *, use_2dblock_x, use_2dblock_w,
-                     use_sr_grad, use_outer_scale, use_hadamard, use_dge):
+                     use_sr_grad, use_outer_scale, use_hadamard, use_dge,
+                     use_outer_block_scale=False, use_outer_2dblock_x=False,
+                     use_outer_2dblock_w=False, outer_block_size=128):
         calls.append({
             "use_2dblock_x": use_2dblock_x,
             "use_2dblock_w": use_2dblock_w,
@@ -139,7 +141,9 @@ def test_amdfp4_grouped_mm_routes_to_amdfp4_thin_wrapper(monkeypatch, device):
     calls = []
 
     def _mock_amdfp4_grouped(A, B, *, offs, use_2dblock_x, use_2dblock_w,
-                             use_sr_grad, use_outer_scale, use_hadamard, use_dge):
+                             use_sr_grad, use_outer_scale, use_hadamard, use_dge,
+                             use_outer_block_scale=False, use_outer_2dblock_w=False,
+                             outer_block_size=128):
         calls.append({
             "offs_len": offs.numel(),
             "use_2dblock_x": use_2dblock_x,

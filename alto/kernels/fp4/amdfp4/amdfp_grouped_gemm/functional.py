@@ -17,6 +17,7 @@ from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import (
     _quantize_then_nvfp4_scaled_grouped_mm,
     nvfp4_grouped_gemm,
 )
+from alto.kernels.fp4.nvfp4.nvfp_quantization import OUTER_BLOCK_SIZE_DEFAULT
 
 
 def amdfp4_grouped_gemm(
@@ -31,12 +32,16 @@ def amdfp4_grouped_gemm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    use_outer_block_scale: bool = False,
+    use_outer_2dblock_w: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> torch.Tensor:
     """AMD-FP4 (UE5M3 inner scale) Grouped GEMM with full autograd support.
 
     Same parameter contract as
     :func:`alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.nvfp4_grouped_gemm`
-    minus ``scale_format``, which is hard-pinned to ``"ue5m3"``.
+    (including the outer-block knobs) minus ``scale_format``, which is
+    hard-pinned to ``"ue5m3"``.
     """
     return nvfp4_grouped_gemm(
         inputs,
@@ -49,6 +54,9 @@ def amdfp4_grouped_gemm(
         use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
+        use_outer_block_scale=use_outer_block_scale,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        outer_block_size=outer_block_size,
         scale_format="ue5m3",
     )
 
@@ -63,12 +71,16 @@ def _quantize_then_amdfp4_scaled_grouped_mm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    use_outer_block_scale: bool = False,
+    use_outer_2dblock_w: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> torch.Tensor:
     """AMD-FP4 dispatch-side variant of
     :func:`alto.kernels.fp4.nvfp4.nvfp_grouped_gemm._quantize_then_nvfp4_scaled_grouped_mm`.
 
     ``scale_format`` is hard-pinned to ``"ue5m3"`` so the MoE dispatch
-    code path can route AMD-FP4 traffic by op surface alone.
+    code path can route AMD-FP4 traffic by op surface alone.  Outer-block
+    scaling shares the NVFP4 grouped code path; only the inner grid differs.
     """
     return _quantize_then_nvfp4_scaled_grouped_mm(
         A,
@@ -80,5 +92,8 @@ def _quantize_then_amdfp4_scaled_grouped_mm(
         use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
+        use_outer_block_scale=use_outer_block_scale,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        outer_block_size=outer_block_size,
         scale_format="ue5m3",
     )

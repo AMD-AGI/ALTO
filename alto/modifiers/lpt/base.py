@@ -35,9 +35,12 @@ class LowPrecisionTrainingModifier(Modifier):
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
-    two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
+    two_level_scaling: Literal["none", "tensorwise", "blockwise", "outer_block"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
-    
+    use_outer_2dblock_x: bool = False
+    use_outer_2dblock_w: bool = False
+    outer_block_size: int = 128
+
     lora_rank: int = 0
     """
     Lora rank for the decomposed linear layer.
@@ -92,6 +95,60 @@ class LowPrecisionTrainingModifier(Modifier):
                 value[key] = cls.validate_targets(target)
 
         return value
+
+    @model_validator(mode="after")
+    def validate_outer_block_scaling(self):
+        if self.outer_block_size < 16 or self.outer_block_size % 16 != 0:
+            raise ValueError(
+                "outer_block_size must be a positive multiple of the NVFP4 "
+                f"inner block size (16), got {self.outer_block_size}"
+            )
+        outer_fields_are_active = (
+            self.use_outer_2dblock_x
+            or self.use_outer_2dblock_w
+            or self.outer_block_size != 128
+        )
+        if self.two_level_scaling != "outer_block" and outer_fields_are_active:
+            raise ValueError(
+                "use_outer_2dblock_x, use_outer_2dblock_w, and non-default "
+                "outer_block_size are only meaningful when "
+                'two_level_scaling="outer_block".'
+            )
+        if self.two_level_scaling == "outer_block":
+            schemes = [self.scheme] if isinstance(self.scheme, str) else list(self.scheme)
+            invalid_schemes = [scheme for scheme in schemes if scheme not in ("nvfp4", "amdfp4")]
+            if invalid_schemes:
+                raise ValueError(
+                    'two_level_scaling="outer_block" is only defined for '
+                    f"scheme in {{'nvfp4', 'amdfp4'}}, got {invalid_schemes}"
+                )
+            # NOTE: outer-block scaling now supports BOTH dense Linear and the
+            # MoE grouped-GEMM path (grouped uses a 1D outer block on
+            # activations and use_outer_2dblock_w on the per-expert weights),
+            # so MoE / grouped-experts targets are no longer rejected here.
+        return self
+
+    def _collect_moe_like_targets(self) -> list[str]:
+        """Return targets whose name looks like an MoE / GroupedExperts module.
+
+        Match is a case-insensitive substring check on ``"groupedexperts"`` or
+        ``"moe"``, so regex patterns such as ``re:.*GroupedExperts`` are
+        matched literally without parsing them.
+        """
+        target_groups: list[list[str]] = []
+        if isinstance(self.scheme, dict):
+            target_groups.extend(list(self.scheme.values()))
+        else:
+            target_groups.append(
+                self.targets if isinstance(self.targets, list) else [self.targets]
+            )
+        offending: list[str] = []
+        for group in target_groups:
+            for entry in group:
+                lowered = entry.lower()
+                if "groupedexperts" in lowered or "moe" in lowered:
+                    offending.append(entry)
+        return offending
 
     @model_validator(mode="after")
     def validate_lora_rank_alignment(self):
@@ -158,6 +215,9 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_dge=self.use_dge,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
+                    use_outer_2dblock_x=self.use_outer_2dblock_x,
+                    use_outer_2dblock_w=self.use_outer_2dblock_w,
+                    outer_block_size=self.outer_block_size,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

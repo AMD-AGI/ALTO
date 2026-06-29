@@ -363,6 +363,15 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 "nvfp4": _quantize_then_nvfp4_scaled_grouped_mm,
                 "amdfp4": _quantize_then_amdfp4_scaled_grouped_mm,
             }[config.precision]
+            # Outer-block (v1): per-expert/per-tile scale.  Activations use a 1D
+            # outer block internally; weights honour use_outer_2dblock_w.  The
+            # path is shared across both inner grids (E4M3 / UE5M3); both
+            # grouped helpers accept these kwargs.
+            common_kwargs.update(
+                use_outer_block_scale=config.two_level_scaling == "outer_block",
+                use_outer_2dblock_w=config.use_outer_2dblock_w,
+                outer_block_size=config.outer_block_size,
+            )
             return grouped_fn(A, B, **common_kwargs)
 
         # linear / mm overrides
@@ -406,6 +415,15 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 "nvfp4": _to_nvfp4_then_scaled_mm,
                 "amdfp4": _to_amdfp4_then_scaled_mm,
             }[config.precision]
+            # Outer-block / X-hat-align / dX-RHT share one code path across both
+            # inner grids (E4M3 for nvfp4, UE5M3 for amdfp4); both dense helpers
+            # accept these kwargs.
+            common_kwargs.update(
+                use_outer_block_scale=config.two_level_scaling == "outer_block",
+                use_outer_2dblock_x=config.use_outer_2dblock_x,
+                use_outer_2dblock_w=config.use_outer_2dblock_w,
+                outer_block_size=config.outer_block_size,
+            )
             Y = linear_fn(A, W, **common_kwargs)
             if bias is not None:
                 Y = Y + bias

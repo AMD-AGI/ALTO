@@ -20,6 +20,7 @@ from alto.kernels.fp4.nvfp4.nvfp_linear import (
     NVFP4LinearFunction,
     _to_nvfp4_then_scaled_mm,
 )
+from alto.kernels.fp4.nvfp4.nvfp_quantization import OUTER_BLOCK_SIZE_DEFAULT
 
 
 # Re-export the autograd function under an AMD-FP4 name.  We deliberately
@@ -40,12 +41,19 @@ def _to_amdfp4_then_scaled_mm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    use_outer_block_scale: bool = False,
+    use_outer_2dblock_x: bool = False,
+    use_outer_2dblock_w: bool = False,
+    outer_block_size: int = OUTER_BLOCK_SIZE_DEFAULT,
 ) -> torch.Tensor:
     """AMD-FP4 (UE5M3 inner scale) variant of ``_to_nvfp4_then_scaled_mm``.
 
-    Mirrors the NVFP4 helper exactly, except ``scale_format`` is hard-pinned
-    to ``"ue5m3"`` so the AMD-FP4 dispatch layer / training recipes can
-    address the AMD-FP4 path by op surface alone.
+    Mirrors the NVFP4 helper exactly -- including the outer-block knobs --
+    except ``scale_format`` is hard-pinned to ``"ue5m3"`` so the AMD-FP4
+    dispatch layer / training recipes can address the AMD-FP4 path by op
+    surface alone.  Outer-block scaling shares the NVFP4 code path; only the
+    inner-block scale grid differs (UE5M3 vs E4M3), which the outer-scale
+    denominator accounts for.
     """
     return _to_nvfp4_then_scaled_mm(
         a,
@@ -56,6 +64,10 @@ def _to_amdfp4_then_scaled_mm(
         use_outer_scale=use_outer_scale,
         use_hadamard=use_hadamard,
         use_dge=use_dge,
+        use_outer_block_scale=use_outer_block_scale,
+        use_outer_2dblock_x=use_outer_2dblock_x,
+        use_outer_2dblock_w=use_outer_2dblock_w,
+        outer_block_size=outer_block_size,
         scale_format="ue5m3",
     )
 

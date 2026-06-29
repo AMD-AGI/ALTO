@@ -25,22 +25,32 @@ rationale and div-by-zero floor reasoning.
 from .nvfp_linear import NVFP4LinearFunction
 from .nvfp_quantization import (
     BLOCK_SIZE_DEFAULT,
+    OUTER_BLOCK_SIZE_DEFAULT,
+    OUTER_SCALE_EPS,
     SUPPORTED_SCALE_FORMATS,
     _calculate_nvfp4_scales,
     _pack_fp4,
     _unpack_fp4,
     compute_dynamic_outer_scale,
+    compute_outer_block_scale_shape,
     convert_from_nvfp4,
+    convert_from_nvfp4_outer_block,
     convert_to_nvfp4,
+    convert_to_nvfp4_outer_block,
     is_cdna4,
 )
 
 __all__ = (
     "BLOCK_SIZE_DEFAULT",
     "NVFP4LinearFunction",
+    "OUTER_BLOCK_SIZE_DEFAULT",
+    "OUTER_SCALE_EPS",
     "SUPPORTED_SCALE_FORMATS",
     "compute_dynamic_outer_scale",
+    "compute_outer_block_scale_shape",
     "convert_from_nvfp4",
+    "convert_from_nvfp4_outer_block",
     "convert_to_nvfp4",
+    "convert_to_nvfp4_outer_block",
     "is_cdna4",
 )

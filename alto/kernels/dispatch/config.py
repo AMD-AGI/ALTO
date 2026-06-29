@@ -7,6 +7,16 @@ from dataclasses import dataclass
 import torch
 
 
+TrainingPrecision = Literal["bf16", "mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]
+
+
+@dataclass(unsafe_hash=True, kw_only=True, slots=True)
+class PrecisionScheduleEntry:
+    precision: TrainingPrecision
+    start_step: int
+    end_step: int | None = None
+
+
 @dataclass(unsafe_hash=True, kw_only=True, slots=True)
 class TrainingOpConfig:
     precision: Literal["mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]
@@ -34,5 +44,20 @@ class TrainingOpConfig:
       * NVFP4: not implemented
     """
 
+    mxfp4_scale_selection: Literal["default", "mse_4_6_shifted", "mse_4_6_strict"] = "default"
+    """
+    MXFP4-only block scale selection.
+    * default: keep the existing E8M0 scale calculation.
+    * mse_4_6_shifted: compare qmax=6 with a qmax=4-like candidate
+      derived from scales_6 + 1.
+    * mse_4_6_strict: independently calculate qmax=6 and qmax=4 scales,
+      then choose the candidate with lower reconstruction MSE.
+    """
 
-torch.serialization.add_safe_globals([TrainingOpConfig])
+    precision_schedule: tuple[PrecisionScheduleEntry, ...] = ()
+    """
+    Optional step-based precision schedule. Step ranges are [start_step, end_step).
+    If no entry matches the current training step, `precision` is used.
+    """
+
+torch.serialization.add_safe_globals([PrecisionScheduleEntry, TrainingOpConfig])

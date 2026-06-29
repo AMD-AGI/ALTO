@@ -26,11 +26,15 @@ from .utils import (
 @pytest.mark.parametrize("data_type", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_sr", [False, True])
 @pytest.mark.parametrize("use_asm", [False, True])
-@pytest.mark.parametrize("clip_mode", ["dynamic"])
+@pytest.mark.parametrize("clip_mode", ["none", "dynamic"])
+@pytest.mark.parametrize("scale_selection", ["default", "mse_4_6_shifted", "mse_4_6_strict"])
 @pytest.mark.parametrize("compile", [False])
-def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, use_asm, clip_mode, compile):
+def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, use_asm, clip_mode, scale_selection,
+                           compile):
     if use_asm and not is_cdna4():
         pytest.skip("ASM mode is only available on CDNA4 hardwares.")
+    if scale_selection != "default" and clip_mode != "none":
+        pytest.skip("MSE 4/6 scale selection is independent of clipping modes.")
 
     if compile:
         quant_func = torch.compile(torch.ops.torchtitan.convert_to_mxfp4, fullgraph=True)
@@ -45,6 +49,7 @@ def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, u
         axis=axis,
         is_2d_block=is_2d_block,
         clip_mode=clip_mode,
+        scale_selection=scale_selection,
     )
     x_dq_ref = convert_from_mxfp4_pytorch(
         data_lp_ref,
@@ -62,6 +67,7 @@ def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, u
         use_sr=use_sr,
         use_asm=use_asm,
         clip_mode=clip_mode,
+        scale_selection=scale_selection,
     )
     if clip_mode == "dynamic" and data_type == torch.bfloat16:
         pass

@@ -1,0 +1,21 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp4"
+      targets: ["Linear"]
+      ignore:
+        # These layers operate on per-sample vectors. With small local batches,
+        # MXFP4 activation quantization along axis 0 is not block-size aligned.
+        - "re:^time_in\\."
+        - "re:^vector_in\\."
+        - "re:.*_mod\\.lin"
+        - "re:.*modulation\\.lin"
+        - "re:.*final_layer.*"
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: false
+      use_sr_grad: false
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: tensorwise
+      mxfp4_scale_selection: mse_4_6_strict

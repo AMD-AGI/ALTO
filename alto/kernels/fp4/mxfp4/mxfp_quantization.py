@@ -33,6 +33,7 @@ def _calculate_scales(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
     USE_DYNAMIC_CLIP: tl.constexpr = False,
+    MAX_ABS_SCALE: tl.constexpr = 1.0,
 ):
     if x.type.element_ty == tl.float32:
         hp_int_dtype = tl.int32
@@ -69,6 +70,8 @@ def _calculate_scales(
             target_max_pow2 = 0
         else:
             max_abs = tl.max(tl.abs(x), axis=-1)
+    if MAX_ABS_SCALE != 1.0:
+        max_abs *= MAX_ABS_SCALE
     max_abs = max_abs.to(x.type.element_ty)
 
     # round even (adaptive)
@@ -87,6 +90,85 @@ def _calculate_scales(
     # has some gaps.  So, for now just set to the minimum normal value.
     scales = tl.where(scales < 1, 1, scales)
     return scales.to(tl.uint8)
+
+
+@triton.jit
+def _broadcast_scales_fp32(
+    scales,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    IS_2D_BLOCK: tl.constexpr = False,
+):
+    scales_fp32 = (scales.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
+    SCALE_BLOCK_N: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
+    if IS_2D_BLOCK:
+        SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
+        return scales_fp32.expand_dims(axis=(1, 3)).broadcast_to(
+            SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
+        ).reshape(BLOCK_M, BLOCK_N)
+    return scales_fp32.expand_dims(axis=2).broadcast_to(
+        BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
+    ).reshape(BLOCK_M, BLOCK_N)
+
+
+@triton.jit
+def _select_mse_scales_4_or_6(
+    x,
+    scales_6,
+    scales_4,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    IS_2D_BLOCK: tl.constexpr = False,
+):
+    """Choose per-block E8M0 scale by comparing E2M1 max-value 6 and 4 candidates.
+
+    The stored scale remains E8M0.  Callers decide whether ``scales_4`` is
+    derived from ``scales_6 + 1`` or independently calculated with qmax=4.
+    """
+    if IS_2D_BLOCK:
+        SCALE_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
+        SCALE_BLOCK_N: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
+        scales_6_fp32 = (scales_6.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
+        scales_6_fp32 = scales_6_fp32.expand_dims(axis=(1, 3)).broadcast_to(
+            SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
+        ).reshape(BLOCK_M, BLOCK_N)
+        scales_4_fp32 = (scales_4.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
+        scales_4_fp32 = scales_4_fp32.expand_dims(axis=(1, 3)).broadcast_to(
+            SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
+        ).reshape(BLOCK_M, BLOCK_N)
+        q6 = _quantize_e2m1(x, scales_6_fp32, 0, USE_SR=False)
+        dq6 = _dequantize_e2m1(q6, scales_6_fp32)
+        q4 = _quantize_e2m1(x, scales_4_fp32, 0, USE_SR=False)
+        dq4 = _dequantize_e2m1(q4, scales_4_fp32)
+        err6 = (dq6 - x) * (dq6 - x)
+        err4 = (dq4 - x) * (dq4 - x)
+        err6 = err6.reshape(SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE)
+        err4 = err4.reshape(SCALE_BLOCK_M, QUANT_BLOCK_SIZE, SCALE_BLOCK_N, QUANT_BLOCK_SIZE)
+        err6 = tl.sum(tl.sum(err6, axis=-1), axis=-2)
+        err4 = tl.sum(tl.sum(err4, axis=-1), axis=-2)
+    else:
+        SCALE_BLOCK_N: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
+        scales_6_fp32 = (scales_6.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
+        scales_6_fp32 = scales_6_fp32.expand_dims(axis=2).broadcast_to(
+            BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
+        ).reshape(BLOCK_M, BLOCK_N)
+        scales_4_fp32 = (scales_4.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
+        scales_4_fp32 = scales_4_fp32.expand_dims(axis=2).broadcast_to(
+            BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE
+        ).reshape(BLOCK_M, BLOCK_N)
+        q6 = _quantize_e2m1(x, scales_6_fp32, 0, USE_SR=False)
+        dq6 = _dequantize_e2m1(q6, scales_6_fp32)
+        q4 = _quantize_e2m1(x, scales_4_fp32, 0, USE_SR=False)
+        dq4 = _dequantize_e2m1(q4, scales_4_fp32)
+        err6 = (dq6 - x) * (dq6 - x)
+        err4 = (dq4 - x) * (dq4 - x)
+        err6 = err6.reshape(BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE)
+        err4 = err4.reshape(BLOCK_M, SCALE_BLOCK_N, QUANT_BLOCK_SIZE)
+        err6 = tl.sum(err6, axis=-1)
+        err4 = tl.sum(err4, axis=-1)
+    return tl.where(err4 < err6, scales_4, scales_6)
 
 
 @triton.jit
@@ -269,6 +351,7 @@ def _convert_to_mxfp4_kernel(
     USE_ASM: tl.constexpr,
     USE_STATIC_CLIP: tl.constexpr,
     USE_DYNAMIC_CLIP: tl.constexpr,
+    MXFP4_SCALE_SELECTION_MODE: tl.constexpr,
 ):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
@@ -309,6 +392,28 @@ def _convert_to_mxfp4_kernel(
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_DYNAMIC_CLIP=USE_DYNAMIC_CLIP,
     )
+    if MXFP4_SCALE_SELECTION_MODE != 0:
+        if MXFP4_SCALE_SELECTION_MODE == 1:
+            scales_4 = tl.minimum(scales.to(tl.uint32) + 1, 255).to(tl.uint8)
+        else:
+            scales_4 = _calculate_scales(
+                x,
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_N,
+                QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+                IS_2D_BLOCK=IS_2D_BLOCK,
+                USE_DYNAMIC_CLIP=USE_DYNAMIC_CLIP,
+                MAX_ABS_SCALE=1.5,
+            )
+        scales = _select_mse_scales_4_or_6(
+            x,
+            scales,
+            scales_4,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+            IS_2D_BLOCK=IS_2D_BLOCK,
+        )
 
     if USE_STATIC_CLIP:
         x *= (3.0 / 4.0)
@@ -410,12 +515,23 @@ def convert_to_mxfp4(
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
     clip_mode: str = "none",
+    scale_selection: str = "default",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if use_asm is None:
         use_asm = is_cdna4()
+    if scale_selection == "default":
+        scale_selection_mode = 0
+    elif scale_selection == "mse_4_6_shifted":
+        scale_selection_mode = 1
+    elif scale_selection == "mse_4_6_strict":
+        scale_selection_mode = 2
+    else:
+        raise ValueError(f"Invalid MXFP4 scale selection: {scale_selection}")
+    if scale_selection_mode != 0 and clip_mode != "none":
+        raise ValueError("MXFP4 MSE scale selection is only supported with clip_mode='none'")
     if clip_mode == "none":
         use_static_clip = False
         use_dynamic_clip = False
@@ -469,6 +585,7 @@ def convert_to_mxfp4(
         USE_ASM=use_asm,
         USE_STATIC_CLIP=use_static_clip,
         USE_DYNAMIC_CLIP=use_dynamic_clip,
+        MXFP4_SCALE_SELECTION_MODE=scale_selection_mode,
     )
 
     return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
@@ -543,8 +660,12 @@ def _fake_convert_to_mxfp4(
     is_2d_block: bool = False,
     use_sr: bool = False,
     use_asm: Optional[bool] = None,
-    use_static_clip: bool = False,
+    philox_seed: Optional[int] = None,
+    philox_offset: Optional[int] = None,
+    clip_mode: str = "none",
+    scale_selection: str = "default",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    del use_sr, use_asm, philox_seed, philox_offset, clip_mode, scale_selection
     data_hp = data_hp.transpose(axis, -1)
     orig_shape = data_hp.shape
 

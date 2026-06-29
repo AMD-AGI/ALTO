@@ -288,6 +288,7 @@ def convert_to_mxfp4_pytorch(
     axis: int = -1,
     is_2d_block: bool = False,
     clip_mode: Literal["none", "static", "dynamic"] = "none",
+    scale_selection: Literal["default", "mse_4_6_shifted", "mse_4_6_strict"] = "default",
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if data_hp.dtype == torch.float32:
@@ -325,6 +326,8 @@ def convert_to_mxfp4_pytorch(
     else:
         max_abs = torch.amax(torch.abs(max_abs), dim=-1)
 
+    max_abs_unscaled = max_abs
+
     # round even (adaptive)
     max_abs = max_abs.view(hp_int_dtype)
     val_to_add = 1 << (hp_mbits - mbits - 1)
@@ -344,6 +347,39 @@ def convert_to_mxfp4_pytorch(
     scales_fp = (scales.to(hp_int_dtype) << hp_mbits).view(data_hp.dtype).unsqueeze(-1)
     if is_2d_block:
         scales_fp = scales_fp.unsqueeze(-3)
+
+    if scale_selection in ("mse_4_6_shifted", "mse_4_6_strict"):
+        if clip_mode != "none":
+            raise ValueError("MXFP4 MSE scale selection is only supported with clip_mode='none'")
+        if scale_selection == "mse_4_6_shifted":
+            scales_4 = torch.clamp(scales.to(torch.int32) + 1, max=255).to(torch.uint8)
+        else:
+            max_abs_4 = (max_abs_unscaled * 1.5).view(hp_int_dtype)
+            max_abs_4 = ((max_abs_4 + val_to_add) & mask) >> hp_mbits
+            scales_4 = torch.clamp(max_abs_4 - target_max_pow2, min=1).to(torch.uint8)
+        scales_4_fp = (scales_4.to(hp_int_dtype) << hp_mbits).view(data_hp.dtype).unsqueeze(-1)
+        if is_2d_block:
+            scales_4_fp = scales_4_fp.unsqueeze(-3)
+
+        q6 = f32_to_f4_unpacked((data_hp / scales_fp).float())
+        dq6 = f4_unpacked_to_f32(q6).to(data_hp.dtype) * scales_fp
+        q4 = f32_to_f4_unpacked((data_hp / scales_4_fp).float())
+        dq4 = f4_unpacked_to_f32(q4).to(data_hp.dtype) * scales_4_fp
+        err6 = (dq6 - data_hp).float().square()
+        err4 = (dq4 - data_hp).float().square()
+        if is_2d_block:
+            err6 = err6.sum(dim=-1).sum(dim=-2)
+            err4 = err4.sum(dim=-1).sum(dim=-2)
+        else:
+            err6 = err6.sum(dim=-1)
+            err4 = err4.sum(dim=-1)
+        scales = torch.where(err4 < err6, scales_4, scales)
+        scales_fp = (scales.to(hp_int_dtype) << hp_mbits).view(data_hp.dtype).unsqueeze(-1)
+        if is_2d_block:
+            scales_fp = scales_fp.unsqueeze(-3)
+    elif scale_selection != "default":
+        raise ValueError(f"Invalid MXFP4 scale selection: {scale_selection}")
+
     if clip_mode == "static":
         # Note: in-place multiplication leads to incorrect results
         data_clipped = data_hp * (3.0 / 4.0)

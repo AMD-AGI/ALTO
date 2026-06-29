@@ -45,6 +45,35 @@ _ops_to_preserve_subclass = {
 
 gemm_ops = ("linear", "mm.default", "matmul.default", "addmm.default", "matmul")
 
+_training_precision_schedule_step = 0
+
+
+def set_training_precision_schedule_step(step: int) -> None:
+    global _training_precision_schedule_step
+    _training_precision_schedule_step = step
+
+
+def _effective_precision(config: TrainingOpConfig) -> str:
+    for entry in config.precision_schedule:
+        if _training_precision_schedule_step >= entry.start_step and (
+            entry.end_step is None or _training_precision_schedule_step < entry.end_step
+        ):
+            return entry.precision
+    return config.precision
+
+
+def _unwrap_training_weight_wrappers(args, kwargs):
+    def unwrap(t):
+        return t._data
+
+    return pytree.tree_map_only(TrainingWeightWrapperBaseTensor, unwrap, (args, kwargs or {}))
+
+
+def _run_unwrapped_gemm(func, args, kwargs):
+    args_unwrapped, kwargs_unwrapped = _unwrap_training_weight_wrappers(args, kwargs)
+    with torch._C.DisableTorchFunctionSubclass():
+        return func(*args_unwrapped, **kwargs_unwrapped)
+
 
 class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
     """
@@ -236,23 +265,42 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
 
             assert A_is_2d and B_is_3d and offs is not None, "Only 2d x 3d with offsets is supported for now"
             assert bias is None, "Bias is not supported for now"
-            assert config.precision == "mxfp4", ("expected TrainingOpConfig with precision=mxfp4")
+            precision = _effective_precision(config)
+            if precision == "bf16":
+                return _run_unwrapped_gemm(func, args, kwargs)
+            if precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
+                raise NotImplementedError("MXFP8 _grouped_mm is not supported by this dispatch path.")
 
             # logger.info(
             #     f"[MXFP4GroupedMM]config: {config} A.shape: {A.shape} B.shape: {B.shape} offs.shape: {offs.shape}")
 
-            return _quantize_then_mxfp_scaled_grouped_mm(
-                A,
-                B,
-                offs=offs,
-                use_2dblock_x=config.use_2dblock_x,
-                use_2dblock_w=config.use_2dblock_w,
-                use_sr_grad=config.use_sr_grad,
-                use_dge=config.use_dge,
-                use_hadamard=config.use_hadamard,
-                clip_mode=config.clip_mode,
-                use_macro_block_scaling=config.two_level_scaling == "blockwise",
-            )
+            if precision == "mxfp4":
+                return _quantize_then_mxfp_scaled_grouped_mm(
+                    A,
+                    B,
+                    offs=offs,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_dge=config.use_dge,
+                    use_hadamard=config.use_hadamard,
+                    clip_mode=config.clip_mode,
+                    use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                    mxfp4_scale_selection=config.mxfp4_scale_selection,
+                )
+            if precision == "nvfp4":
+                return _quantize_then_nvfp4_scaled_grouped_mm(
+                    A,
+                    B,
+                    offs=offs,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_outer_scale=config.two_level_scaling == "tensorwise",
+                    use_hadamard=config.use_hadamard,
+                    use_dge=config.use_dge,
+                )
+            raise ValueError(f"Unsupported scheduled precision: {precision}")
 
         # linear op override
         elif func.__name__ in gemm_ops:
@@ -269,21 +317,51 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert isinstance(B, cls), f"B should be a {cls.__name__} for func {func.__name__}"
 
             config = B.config
-            assert config.precision == "mxfp4", ("expected TrainingOpConfig with precision=mxfp4")
+            precision = _effective_precision(config)
+            if precision == "bf16":
+                return _run_unwrapped_gemm(func, args, kwargs)
             # logger.info(f"[MXFP4Linear]func: {func.__name__} config: {config}"
             #             f"A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}")
 
-            Y = _to_mxfp4_then_scaled_mm(
-                A,
-                B if trans_b else B.T,
-                use_2dblock_x=config.use_2dblock_x,
-                use_2dblock_w=config.use_2dblock_w,
-                use_sr_grad=config.use_sr_grad,
-                use_dge=config.use_dge,
-                clip_mode=config.clip_mode,
-                use_hadamard=config.use_hadamard,
-                use_macro_block_scaling=config.two_level_scaling == "blockwise",
-            )
+            W = B if trans_b else B.T
+            if precision == "mxfp4":
+                Y = _to_mxfp4_then_scaled_mm(
+                    A,
+                    W,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_dge=config.use_dge,
+                    clip_mode=config.clip_mode,
+                    use_hadamard=config.use_hadamard,
+                    use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                    mxfp4_scale_selection=config.mxfp4_scale_selection,
+                )
+            elif precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
+                assert not config.use_hadamard and not config.use_dge, (
+                    "MXFP8 dispatch does not support Hadamard or DGE options."
+                )
+                Y = _to_mxfp8_then_scaled_mm(
+                    A,
+                    W,
+                    fp8_variant=MXFP8TrainingWeightWrapperTensor._PRECISION_TO_FP8_VARIANT[precision],
+                    use_sr_grad=config.use_sr_grad,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                )
+            elif precision == "nvfp4":
+                Y = _to_nvfp4_then_scaled_mm(
+                    A,
+                    W,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_outer_scale=config.two_level_scaling == "tensorwise",
+                    use_hadamard=config.use_hadamard,
+                    use_dge=config.use_dge,
+                )
+            else:
+                raise ValueError(f"Unsupported scheduled precision: {precision}")
             if bias is not None:
                 Y = Y + bias
             return Y
@@ -338,21 +416,38 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert bias is None, "Bias is not supported for grouped_mm"
 
             config = B.config
-            assert config.precision == "nvfp4", (
-                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}"
-            )
-
-            return _quantize_then_nvfp4_scaled_grouped_mm(
-                A,
-                B,
-                offs=offs,
-                use_2dblock_x=config.use_2dblock_x,
-                use_2dblock_w=config.use_2dblock_w,
-                use_sr_grad=config.use_sr_grad,
-                use_outer_scale=config.two_level_scaling == "tensorwise",
-                use_hadamard=config.use_hadamard,
-                use_dge=config.use_dge,
-            )
+            precision = _effective_precision(config)
+            if precision == "bf16":
+                return _run_unwrapped_gemm(func, args, kwargs)
+            if precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
+                raise NotImplementedError("MXFP8 _grouped_mm is not supported by this dispatch path.")
+            if precision == "nvfp4":
+                return _quantize_then_nvfp4_scaled_grouped_mm(
+                    A,
+                    B,
+                    offs=offs,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_outer_scale=config.two_level_scaling == "tensorwise",
+                    use_hadamard=config.use_hadamard,
+                    use_dge=config.use_dge,
+                )
+            if precision == "mxfp4":
+                return _quantize_then_mxfp_scaled_grouped_mm(
+                    A,
+                    B,
+                    offs=offs,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_dge=config.use_dge,
+                    use_hadamard=config.use_hadamard,
+                    clip_mode=config.clip_mode,
+                    use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                    mxfp4_scale_selection=config.mxfp4_scale_selection,
+                )
+            raise ValueError(f"Unsupported scheduled precision: {precision}")
 
         # linear / mm overrides
         elif func.__name__ in gemm_ops:
@@ -367,8 +462,9 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert isinstance(B, cls), (f"B should be a {cls.__name__} for func {func.__name__}")
 
             config = B.config
-            assert config.precision == "nvfp4", (
-                f"expected TrainingOpConfig with precision=nvfp4, got {config.precision}")
+            precision = _effective_precision(config)
+            if precision == "bf16":
+                return _run_unwrapped_gemm(func, args, kwargs)
 
             # Pass the wrapper tensor itself into the autograd function —
             # matching the MXFP4 path — so that any upstream subclass
@@ -379,16 +475,44 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             # entry, so the autograd tape and downstream QDQ ops still see
             # plain tensors.
             W = B if trans_b else B.T
-            Y = _to_nvfp4_then_scaled_mm(
-                A,
-                W,
-                use_2dblock_x=config.use_2dblock_x,
-                use_2dblock_w=config.use_2dblock_w,
-                use_sr_grad=config.use_sr_grad,
-                use_outer_scale=config.two_level_scaling == "tensorwise",
-                use_hadamard=config.use_hadamard,
-                use_dge=config.use_dge,
-            )
+            if precision == "nvfp4":
+                Y = _to_nvfp4_then_scaled_mm(
+                    A,
+                    W,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_outer_scale=config.two_level_scaling == "tensorwise",
+                    use_hadamard=config.use_hadamard,
+                    use_dge=config.use_dge,
+                )
+            elif precision == "mxfp4":
+                Y = _to_mxfp4_then_scaled_mm(
+                    A,
+                    W,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_dge=config.use_dge,
+                    clip_mode=config.clip_mode,
+                    use_hadamard=config.use_hadamard,
+                    use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                    mxfp4_scale_selection=config.mxfp4_scale_selection,
+                )
+            elif precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
+                assert not config.use_hadamard and not config.use_dge, (
+                    "MXFP8 dispatch does not support Hadamard or DGE options."
+                )
+                Y = _to_mxfp8_then_scaled_mm(
+                    A,
+                    W,
+                    fp8_variant=MXFP8TrainingWeightWrapperTensor._PRECISION_TO_FP8_VARIANT[precision],
+                    use_sr_grad=config.use_sr_grad,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                )
+            else:
+                raise ValueError(f"Unsupported scheduled precision: {precision}")
             if bias is not None:
                 Y = Y + bias
             return Y
@@ -409,6 +533,24 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
     @classmethod
     def __torch_function__(cls, func, types, args, kwargs={}):
         if func.__name__ == "_grouped_mm":
+            A, B = args[0], args[1]
+            precision = _effective_precision(B.config)
+            if precision == "bf16":
+                return _run_unwrapped_gemm(func, args, kwargs)
+            if precision == "mxfp4":
+                return _quantize_then_mxfp_scaled_grouped_mm(
+                    A,
+                    B,
+                    offs=kwargs.get("offs", None),
+                    use_2dblock_x=B.config.use_2dblock_x,
+                    use_2dblock_w=B.config.use_2dblock_w,
+                    use_sr_grad=B.config.use_sr_grad,
+                    use_dge=B.config.use_dge,
+                    use_hadamard=B.config.use_hadamard,
+                    clip_mode=B.config.clip_mode,
+                    use_macro_block_scaling=B.config.two_level_scaling == "blockwise",
+                    mxfp4_scale_selection=B.config.mxfp4_scale_selection,
+                )
             raise NotImplementedError(
                 "MXFP8 _grouped_mm is not supported by this dispatch path; "
                 "restrict MXFP8 schemes to Linear targets."
@@ -430,22 +572,38 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             )
 
             config = B.config
-            assert config.precision in cls._PRECISION_TO_FP8_VARIANT, (
-                "expected TrainingOpConfig with precision in "
-                f"{tuple(cls._PRECISION_TO_FP8_VARIANT)}, got {config.precision}"
-            )
-            assert not config.use_hadamard and not config.use_dge, (
-                "MXFP8 dispatch does not support Hadamard or DGE options."
-            )
+            precision = _effective_precision(config)
+            if precision == "bf16":
+                return _run_unwrapped_gemm(func, args, kwargs)
 
-            Y = _to_mxfp8_then_scaled_mm(
-                A,
-                B if trans_b else B.T,
-                fp8_variant=cls._PRECISION_TO_FP8_VARIANT[config.precision],
-                use_sr_grad=config.use_sr_grad,
-                use_2dblock_x=config.use_2dblock_x,
-                use_2dblock_w=config.use_2dblock_w,
-            )
+            W = B if trans_b else B.T
+            if precision in cls._PRECISION_TO_FP8_VARIANT:
+                assert not config.use_hadamard and not config.use_dge, (
+                    "MXFP8 dispatch does not support Hadamard or DGE options."
+                )
+                Y = _to_mxfp8_then_scaled_mm(
+                    A,
+                    W,
+                    fp8_variant=cls._PRECISION_TO_FP8_VARIANT[precision],
+                    use_sr_grad=config.use_sr_grad,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                )
+            elif precision == "mxfp4":
+                Y = _to_mxfp4_then_scaled_mm(
+                    A,
+                    W,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_dge=config.use_dge,
+                    clip_mode=config.clip_mode,
+                    use_hadamard=config.use_hadamard,
+                    use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                    mxfp4_scale_selection=config.mxfp4_scale_selection,
+                )
+            else:
+                raise ValueError(f"Unsupported scheduled precision for MXFP8 wrapper: {precision}")
             if bias is not None:
                 Y = Y + bias
             return Y

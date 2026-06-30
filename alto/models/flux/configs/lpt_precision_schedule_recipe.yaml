@@ -21,6 +21,12 @@ training_stage:
       clip_mode: none
       two_level_scaling: tensorwise
       mxfp4_scale_selection: mse_4_6_shifted
+      # Weight de-oscillation is disabled by default. Uncomment to enable it
+      # after the configured step.
+      # deosc_step: 2000
+      # deosc_period: 200
+      # deosc_ratio: 4.0
+      # deosc_log_freq: 1
       precision_schedule:
         # Step ranges are [start_step, end_step). Training steps start from 1.
         # Edit these boundaries to control low-precision warmup/cooldown phases.
@@ -30,6 +36,6 @@ training_stage:
         - precision: mxfp4
           start_step: 1
           end_step: 24001
-        - precision: bf16
+        - precision: mxfp8
           start_step: 24001
 

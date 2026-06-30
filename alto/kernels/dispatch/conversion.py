@@ -97,6 +97,11 @@ def swap_params(
             for param_name, param in module.named_parameters(recurse=False):
                 if (target_parameter_name is not None and param_name != target_parameter_name):
                     continue
+                module_prefix = f"{module_name}." if module_name else ""
+                full_param_name = f"{module_prefix}{cur_fqn}{'.' if cur_fqn else ''}{param_name}"
+                if target_parameter_name is None and param_name.endswith("bias"):
+                    logger.debug(f"Skipped {full_param_name} because it is a bias parameter")
+                    continue
                 if not isinstance(param.data, TrainingWeightWrapperBaseTensor):
                     new_param = nn.Parameter(
                         tensor_cls(param.data, config),
@@ -104,7 +109,7 @@ def swap_params(
                     )
                     setattr(module, param_name, new_param)
                     logger.info(
-                        f"Swapped {module_name}{'.' if module_name else ''}{cur_fqn}{'.' if cur_fqn else ''}{param_name} to {tensor_cls.__name__}"
+                        f"Swapped {full_param_name} to {tensor_cls.__name__}"
                     )
 
                     def get_name_func_new():

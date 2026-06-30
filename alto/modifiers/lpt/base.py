@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import re
 from typing import Any, Literal
 import torch
 from torch.nn import Module
@@ -57,6 +58,16 @@ class LowPrecisionTrainingModifier(Modifier):
     """
     Log frequency for de-oscillation statistics. If 0, logging is disabled.
     """
+    deosc_targets: list[str] = Field(default_factory=list)
+    """
+    Optional parameter-name patterns eligible for de-oscillation. Empty means all FP4 parameters.
+    Supports literal names and regex patterns prefixed with "re:".
+    """
+    deosc_ignore: list[str] = Field(default_factory=list)
+    """
+    Optional parameter-name patterns excluded from de-oscillation.
+    Supports literal names and regex patterns prefixed with "re:".
+    """
 
     lora_rank: int = 0
     """
@@ -65,6 +76,7 @@ class LowPrecisionTrainingModifier(Modifier):
     """
 
     _resolved_config: dict[TrainingOpConfig, list[str]] | None = PrivateAttr(default=None)
+    _deosc_eligible_param_ids: frozenset[int] | None = PrivateAttr(default=None)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -253,6 +265,40 @@ class LowPrecisionTrainingModifier(Modifier):
                     child.init_lora_weights(init_std=0.02)
         return True
 
+    @staticmethod
+    def _matches_pattern(name: str, pattern: str) -> bool:
+        if pattern.startswith("re:"):
+            return re.search(pattern[3:], name) is not None
+        return pattern == name or pattern in name
+
+    @classmethod
+    def _matches_any_pattern(cls, name: str, patterns: list[str]) -> bool:
+        return any(cls._matches_pattern(name, pattern) for pattern in patterns)
+
+    def _get_deosc_eligible_param_ids(self, model_parts: list[Module]) -> frozenset[int] | None:
+        if not self.deosc_targets and not self.deosc_ignore:
+            return None
+        if self._deosc_eligible_param_ids is not None:
+            return self._deosc_eligible_param_ids
+
+        eligible_param_ids: set[int] = set()
+        matched_names: list[str] = []
+        for model_part in model_parts:
+            for name, param in model_part.named_parameters():
+                if self.deosc_targets and not self._matches_any_pattern(name, self.deosc_targets):
+                    continue
+                if self.deosc_ignore and self._matches_any_pattern(name, self.deosc_ignore):
+                    continue
+                eligible_param_ids.add(id(param))
+                matched_names.append(name)
+
+        logger.info(
+            f"[de-osc] parameter filter selected {len(eligible_param_ids)} params "
+            f"from {len(matched_names)} matched names"
+        )
+        self._deosc_eligible_param_ids = frozenset(eligible_param_ids)
+        return self._deosc_eligible_param_ids
+
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         step = kwargs.get("step", None)
         trainer = kwargs.get("trainer", None)
@@ -273,6 +319,7 @@ class LowPrecisionTrainingModifier(Modifier):
                 period=self.deosc_period,
                 ratio_threshold=self.deosc_ratio,
                 log_freq=self.deosc_log_freq,
+                eligible_param_ids=self._get_deosc_eligible_param_ids(model_parts),
             )
             enable_de_oscillation(optimizers, deosc_config)
         return True

@@ -21,3 +21,11 @@ training_stage:
       clip_mode: none
       two_level_scaling: tensorwise
       mxfp4_scale_selection: mse_4_6_shifted
+      # Weight de-oscillation is disabled by default. Uncomment to enable it
+      # after the configured step.
+      deosc_step: 2000
+      deosc_period: 200
+      deosc_ratio: 4.0
+      deosc_log_freq: 1
+      # deosc_targets:
+      #   - "re:double_blocks\\..*_attn\\.(qkv|proj)\\.weight$"

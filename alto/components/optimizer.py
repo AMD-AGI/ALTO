@@ -228,12 +228,15 @@ class DeOscillationConfig:
             uses ``16``.
         log_freq: log reset statistics every ``log_freq`` triggered
             periods.  ``0`` disables logging.
+        eligible_param_ids: optional set of parameter object IDs eligible
+            for de-oscillation. ``None`` keeps the original all-FP4 behavior.
     """
 
     enable: bool = False
     period: int = 25
     ratio_threshold: float = 16.0
     log_freq: int = 0
+    eligible_param_ids: frozenset[int] | None = None
 
 
 class _DeOscillationHook:
@@ -284,6 +287,8 @@ class _DeOscillationHook:
         guaranteed to be compatible with the same QDQ kernels we are
         about to call.
         """
+        if self._cfg.eligible_param_ids is not None and id(p) not in self._cfg.eligible_param_ids:
+            return None
         if not p.requires_grad:
             return None
         wrapper = _peel_to_fp4_wrapper(p)
@@ -433,7 +438,8 @@ def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillation
         "[de-osc] enabled "
         f"period={config.period} "
         f"ratio_threshold={config.ratio_threshold} "
-        f"log_freq={config.log_freq}"
+        f"log_freq={config.log_freq} "
+        f"eligible_params={len(config.eligible_param_ids) if config.eligible_param_ids is not None else 'all'}"
     )
 
 

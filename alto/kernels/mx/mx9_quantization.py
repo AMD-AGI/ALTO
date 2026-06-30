@@ -84,7 +84,8 @@ def _sanitize(x):
 
     (Faithfully replicates Quark/reference: exponent statistics use sanitized
     values to prevent Inf from polluting the block scale; the actual round still
-    operates on the original x, letting Inf be clamped and NaN pass through.)
+    operates on the original x, letting Inf be clamped. NaN is not representable
+    in the packed path (q is int8), so NaN inputs yield undefined q values.)
     """
     x = tl.where(x != x, 0.0, x)
     x = tl.where(x == float("inf"), 0.0, x)
@@ -206,8 +207,10 @@ def _pack_mx9(
     scale = tl.exp2(scale_exp.to(tl.float32))   # [BPP, BLOCK_SIZE], always normal (!=0)
 
     # Q part of QDQ operates on the *original* x (NaN will produce garbage, see below).
+    # div_rn (IEEE RN) matches PyTorch eager x/scale; plain / lowers to fast div
+    # (max 2 ULP error) which can flip round at .5 boundaries.
     xf = x.to(tl.float32)
-    q = _round_half_even(xf / scale)
+    q = _round_half_even(tl.div_rn(xf, scale))
     # True 8-bit: symmetric clamp to +/-127.
     #   - Normal data: demoted elements have |q|<128 mathematically; only rounding
     #     edge cases can produce 128, which is clamped to 127.
@@ -432,7 +435,11 @@ def convert_from_mx9(
     out_shape / axis must match the original convert_to_mx9 call, used to
     reverse the transpose and padding. Returns shape = out_shape, dtype = out_dtype.
     """
-    assert out_dtype in _TORCH_TO_TL
+    assert out_dtype in _TORCH_TO_TL, \
+        f"out_dtype must be one of {tuple(_TORCH_TO_TL)}, got {out_dtype}"
+    assert q.dtype == torch.int8, f"q dtype must be int8, got {q.dtype}"
+    assert max_exp.dtype == torch.uint8, f"max_exp dtype must be uint8, got {max_exp.dtype}"
+    assert prime.dtype == torch.uint8, f"prime dtype must be uint8, got {prime.dtype}"
     assert block_size == 16, f"block_size only supports 16, got {block_size}"
 
     # Three-part consistency check: q/max_exp/prime must share the same n_blocks

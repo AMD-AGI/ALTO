@@ -212,3 +212,6 @@ __marimo__/
 datasets/
 /models/
 comm_traces/
+
+docker/
+gpt_*/

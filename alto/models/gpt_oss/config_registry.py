@@ -204,7 +204,10 @@ def gpt_oss_20b_adahop() -> Trainer.Config:
     config.checkpoint.initial_load_in_hf = False
     config.checkpoint.initial_load_in_hf_quantized = False
     config.checkpoint.interval = 500               # Save at step interval
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
+    config.checkpoint.keep_latest_k = 2            # keep only the 2 latest (each ~234G)
+    # Distinct from gpt_oss_20b_lpt's dump_folder so the adahop and nolora runs
+    # never share/overwrite each other's checkpoints.
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop.yaml",),
     ],)
@@ -227,6 +230,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.checkpoint.initial_load_in_hf = False
     config.checkpoint.initial_load_in_hf_quantized = False
     config.checkpoint.interval = 500               # Save at step interval
+    config.checkpoint.keep_latest_k = 2            # keep only the 2 latest (each ~234G)
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),

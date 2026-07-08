@@ -4,7 +4,7 @@
 
 ## Abstract
 
-Training large language models (LLMs) in sub-8-bit arithmetic promises substantial gains in memory bandwidth and compute throughput, yet FP4 formats introduce severe quantization error that can destabilize optimization. We present an ALTO-based training recipe for **GPT-OSS-20B**—a 20-billion-parameter mixture-of-experts (MoE) model—on the **MLPerf Small MoE** benchmark under the **MXFP4** microscaling format. Our recipe composes established techniques from [2509.25149]—hybrid 1D/2D block quantization, randomized Hadamard transforms (RHT), and stochastic rounding (SR)—with a simplified weight de-oscillation scheme adapted from TetraJet-v2 [2510.27527]. On C4 validation with global batch size 16, **MXFP4 + RHT + SR + de-oscillation** reaches loss **3.3350** at 16,128 steps, within **0.007** of the BF16 baseline (3.3283)—closing roughly **73%** of the gap left by MXFP4 without de-oscillation. We additionally report negative end-to-end results from differential gradient estimation, outlier clipping, and macro-block scaling despite operator-level SNR gains. All runs use fake-quantized MXFP4 kernels on AMD MI300 hardware; wall-clock speed has not been optimized.
+Training large language models (LLMs) in sub-8-bit arithmetic promises substantial gains in memory bandwidth and compute throughput, yet FP4 formats introduce severe quantization error that can destabilize optimization. We present an ALTO-based training recipe for **GPT-OSS-20B**—a 20-billion-parameter mixture-of-experts (MoE) model—on the **MLPerf Small MoE** benchmark under the **MXFP4** microscaling format. Our recipe composes established techniques from [2509.25149]—hybrid 1D/2D block quantization, randomized Hadamard transforms (RHT), and stochastic rounding (SR)—with a simplified weight de-oscillation scheme adapted from TetraJet-v2 [2510.27527]. On C4 validation with global batch size 16, **MXFP4 + RHT + SR + de-oscillation** reaches loss **3.3350** at 16,128 steps, within **0.007** of the BF16 baseline (3.3283)—closing roughly **50%** of the gap left by MXFP4 without de-oscillation (3.3418). We additionally report negative end-to-end results from differential gradient estimation, outlier clipping, and macro-block scaling despite operator-level SNR gains. All runs use fake-quantized MXFP4 kernels on AMD MI300 hardware; wall-clock speed has not been optimized.
 
 ---
 
@@ -84,7 +84,7 @@ We organize accuracy recovery into a composable stack. The default recipe enable
 
 $$
 s = \frac{\max_i |x_i|}{r_{\max}}, \qquad
-\hat{x}_i = \mathcal{Q}_{\mathrm{E2M1}}\!\left(\frac{x_i}{s}\right), \qquad
+\hat{x}_i = \mathcal{Q}_{\mathrm{E2M1}} \left(\frac{x_i}{s}\right), \qquad
 \tilde{x}_i = \hat{x}_i \cdot s,
 $$
 
@@ -125,8 +125,6 @@ Because $\mathbf{H}$ is orthogonal (up to scaling), the transform redistributes 
 
 **Solution.** As in [2509.25149], we employ **stochastic rounding** (SR) during gradient quantization in the backward pass. Each element is rounded up or down with probability proportional to its fractional distance from the two adjacent representable values, yielding an unbiased estimator of the pre-quantization gradient in expectation. On CDNA4, stochastic rounding is accelerated through inline assembly (`v_cvt_scalef32_sr_pk_fp4_*`). Forward-pass quantization of weights and activations remains deterministic.
 
-**Trade-off.** SR injects additional quantization noise, reducing per-operator SNR relative to deterministic rounding (Section 2.3). In end-to-end training, the reduction in systematic bias dominates this local SNR penalty.
-
 ### 3.4 Weight De-Oscillation
 
 **Problem.** Weight oscillation arises from two complementary mechanisms. First, when a master weight $w$ resides near a quantization bin boundary, infinitesimal AdamW updates can cause $Q(w)$ to alternate between adjacent bins while the FP trajectory remains smooth. Second, outlier elements—those with disproportionately large magnitude within a block—can drive the block scale and repeatedly push $Q(w)$ across bin boundaries as gradients and neighboring values fluctuate, even when $w$ itself does not sit at a boundary. In both cases, the weight seen by the GEMM oscillates—a pathology analyzed in TetraJet-v2 [2510.27527].
@@ -140,15 +138,26 @@ $$
 
 An element is flagged as oscillating when the distance ratio $\mathrm{DistRatio} = d_{Q} / d_w$ exceeds a threshold $\tau$ (default $\tau{=}4.0$). This criterion captures both bin-boundary flicker and outlier-induced scale sensitivity, since either mechanism produces large quantized movement relative to small FP movement. At the end of each window, flagged elements are snapped to their current bin center: $w \leftarrow Q(w)$. The procedure is installed as a post-step hook on AdamW and is activated after a warmup of `deosc_step` training steps (default 2,000 for GBS=16 and 800 for GBS=64).
 
-Compared to TetraJet-v2 [2510.27527], our simplification uses a lower threshold ($\tau{=}4$ vs. $16$), a deferred activation schedule, and restricts scope to parameters wrapped by ALTO's MXFP4/NVFP4 training tensors.
+**Figure 1.** Weight de-oscillation core loop (post–AdamW step hook; period $P$, threshold $\tau$).
 
-Relative to low-rank outlier compensation (Section 4.4), de-oscillation imposes a qualitatively different cost profile. Low-rank compensation adds significant computation cost that scales with rank $r$: each affected layer performs additional low-rank matmuls on every forward and backward pass. De-oscillation, by contrast, adds mainly memory cost: the hook maintains per-element auxiliary tensors in optimizer state ($d_w$, $d_Q$, and a previous-weight snapshot) alongside existing AdamW moments, but performs only periodic, sparse in-place updates with no extra forward-pass GEMMs. On AMD MI300 and MI355 hardware, GPT-OSS-20B training leaves sufficient device-memory headroom under our configuration; the auxiliary state required by de-oscillation fits within this budget without reducing batch size or sequence length, whereas low-rank compensation at $r{=}128$—which we find helpful at GBS=64 (Table 6)—directly extends wall-clock time. We therefore treat de-oscillation as the default mechanism for late-training stabilization in our recipe.
+```mermaid
+flowchart LR
+    ACCUM(["Each step:<br/>accumulate d_w, d_Q"]) --> WINDOW{"P steps<br/>elapsed?"}
+    WINDOW -->|No| ACCUM
+    WINDOW -->|Yes| CHECK{"d_Q / d_w ≥ τ ?"}
+    CHECK -->|Yes| SNAP(["w ← Q(w)"])
+    CHECK -->|No| RESET
+    SNAP --> RESET(["Reset counters"])
+    RESET --> ACCUM
+```
+
+Compared to TetraJet-v2 [2510.27527], our simplification uses a lower threshold ($\tau{=}4$ vs. $16$), a deferred activation schedule, and restricts scope to parameters wrapped by ALTO's MXFP4/NVFP4 training tensors.
 
 ---
 
 ## 4. Additional Techniques Explored
 
-We briefly describe four further techniques implemented in ALTO. Differential gradient estimation, outlier clipping, and macro-block scaling did not yield satisfactory end-to-end results on GPT-OSS-20B despite operator-level gains in some cases. Low-rank outlier compensation is rank-sensitive: $r{=}32$ is neutral at GBS=16 (Table 5), while $r{=}128$ yields a meaningful validation-loss gain at GBS=64 (Table 6), though it still trails de-oscillation and adds substantial per-step compute. We include all four for completeness and to inform future work.
+We briefly describe four further techniques implemented in ALTO. Section 5.2 and Section 5.3 report their operator-level and end-to-end evaluation.
 
 ### 4.1 Differential Gradient Estimation (DGE)
 
@@ -170,7 +179,7 @@ $$
 \mathrm{d}\mathbf{W} \leftarrow \mathrm{d}\mathbf{W} \odot f'(\mathbf{W}).
 $$
 
-For MXFP4, bin widths $\delta$ and midpoints $m$ are determined by the E2M1 representable grid (15 breakpoints for FP4). Operator-level tests show marginal SNR improvement on $\mathrm{d} \mathbf{W}$, but end-to-end validation loss degrades severely ($+0.19$ at 16,128 steps with GBS=16; Table 5), confirming that the modified DGE formula does not help at GPT-OSS-20B scale.
+For MXFP4, bin widths $\delta$ and midpoints $m$ are determined by the E2M1 representable grid (15 breakpoints for FP4).
 
 ### 4.2 Outlier Clipping
 
@@ -178,8 +187,6 @@ Two clipping modes are supported:
 
 - **Static clipping** scales inputs by $3/4$ before quantization and by $4/3$ after dequantization, with a compensating factor of $16/9$ on the weight-gradient path to preserve gradient consistency.
 - **Dynamic clipping** follows [2502.05003] (*QuEST*): a per-block clipping threshold is estimated from the block standard deviation, $\hat{m} = (2.922/6)\,\mathrm{std}(\mathbf{x}_{\mathrm{block}})$, and requires co-use with RHT in our implementation.
-
-Both modes degrade operator-level SNR but do not improve end-to-end validation loss: static clipping is marginally helpful ($\Delta = -0.007$), while dynamic clipping causes a large regression ($+0.18$; Table 5).
 
 ### 4.3 Macro-Block Scaling
 
@@ -193,8 +200,6 @@ $$
 
 The macro-scale is encoded as a shared mantissa: only the upper bits of the FP32 scale factor are stored (8-bit metadata per macro-block), and the value is reconstructed for pre-scaling before MXFP4 QDQ and descaling afterward.
 
-MBS improves single-operator SNR relative to plain 1d2d quantization in our unit tests (Section 5.1; protocol in Section 2.3), confirming that coarser high-precision scaling reduces local saturation error. At GPT-OSS-20B scale, however, MBS yields only a modest validation-loss improvement ($-0.011$ vs. the default recipe at 16,128 steps; Table 5) and is not enabled in the production recipe.
-
 ### 4.4 Low-Rank Outlier Compensation
 
 Following the outlier-compensation paradigm, ALTO can decompose a linear layer as
@@ -203,13 +208,7 @@ $$
 \mathbf{y} = \mathbf{x}\mathbf{W}^{\top} + \bigl((\mathbf{x}\mathbf{V}) \odot \boldsymbol{\sigma}\bigr)\mathbf{U}^{\top},
 $$
 
-where $\mathbf{W}$ is quantized to MXFP4 and $(\mathbf{U}, \mathbf{V}, \boldsymbol{\sigma})$ form a rank-$r$ branch intended to capture information lost to FP4 saturation.
-
-The end-to-end benefit of low-rank compensation depends strongly on rank $r$. At GBS=16, $r{=}32$ is neutral on validation loss ($\Delta \approx 0$; Table 5). At GBS=64, $r{=}32$ remains marginal ($\Delta = -0.002$), whereas **$r{=}128$ reduces loss by 0.017** relative to the RHT+SR control and recovers roughly one quarter of the FP4–BF16 gap at 7,680 steps (Table 6)—confirming that a sufficiently wide auxiliary branch can capture outlier information lost to FP4 saturation. Even at $r{=}128$, however, low-rank compensation trails **de-oscillation** ($\Delta = -0.052$ at GBS=64) while imposing substantially higher per-step compute. Each compensated layer adds two extra MXFP4-quantized parameters ($\mathbf{U}$, $\mathbf{V}$) with one FP32 parameter ($\boldsymbol{\sigma}$) and, more critically, 6 additional low-rank matmuls in every forward and backward pass, with cost scaling with $r$. On GPT-OSS-20B, where multiple linear layers would require compensation, this per-step compute penalty dominates wall-clock time even in our unoptimized prototype stack.
-
-De-oscillation (Section 3.4) achieves stronger late-training stabilization through a different cost channel: it stores per-element distance accumulators and snapshots in optimizer state, increasing memory footprint but avoiding any extra GEMM in the training loop. When running GPT-OSS-20B on AMD MI300 or MI355 accelerators, device memory is not fully occupied under our training configuration; the additional optimizer-state tensors required by de-oscillation fit within available headroom and are therefore an acceptable expense relative to the per-step compute cost of low-rank compensation at $r \geq 128$.
-
-We therefore prefer weight de-oscillation over low-rank compensation as the late-training accuracy recovery mechanism in our default recipe. Low-rank compensation remains available for settings where accuracy is paramount and per-step compute is tolerable; our GBS=64 results suggest **$r{=}128$** as a viable starting point when exploring this trade-off. Integration with MoE grouped GEMM is also incomplete, further limiting its practicality at GPT-OSS scale.
+where $\mathbf{W}$ is quantized to MXFP4 and $(\mathbf{U}, \mathbf{V}, \boldsymbol{\sigma})$ form a rank-$r$ branch intended to capture information lost to FP4 saturation. Each compensated layer adds two extra MXFP4-quantized parameters ($\mathbf{U}$, $\mathbf{V}$) with one FP32 parameter ($\boldsymbol{\sigma}$) and 6 additional low-rank matmuls in every forward and backward pass, with cost scaling with $r$. Integration with MoE grouped GEMM is incomplete.
 
 ---
 
@@ -251,11 +250,11 @@ Table 1 and Table 2 report SNR under the operator-level protocol of Section 2.3.
 
 *Randomized Hadamard transform.* RHT does not alter the forward pass (13.48 dB unchanged) because it is applied only to weight gradients in the backward path. It modestly improves weight-gradient SNR (+0.23 dB linear, +0.20 dB grouped), consistent with redistributing outlier energy before 1D activation-gradient quantization.
 
-*Stochastic rounding.* SR reduces input-gradient SNR by approximately 0.8 dB (11.80 → 11.02 linear; 12.71 → 12.26 grouped) while leaving forward SNR unchanged. This is the expected bias–variance trade-off: SR removes systematic rounding bias at the cost of additional quantization noise in $\mathrm{d}\mathbf{X}$. Weight gradients are essentially unaffected.
+*Stochastic rounding.* SR reduces input-gradient SNR by approximately 0.8 dB (11.80 → 11.02 linear; 12.71 → 12.26 grouped) while leaving forward SNR unchanged. This is the expected bias–variance trade-off: SR removes systematic rounding bias at the cost of additional quantization noise in $\mathrm{d}\mathbf{X}$. Weight gradients are essentially unaffected. In end-to-end training (Section 5.2), this local SNR penalty is outweighed by the bias reduction SR provides.
 
-*Outlier clipping.* Static and dynamic clipping, with or without SR, produce SNR within 0.2 dB of the corresponding non-clipping rows. Under this synthetic outlier regime, clipping does not materially improve operator fidelity—consistent with our observation that static clipping yields only marginal end-to-end gains while dynamic clipping is harmful (Section 4.2).
+*Outlier clipping.* Static and dynamic clipping, with or without SR, produce SNR within 0.2 dB of the corresponding non-clipping rows. Under this synthetic outlier regime, clipping does not materially improve operator fidelity.
 
-*Macro-block scaling (MBS).* MBS yields the largest operator-level gain: forward SNR rises from 13.5 dB to 14.6 dB (+1.2 dB), and all gradient components improve by 0.4–1.5 dB. On grouped GEMM, MBS boosts $\mathrm{d}\mathbf{X}$ to 14.17 dB—the highest value in Table 2—confirming that coarse shared-mantissa pre-scaling (Section 4.3) mitigates outlier-induced saturation before MX block quantization. Despite these gains, MBS improves validation loss by only 0.011 at 16,128 steps (Table 5), illustrating that operator SNR on synthetic tensors is an incomplete proxy for training dynamics.
+*Macro-block scaling (MBS).* MBS yields the largest operator-level gain: forward SNR rises from 13.5 dB to 14.6 dB (+1.2 dB), and all gradient components improve by 0.4–1.5 dB. On grouped GEMM, MBS boosts $\mathrm{d}\mathbf{X}$ to 14.17 dB—the highest value in Table 2—confirming that coarse shared-mantissa pre-scaling (Section 4.3) mitigates outlier-induced saturation before MX block quantization.
 
 *Default recipe.* The production configuration (1d2d + RHT + SR) achieves 13.48 / 11.02 / 13.04 dB on linear and 13.47 / 12.26 / 12.33 dB on grouped GEMM—forward fidelity remains strong while accepting the SR-induced $\mathrm{d}\mathbf{X}$ penalty documented above.
 
@@ -263,25 +262,25 @@ Table 1 and Table 2 report SNR under the operator-level protocol of Section 2.3.
 
 We pretrain GPT-OSS-20B from scratch on a C4 subset under the protocol of Section 2.2, using fake-quantized MXFP4 or NVFP4 GEMMs for all Linear and grouped-expert layers. Validation cross-entropy is measured as described in Section 2.3 at fixed training-step checkpoints. We report two global batch sizes (GBS): 16 (base learning rate $4 \times 10^{-4}$) and 64 (base learning rate $1 \times 10^{-4}$, with de-oscillation enabled at step 800). All FP4 runs use the 1d2d layout unless noted otherwise.
 
-**Main comparison (GBS=16).** Table 3 tracks four training curves through 16,128 steps. The BF16 baseline reaches a validation loss of 3.3283 at the final checkpoint. The default MXFP4 recipe (1d2d + RHT + SR) attains 3.3532, a gap of +0.0249 (+0.75% relative). Adding weight de-oscillation closes most of this gap: the final loss is 3.3350, only +0.0067 above BF16 (+0.20% relative)—a 73% reduction in the MXFP4–BF16 discrepancy relative to the recipe without de-oscillation. For reference, an NVFP4 run under the same 1d2d + RHT + SR stack reaches 3.3436, between the two MXFP4 curves.
+**Main comparison (GBS=16).** Table 3 tracks four training curves through 16,128 steps. The BF16 baseline reaches a validation loss of 3.3283 at the final checkpoint. The default MXFP4 recipe (1d2d + RHT + SR) attains 3.3418, a gap of +0.0135 (+0.41% relative). Adding weight de-oscillation closes half of this gap: the final loss is 3.3350, only +0.0067 above BF16 (+0.20% relative)—a 50% reduction in the MXFP4–BF16 discrepancy relative to the recipe without de-oscillation. At the final checkpoint, MXFP4 + de-oscillation (3.3350) also outperforms NVFP4 + RHT + SR (3.3436).
 
-The benefit of de-oscillation emerges in the late-training regime. At step 13,056, MXFP4 with and without de-oscillation are nearly tied (3.3947 vs. 3.4006); by step 16,128, de-oscillation has pulled ahead by 0.018 loss points. This pattern is consistent with OsciReset's design: oscillation accumulates over long horizons and is most harmful once the loss enters a fine-grained convergence phase.
+The benefit of de-oscillation emerges in the late-training regime. At step 13,056, the default MXFP4 recipe is slightly ahead (3.3836 vs. 3.3947 with de-oscillation); by step 16,128, de-oscillation pulls ahead by 0.007 loss points (3.3350 vs. 3.3418). This pattern is consistent with OsciReset's design: oscillation accumulates over long horizons and is most harmful once the loss enters a fine-grained convergence phase.
 
 **Larger batch size (GBS=64).** Table 4 shows that FP4 training is more sensitive at higher throughput. At step 7,680, plain MXFP4 + RHT + SR lags BF16 by +0.072 (3.3468 vs. 3.2746)—roughly 3× the final gap observed at GBS=16. De-oscillation again recovers a substantial fraction of the deficit, reaching 3.2949 (+0.020 vs. BF16). NVFP4 at GBS=64 (3.3083) outperforms plain MXFP4 but remains behind MXFP4 + de-oscillation. These results suggest that both quantization format and stabilization schedule interact with batch-scale / learning-rate choices, and that de-oscillation is especially valuable when per-step noise is higher.
 
 **Ablation at GBS=64 (step 7,680).** Table 6 complements the GBS=16 sweep in Table 5. The shared RHT+SR control reaches loss 3.3468; $\Delta$ values are computed relative to this base. **DGE** is again severely harmful ($+0.28$). **Low-rank compensation** is rank-sensitive: $r{=}32$ is essentially neutral ($\Delta \approx 0$), while $r{=}128$ yields a clear improvement ($\Delta = -0.017$), reducing validation loss to 3.3294—the best result among the non–de-oscillation stabilizers at this batch scale. **De-oscillation** remains the strongest option ($\Delta = -0.052$; loss **3.2949**), outperforming $r{=}128$ low-rank compensation by 0.035 loss points without the associated per-step GEMM overhead.
 
-**Ablation at GBS=16 (step 16,128).** Table 5 isolates individual techniques atop the MXFP4 + RHT + SR base. All ablation rows are drawn from a single sweep in which the shared control (RHT + SR) reaches loss 3.3532; $\Delta$ values are computed relative to this control.
+**Ablation at GBS=16 (step 16,128).** Table 5 isolates individual techniques atop the MXFP4 + RHT + SR base. All ablation rows are drawn from a single sweep in which the shared control (RHT + SR) reaches loss 3.3418; $\Delta$ values are computed relative to this control.
 
-Several findings follow directly. **De-oscillation** delivers the largest single improvement ($-0.018$) and achieves the best absolute loss in the ablation. **DGE** and **dynamic clipping** are strongly detrimental ($+0.19$ and $+0.18$, respectively)—far worse than omitting the technique—while **static clipping** and **MBS** yield small improvements ($-0.007$ and $-0.011$) that do not justify their operator-level complexity. **Low-rank compensation** at $r{=}32$ is neutral ($\Delta \approx 0$); at GBS=64, $r{=}128$ is required for a measurable benefit (Table 6).
+Several findings follow directly. **De-oscillation** delivers the largest single improvement ($-0.007$) and achieves the best absolute loss in the ablation. **DGE** and **dynamic clipping** are strongly detrimental ($+0.20$ and $+0.19$, respectively)—far worse than omitting the technique—while **static clipping**, **MBS**, and **low-rank compensation** ($r{=}32$) are neutral to slightly harmful ($\Delta \approx 0$ to $+0.01$). At GBS=64, $r{=}128$ is required for a measurable benefit (Table 6).
 
 **Table 3.** Validation loss on MLPerf Small MoE (GPT-OSS-20B, C4 subset) with GBS=16.
 
 | Method | Validation loss @ step 13056 | Validation loss @ step 13824 | Validation loss @ step 15360 | Validation loss @ step 16128 |
 |--------|------------------------------|------------------------------|------------------------------|------------------------------|
-| BF16 baseline          | 3.3932 | 3.3681 | 3.3390 | 3.3283 |
+| BF16 baseline          | 3.3681 | 3.3741 | 3.3390 | 3.3283 |
 | NVFP4(1d2d) + RHT + SR | 3.4061 | 3.3918 | 3.3567 | 3.3436 |
-| MXFP4(1d2d) + RHT + SR | 3.4006 | 3.3858 | 3.3688 | 3.3532 |
+| MXFP4(1d2d) + RHT + SR | 3.3836 | 3.3900 | 3.3548 | 3.3418 |
 | MXFP4(1d2d) + RHT + SR + De-Oscillation | 3.3947 | 3.3710 | 3.3494 | 3.3350 |
 
 **Table 4.** Validation loss on MLPerf Small MoE (GPT-OSS-20B, C4 subset) with GBS=64.
@@ -297,25 +296,43 @@ Several findings follow directly. **De-oscillation** delivers the largest single
 
 | Technique | $\Delta$ loss vs. RHT+SR base | Validation loss |
 |-----------|------------------------------|-----------------|
-| RHT + SR (default base) | — | 3.3532 |
-| + DGE | +0.186 | 3.5389 |
-| + Static clipping | $-0.007$ | 3.3465 |
-| + Dynamic clipping | +0.175 | 3.5281 |
-| + MBS | $-0.011$ | 3.3419 |
-| + Low-rank compensation ($r{=}32$) | $\approx 0$ | 3.3527 |
-| + De-oscillation | **$-0.018$** | **3.3350** |
+| RHT + SR (default base) | — | 3.3418 |
+| + DGE | $+0.197$ | 3.5389 |
+| + Static clipping | $+0.005$ | 3.3465 |
+| + Dynamic clipping | $+0.186$ | 3.5281 |
+| + MBS | $\approx 0$ | 3.3419 |
+| + Low-rank compensation ($r{=}32$) | $+0.011$ | 3.3527 |
+| + De-oscillation | **$-0.007$** | **3.3350** |
 
 **Table 6.** Ablation of individual techniques (GBS=64, checkpoint 7,680 steps).
 
 | Technique | $\Delta$ loss vs. RHT+SR base | Validation loss |
 |-----------|------------------------------|-----------------|
 | RHT + SR (default base) | — | 3.3468 |
-| + DGE | +0.284 | 3.6305 |
+| + DGE | $+0.284$ | 3.6305 |
 | + Low-rank compensation ($r{=}32$) | $\approx 0$ | 3.3449 |
 | + Low-rank compensation ($r{=}128$) | $-0.017$ | 3.3294 |
 | + De-oscillation | **$-0.052$** | **3.2949** |
 
-**Summary.** The recommended ALTO recipe for GPT-OSS-20B MXFP4 training is **1d2d + RHT + SR + de-oscillation**. At GBS=16, this configuration approaches BF16 validation loss within 0.007 at 16k steps under fake-quantized MXFP4 execution. Techniques that improve synthetic operator SNR—MBS, static clipping—yield at best marginal validation-loss gains ($\Delta \leq 0.011$), while de-oscillation provides a substantially larger late-training benefit ($\Delta = -0.018$) with only modest additional optimizer-state memory. At GBS=64, **low-rank compensation at $r{=}128$** is a useful accuracy-oriented alternative ($\Delta = -0.017$), though de-oscillation remains preferable when compute efficiency is the priority ($\Delta = -0.052$).
+**Summary.** The recommended ALTO recipe for GPT-OSS-20B MXFP4 training is **1d2d + RHT + SR + de-oscillation**. At GBS=16, this configuration approaches BF16 validation loss within 0.007 at 16k steps under fake-quantized MXFP4 execution. Techniques that improve synthetic operator SNR—MBS, static clipping—do not translate to better convergence at this scale, while de-oscillation provides a modest but consistent late-training benefit ($\Delta = -0.007$) with only additional optimizer-state memory. At GBS=64, **low-rank compensation at $r{=}128$** is a useful accuracy-oriented alternative ($\Delta = -0.017$), though de-oscillation remains preferable when compute efficiency is the priority ($\Delta = -0.052$).
+
+### 5.3 Technique Evaluation and Recipe Selection
+
+This section consolidates end-to-end findings for the default stack (Sections 3.1–3.4) and the additional techniques (Section 4).
+
+**Stochastic rounding.** Despite lowering $\mathrm{d}\mathbf{X}$ SNR by approximately 0.8 dB (Section 5.1), SR remains in the default recipe: it removes systematic gradient-quantization bias, and the default MXFP4 stack without de-oscillation already reaches validation loss 3.3418 (+0.014 vs. BF16; Table 3).
+
+**Weight de-oscillation vs. low-rank compensation.** These stabilizers impose qualitatively different costs. Low-rank compensation adds per-step compute that scales with rank $r$ (Section 4.4). De-oscillation adds mainly optimizer-state memory ($d_w$, $d_Q$, and a weight snapshot) with periodic in-place snaps and no extra forward-pass GEMMs. On AMD MI300/MI355, GPT-OSS-20B training leaves sufficient memory headroom for the auxiliary de-oscillation state without reducing batch size or sequence length.
+
+At GBS=16, de-oscillation delivers the largest ablation improvement ($\Delta = -0.007$; Table 5). Low-rank compensation at $r{=}32$ is slightly harmful ($\Delta = +0.011$). At GBS=64, $r{=}128$ yields a meaningful gain ($\Delta = -0.017$; Table 6)—recovering roughly one quarter of the FP4–BF16 gap—but still trails de-oscillation ($\Delta = -0.052$). We therefore adopt **de-oscillation** as the default late-training stabilizer; $r{=}128$ low-rank compensation remains an option when accuracy is paramount and per-step compute is tolerable.
+
+**Differential gradient estimation.** Operator-level tests show marginal SNR improvement on $\mathrm{d}\mathbf{W}$, but validation loss degrades severely ($\Delta = +0.20$; Table 5), confirming that the modified DGE formula (Section 4.1) does not help at GPT-OSS-20B scale.
+
+**Outlier clipping.** Both modes degrade operator-level SNR (Section 5.1). Static clipping is neutral on validation loss ($\Delta \approx +0.005$), while dynamic clipping causes a large regression ($\Delta = +0.19$; Table 5).
+
+**Macro-block scaling.** MBS yields the largest operator-level SNR gains (Section 5.1) but is neutral on validation loss ($\Delta \approx 0$; Table 5), illustrating that operator SNR on synthetic tensors is an incomplete proxy for training dynamics.
+
+**Operator–end-to-end gap.** A recurring pattern emerges: techniques that raise synthetic operator SNR (MBS, static clipping) do not improve—or only marginally affect—validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful. De-oscillation provides the most reliable late-training benefit among the stabilizers evaluated, with low-rank compensation at $r{=}128$ as a compute-heavy alternative at GBS=64.
 
 ---
 
@@ -335,9 +352,9 @@ We state the principal limitations of the present work explicitly.
 
 ## 7. Conclusion
 
-We have described an ALTO-based recipe for training GPT-OSS-20B under MXFP4 on the MLPerf Small MoE benchmark. **2D block quantization, RHT, and SR** are adopted from [2509.25149] and form a strong baseline; at GBS=16 and 16,128 steps, this stack reaches validation loss 3.3532 versus 3.3283 for BF16 (+0.025). **Weight de-oscillation**, adapted from OsciReset in TetraJet-v2 [2510.27527], closes the majority of the remaining gap—final loss **3.3350** (+0.007 vs. BF16)—with only modest additional optimizer-state memory and no extra forward-pass GEMMs.
+We have described an ALTO-based recipe for training GPT-OSS-20B under MXFP4 on the MLPerf Small MoE benchmark. **2D block quantization, RHT, and SR** are adopted from [2509.25149] and form a strong baseline; at GBS=16 and 16,128 steps, this stack reaches validation loss 3.3418 versus 3.3283 for BF16 (+0.014). **Weight de-oscillation**, adapted from OsciReset in TetraJet-v2 [2510.27527], closes half of the remaining gap—final loss **3.3350** (+0.007 vs. BF16)—with only modest additional optimizer-state memory and no extra forward-pass GEMMs.
 
-Our ablations reinforce a clear pattern: techniques that raise synthetic operator SNR (MBS, static clipping) yield at best marginal validation-loss gains, while **DGE** and **dynamic clipping** are actively harmful at scale. **Low-rank compensation** is rank-sensitive: $r{=}32$ is neutral at GBS=16, but $r{=}128$ improves validation loss by 0.017 at GBS=64—a meaningful gain, though still behind **de-oscillation** ($\Delta = -0.052$) in both accuracy and compute efficiency. At GBS=64, the FP4 deficit widens but de-oscillation again recovers most of the loss gap, supporting its use as the default late-training stabilizer in the production recipe: **1d2d + RHT + SR + de-oscillation**.
+Our ablations reinforce a clear pattern: techniques that raise synthetic operator SNR (MBS, static clipping) do not improve validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful at scale. **Low-rank compensation** is rank-sensitive: $r{=}32$ is neutral to slightly harmful at GBS=16, but $r{=}128$ improves validation loss by 0.017 at GBS=64—a meaningful gain, though still behind **de-oscillation** ($\Delta = -0.052$) in both accuracy and compute efficiency. At GBS=64, the FP4 deficit widens but de-oscillation again recovers most of the loss gap, supporting its use as the default late-training stabilizer in the production recipe: **1d2d + RHT + SR + de-oscillation**.
 
 Future work will fuse quantization and transforms into a single kernel pipeline, enable FP4 dispatch in expert parallelism, and pursue audited MLPerf Training submission on native FP4 hardware.
 

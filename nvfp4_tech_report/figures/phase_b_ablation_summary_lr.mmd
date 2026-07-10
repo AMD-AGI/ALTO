@@ -1,0 +1,23 @@
+flowchart LR
+    P["<b>Problem</b><br/>NVFP4 cumulative grad_norm<br/>explodes 100x-2000x<br/>MXFP4 same SR does not"]
+
+    A["<b>B-ABL.1</b>  fwd vs bwd  (24 runs)<br/>━━━━━━━━━━━━━<br/><b>Backward = 100% the source</b>"]
+
+    B["<b>B-ABL.2</b>  bwd tensor bypass  (36 runs)<br/>━━━━━━━━━━━━━<br/><b>Root op = 2x _qdq(grad_output, SR)</b><br/>stride / non-contig hypothesis killed"]
+
+    C["<b>B-ABL.5</b>  op-internal bisect  (S1+S7+F.2)<br/>━━━━━━━━━━━━━<br/><b>Noise = SR randomness only</b><br/>NVFP4 single-op quieter than MXFP4 (paradox)"]
+
+    D["<b>PENDING</b><br/>━━━━━━━━━━━━━<br/><b>S3: block_size 16 -&gt; 32</b><br/>answers: does it explain<br/>'MXFP4 doesn't explode'?"]
+
+    P -->|switch to precision-ablation| A
+    A -->|bwd locked| B
+    B -->|op locked, H1 dead| C
+    C -.->|cross-layer propagation open| D
+
+    classDef problem fill:#cce5ff,stroke:#0056b3,color:#000,stroke-width:2px
+    classDef confirmed fill:#d4edda,stroke:#28a745,color:#000,stroke-width:2px
+    classDef pending fill:#fff3cd,stroke:#ffc107,stroke-width:2px,stroke-dasharray:5 5,color:#000
+
+    class P problem
+    class A,B,C confirmed
+    class D pending

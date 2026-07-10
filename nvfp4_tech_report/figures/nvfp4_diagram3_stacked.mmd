@@ -1,0 +1,13 @@
+flowchart LR
+    dYLp1["dY_{L+1}"]
+    dYLp1 --> N3["layer L+1 dgrad<br/>SR + GEMM, adds eps_{L+1}"]
+    N3 --> dYL["dX_{L+1} = dY_L<br/>variance sigma_{L+1}^2"]
+
+    dYL --> N2["layer L dgrad<br/>SR + GEMM, adds eps_L"]
+    N2 --> dYLm1["dX_L = dY_{L-1}<br/>sigma_L^2 ~ G_L * sigma_{L+1}^2 + eps_L^2"]
+
+    dYLm1 --> N1["layer L-1 dgrad<br/>SR + GEMM, adds eps_{L-1}"]
+    N1 --> dYLm2["dX_{L-1} = dY_{L-2}<br/>sigma_{L-1}^2 ~ G_{L-1} * sigma_L^2 + eps_{L-1}^2"]
+
+    Note["Recurrence (no Hadamard on dgrad):<br/>sigma_d^2 = G_d * sigma_{d+1}^2 + eps_d^2<br/>eps_d^2 ∝ ||grad_output||_inf^2 (Tseng Thm 3.2)"]
+    N2 -.-> Note

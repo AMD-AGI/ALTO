@@ -1,6 +1,6 @@
 # Training LLM with NVFP4: Two-Level Microscaling, Numerical Stability, and Evaluation on the MLPerf Small MoE Benchmark
 
-> **DRAFT v0.1 (2026-07-10).** Companion to the MXFP4 report (`tech_report/report.md`). All end-to-end results are on the same hardware generation (8×AMD MI300X) under the MLPerf-aligned 1.2M-step learning-rate schedule; multi-seed numbers are extracted from existing TensorBoard logs.
+> **DRAFT v0.1 (2026-07-10).** Companion to the MXFP4 report (`../MXFP4/report.md`). All end-to-end results are on the same hardware generation (8×AMD MI300X) under the MLPerf-aligned 1.2M-step learning-rate schedule; multi-seed numbers are extracted from existing TensorBoard logs.
 
 ---
 

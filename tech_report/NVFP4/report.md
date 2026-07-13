@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Training large language models in 4-bit floating point promises large memory and compute savings, but the choice of FP4 microscaling format materially affects accuracy. We present an open-source training recipe ([ALTO](https://github.com/AMD-AGI/ALTO)) for **GPT-OSS-20B**—a 20-billion-parameter mixture-of-experts (MoE) model—on the **MLPerf Small MoE** benchmark under the **NVFP4** microscaling format. NVFP4 encodes values as E2M1 with a **two-level scale**: a fine-grained E4M3 scale per 16-element block, normalized by a per-tensor FP32 outer scale. Relative to MXFP4 (32-element blocks with a power-of-two UE8M0 scale), the finer block size and the higher-resolution two-level scale reduce quantization error. Our recipe composes hybrid 1D/2D block quantization, randomized Hadamard transforms (RHT), and stochastic rounding (SR) from [arXiv:2509.25149] with an optional weight de-oscillation scheme from TetraJet-v2 [arXiv:2510.27527]. A central engineering contribution is diagnosing and fixing a **per-tensor-scale (PTS) quantization-spec bug** whose scale floor caused NVFP4 gradient norms to explode by 100–1000× on multi-layer MoE training; the fix restores BF16-level gradient stability. On C4 validation with global batch size 16, NVFP4 reaches a validation loss of **3.3459 ± 0.0024** (3 seeds) at the 16,128-step slice, within **0.0195** of the BF16 baseline (**3.3264 ± 0.0031**) and consistently below MXFP4 (**3.3548 ± 0.0016**) on every seed. We report operator-level SNR against BF16 under both a synthetic injected-outlier protocol and a real-activation protocol, and we characterize the already-merged AMD-FP4 (UE5M3 inner scale) variant. All experiments use fake-quantized NVFP4 kernels; because current AMD hardware has no native NVFP4 MatrixCore path, execution is quantize–dequantize (QDQ) emulation and wall-clock speed is not optimized.
+Training large language models in 4-bit floating point promises large memory and compute savings, but the choice of FP4 microscaling format materially affects accuracy. We present an open-source training recipe ([ALTO](https://github.com/AMD-AGI/ALTO)) for **GPT-OSS-20B**—a 20-billion-parameter mixture-of-experts (MoE) model—on the **MLPerf Small MoE** benchmark under the **NVFP4** microscaling format. NVFP4 encodes values as E2M1 with a **two-level scale**: a fine-grained E4M3 scale per 16-element block, normalized by a per-tensor FP32 outer scale. Relative to MXFP4 (32-element blocks with a power-of-two UE8M0 scale), the finer block size and the higher-resolution two-level scale reduce quantization error. Our recipe composes hybrid 1D/2D block quantization, randomized Hadamard transforms (RHT), and stochastic rounding (SR) from [arXiv:2509.25149] with an optional weight de-oscillation scheme from TetraJet-v2 [arXiv:2510.27527]. A central engineering contribution is diagnosing and fixing a **per-tensor-scale (PTS) quantization-spec bug** whose scale floor caused NVFP4 gradient norms to explode by 100–1000× on multi-layer MoE training; the fix restores BF16-level gradient stability. On C4 validation with global batch size 16, NVFP4 reaches a validation loss of **3.3459 ± 0.0024** (3 seeds) at the 16,128-step slice, within **0.0195** of the BF16 baseline (**3.3264 ± 0.0031**) and consistently below MXFP4 (**3.3548 ± 0.0016**) on every seed. We report operator-level SNR against BF16 under both a synthetic injected-outlier protocol and a real-activation protocol, and we characterize the already-merged AMD-FP4 (UE5M3 inner scale) variant. All experiments use fake-quantized NVFP4 kernels; because the current native FP4 GEMM path does not support NVFP4's continuous scales, execution is quantize–dequantize (QDQ) emulation and wall-clock speed is not optimized.
 
 ---
 
@@ -14,14 +14,14 @@ Training large language models in 4-bit floating point promises large memory and
 
 Low-precision training has progressed from FP16 and BF16 to FP8 and, recently, 4-bit floating-point formats. Two 4-bit microscaling families are now prominent: the Open Compute Project (OCP) **MXFP4** format (32-element blocks, power-of-two UE8M0 block scale) and NVIDIA's **NVFP4** format (16-element blocks, an E4M3 block scale normalized by a per-tensor FP32 outer scale). Both encode elements as E2M1 (one sign, two exponent, one mantissa bit; magnitudes in $\{0,0.5,1,1.5,2,3,4,6\}$). For sparse MoE models such as GPT-OSS-20B, where expert matrices dominate compute and memory, 4-bit training could unlock disproportionate efficiency gains.
 
-The two formats trade off differently. MXFP4's UE8M0 scale is a pure power of two: cheap, hardware-friendly on CDNA4 (a native scaled MatrixCore GEMM exists), but coarse. NVFP4's two-level scale carries mantissa bits (E4M3) and a continuous per-tensor normalizer, giving finer resolution and better outlier absorption—at the cost that current AMD MatrixCore FP4 instructions honor only a power-of-two (biased-exponent) scale operand, so NVFP4 cannot use the native GEMM and must run as software QDQ emulation.
+The two formats trade off differently. MXFP4's UE8M0 scale is a pure power of two: cheap and directly consumable by a native power-of-two-scaled FP4 GEMM, but coarse. NVFP4's two-level scale carries mantissa bits (E4M3) and a continuous per-tensor normalizer, giving finer resolution and better outlier absorption—at the cost that the current native FP4 GEMM path supports only power-of-two scales, so NVFP4 cannot use it and must run as software QDQ emulation.
 
 | Property | MXFP4 | NVFP4 |
 |---|---|---|
 | Inner block size | 32 | **16** (finer) |
 | Inner (block) scale | E8M0 power-of-two (uint8) | **E4M3** (max 448), stored in FP32 |
 | Outer scale | none | **per-tensor FP32** (two-level scaling) |
-| CDNA4 native MatrixCore GEMM | yes | **no** — software QDQ emulation |
+| Native FP4 GEMM support | yes | **no** — software QDQ emulation |
 | Dominant error | resolution | resolution + dynamic range |
 
 This report describes ALTO's methodology for NVFP4 training on the MLPerf Small MoE task. Hybrid 1D/2D block quantization, RHT, and SR are adopted from [arXiv:2509.25149]; weight de-oscillation is adapted from TetraJet-v2 [arXiv:2510.27527]. Our contributions are: (i) a composable NVFP4 training recipe for MX-style MoE models implemented in a unified kernel and modifier stack; (ii) the diagnosis and fix of a PTS scale-floor bug that otherwise makes multi-layer NVFP4 MoE training diverge (Section 3.5); and (iii) a systematic NVFP4-vs-MXFP4 comparison at the operator level (synthetic and real data) and end-to-end (multi-seed, MLPerf-aligned). ALTO also supports replacing the E4M3 inner scale with the wider-range UE5M3 grid—the already-merged **AMD-FP4** variant—which we report as a reference point (Section 4.1). We state explicitly where the implementation remains a research prototype rather than a performance-optimized production system.
@@ -90,7 +90,7 @@ $$
 
 where $6$ is the largest E2M1 magnitude and $\varepsilon_{\mathrm{E4M3}}$ is the smallest E4M3 normal. The outer scale is floored at $10^{-30}$ purely as a divide-by-zero guard (Section 3.5 explains why this floor, not the E4M3 floor, is the correct one).
 
-As illustrated in Figure 1, each linear layer has three underlying GEMMs: a forward GEMM producing $\mathbf{O}$, and backward GEMMs producing $\mathrm{d}\mathbf{X}$ and $\mathrm{d}\mathbf{W}$. Because current AMD MatrixCore FP4 instructions accept only power-of-two scale operands, NVFP4 cannot use them; ALTO performs **fake quantization**—operands are quantized to NVFP4 and immediately dequantized to BF16 before a standard high-precision GEMM (`BF16 → quant → FP4 → dequant → BF16 → GEMM`)—faithfully reproducing FP4 numerical error without realizing memory-bandwidth savings (Section 6).
+As illustrated in Figure 1, each linear layer has three underlying GEMMs: a forward GEMM producing $\mathbf{O}$, and backward GEMMs producing $\mathrm{d}\mathbf{X}$ and $\mathrm{d}\mathbf{W}$. Because the current native FP4 GEMM path accepts only power-of-two scales, NVFP4 cannot use it; ALTO performs **fake quantization**—operands are quantized to NVFP4 and immediately dequantized to BF16 before a standard high-precision GEMM (`BF16 → quant → FP4 → dequant → BF16 → GEMM`)—faithfully reproducing FP4 numerical error without realizing memory-bandwidth savings (Section 6).
 
 **Figure 1.** NVFP4 two-level-scale compute flow across the three GEMMs (forward + backward).
 
@@ -138,7 +138,7 @@ Master weights near a quantization bin boundary can oscillate—$Q(w)$ flips bet
 
 ### 4.1 AMD-FP4 (UE5M3 Inner Scale)
 
-ALTO's NVFP4 kernel supports swapping the E4M3 inner scale for **UE5M3** (unsigned E5M3, max normal 114688, ~256× wider dynamic range), selected by `scheme: "amdfp4"`; every other recipe field is identical and the two schemes share 100% of the kernel and autograd code. The wider inner-scale range directly mitigates NVFP4's dynamic-range pressure in the *plain* (no-outer-scale) operator regime; once the two-level outer scale is enabled (the production default), AMD-FP4 and NVFP4 converge in operator SNR and end-to-end loss (AMD-FP4 is marginally ahead; Sections 5.1–5.2). We report AMD-FP4 as a merged variant and reference point, not as a separate main line.
+AMD-FP4 is a peer FP4 recipe (merged into ALTO's `main`) that reuses NVFP4's block-quant and GEMM kernels but replaces the E4M3 inner-block scale with **UE5M3** (unsigned E5M3, max normal 114688, ~256× wider dynamic range). It is selected by `scheme: "amdfp4"`; the scheme alone determines the inner-scale grid (NVFP4 → E4M3, AMD-FP4 → UE5M3), and every other recipe field is identical. The wider inner-scale range directly mitigates NVFP4's dynamic-range pressure in the *plain* (no-outer-scale) operator regime; once the two-level outer scale is enabled (the production default), AMD-FP4 and NVFP4 converge in operator SNR and end-to-end loss (AMD-FP4 is marginally ahead; Sections 5.1–5.2). We report AMD-FP4 as a merged variant and reference point, not as a separate main line.
 
 ### 4.2 Exploratory Directions (Not Released)
 
@@ -218,9 +218,9 @@ At the 16k-step slice the learning rate has not decayed, so none of the formats 
 
 ### 5.3 Weight De-Oscillation Effect
 
-Figure 4 shows the end-to-end effect of the de-oscillation hook at MLPerf caliber, demonstrated on the AMD-FP4 variant (on vs off). De-oscillation acts as a late-training stabilizer consistent with its design; a native-NVFP4 end-to-end on/off remains to be run (Section 6). The exploratory directions of Section 4.2 (outer-block, 4/6) are essentially neutral on validation loss at this scale.
+Figure 4 shows the end-to-end effect of the de-oscillation hook at MLPerf caliber, demonstrated on the AMD-FP4 variant (on vs off, with BF16 for reference). De-oscillation (`deosc_step`/`deosc_period`/`deosc_ratio` = 2000/200/4.0) is a strong late-training stabilizer: it lowers the AMD-FP4 endpoint from 3.3442 to **3.3241** at 16,128 steps, shrinking the gap to the BF16 baseline (3.3228) from +0.0214 to **+0.0013**—essentially matching full precision. A native-NVFP4 on/off pair at this exact caliber remains to be run (Section 6). The exploratory directions of Section 4.2 (outer-block, 4/6) are essentially neutral on validation loss at this scale.
 
-**Figure 4.** De-oscillation on vs off (AMD-FP4 variant, MLPerf caliber, last five eval points).
+**Figure 4.** De-oscillation on the AMD-FP4 variant (on vs off, BF16 reference); MLPerf-1.2M caliber, last five eval points.
 
 <p align="center">
   <img src="./figures/amdfp4_deosc_vs_base_val_loss_final_last5.png" alt="De-oscillation on vs off, last 5 eval points" style="width:50%;height:auto;" />
@@ -243,7 +243,7 @@ NVFP4 runs at roughly 1/1.8 of BF16 throughput and ~20% below MXFP4, because the
 
 ## 6. Limitations
 
-**Fake-quantized execution with no native NVFP4 GEMM.** Because CDNA4 FP4 MatrixCore instructions honor only a power-of-two scale operand, NVFP4 cannot use them and runs entirely as QDQ emulation with BF16 GEMMs—a stricter constraint than MXFP4, which does have a native path. All accuracy results characterize the algorithmic robustness of the format, not the behavior or speed of a fused FP4 hardware stack.
+**Fake-quantized execution with no native NVFP4 GEMM.** The current native FP4 GEMM path supports only power-of-two scales, so NVFP4—whose scales are continuous—cannot use it and runs entirely as QDQ emulation with BF16 GEMMs, a stricter constraint than MXFP4, which does have a native path. All accuracy results characterize the algorithmic robustness of the format, not the behavior or speed of a fused FP4 hardware stack.
 
 **16k-step slice, limited seeds.** Results are the first 16,128 steps of the 1.2M-step schedule; the learning rate has not decayed, so absolute losses are not converged values and the 3.34 MLPerf target is not expected to be reached at this slice. Multi-seed coverage is three seeds for BF16/NVFP4/MXFP4 and two for AMD-FP4.
 
@@ -253,7 +253,7 @@ NVFP4 runs at roughly 1/1.8 of BF16 throughput and ~20% below MXFP4, because the
 
 ## 7. Conclusion
 
-We described an ALTO recipe for training GPT-OSS-20B under NVFP4 on the MLPerf Small MoE benchmark. NVFP4's two-level microscaling—an E4M3 scale per 16-element block, normalized by a per-tensor FP32 outer scale—combined with hybrid 1D/2D blocking, RHT, and SR, trains stably once the PTS scale-floor spec bug is fixed, and converges closer to BF16 than MXFP4: at the 16,128-step MLPerf-aligned slice, NVFP4 reaches 3.3459 ± 0.0024 versus 3.3264 ± 0.0031 for BF16 (+0.0195) and beats MXFP4 (3.3548 ± 0.0016) on every seed. Operator-level SNR, on both synthetic injected-outlier and real-activation data, attributes NVFP4's advantage to its finer block and higher-resolution two-level scale, most decisively on weight gradients. The already-merged AMD-FP4 (UE5M3) variant matches NVFP4 once the outer scale is present. Future work will fuse quantization and transforms into a single kernel pipeline, enable FP4 dispatch under expert parallelism, target native FP4 hardware, and pursue an audited MLPerf Training submission.
+We described an ALTO recipe for training GPT-OSS-20B under NVFP4 on the MLPerf Small MoE benchmark. NVFP4's two-level microscaling—an E4M3 scale per 16-element block, normalized by a per-tensor FP32 outer scale—combined with hybrid 1D/2D blocking, RHT, and SR, trains stably once the PTS scale-floor spec bug is fixed, and converges closer to BF16 than MXFP4: at the 16,128-step MLPerf-aligned slice, NVFP4 reaches 3.3459 ± 0.0024 versus 3.3264 ± 0.0031 for BF16 (+0.0195) and beats MXFP4 (3.3548 ± 0.0016) on every seed. Operator-level SNR, on both synthetic injected-outlier and real-activation data, attributes NVFP4's advantage to its finer block and higher-resolution two-level scale, most decisively on weight gradients. The already-merged AMD-FP4 (UE5M3) variant matches NVFP4 once the outer scale is present.
 
 ---
 
@@ -269,9 +269,7 @@ We described an ALTO recipe for training GPT-OSS-20B under NVFP4 on the MLPerf S
 
 [5] MLCommons. [GPT-OSS-20B Pretraining Benchmark](https://github.com/mlcommons/training/tree/master/small_llm_moe_pretraining/primus).
 
-[6] AMD. "UE5M3 / E4M3 scale format" (GFXIPARCH-2067 §19.10), internal hardware specification.
-
-[7] "Four Over Six: adaptive block scaling for FP4." *arXiv preprint [arXiv:2512.02010](https://arxiv.org/abs/2512.02010)*, 2025.
+[6] "Four Over Six: adaptive block scaling for FP4." *arXiv preprint [arXiv:2512.02010](https://arxiv.org/abs/2512.02010)*, 2025.
 
 ---
 

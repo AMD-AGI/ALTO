@@ -101,7 +101,7 @@ def swap_params(
                     continue
                 module_prefix = f"{module_name}." if module_name else ""
                 full_param_name = f"{module_prefix}{cur_fqn}{'.' if cur_fqn else ''}{param_name}"
-                if target_parameter_name is None and param_name.endswith("bias"):
+                if target_parameter_name is None and "bias" in param_name:
                     logger.debug(f"Skipped {full_param_name} because it is a bias parameter")
                     continue
                 if not isinstance(param.data, TrainingWeightWrapperBaseTensor):

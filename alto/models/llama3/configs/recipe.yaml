@@ -4,11 +4,11 @@
 #       sparsity: 0.5
 #       mask_structure: "2:4"
 #       targets: ["Linear"]
-#       ignore: ["output"]
+#       ignore: ["lm_head"]
 quantization_stage:
   quantization_modifiers:
     QuantizationModifier:
-      ignore: ["output"]
+      ignore: ["lm_head"]
       config_groups:
         group_0:
           weights:

@@ -12,4 +12,4 @@ sparsification_stage:
       alps_update_iter: 16
       alps_switch_iter: 16
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["lm_head"]

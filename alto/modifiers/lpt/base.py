@@ -2,24 +2,26 @@
 #
 # SPDX-License-Identifier: MIT
 
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
 from pydantic import PrivateAttr, Field, field_validator, model_validator
-from torchtitan.models.common.attention import BaseAttention
-from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
+from torchtitan.models.common.attention import BaseAttention, ScaledDotProductAttention
 from torchtitan.tools.logging import logger
 
 from alto.modifiers import Modifier
 from alto.kernels.dispatch import (
     swap_params,
     TrainingOpConfig,
-    LPScaledDotProductAttentionWrapper,
+    LPScaledDotProductAttention,
 )
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 from alto.nn import DecomposedLinear
 from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.model import BaseModel
 
 __all__ = ["LowPrecisionTrainingModifier"]
 
@@ -70,8 +72,6 @@ class LowPrecisionTrainingModifier(Modifier):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
-        set_token_group_alignment_size_m(ALIGN_SIZE_M)
 
     @field_validator("targets", mode="before")
     def validate_targets(cls, value: str | list[str]) -> list[str]:
@@ -166,8 +166,8 @@ class LowPrecisionTrainingModifier(Modifier):
         for scheme_obj, targets in self.resolved_config.items():
             for name, module in match_named_modules(model, targets, self.ignore):
                 if isinstance(module, BaseAttention):
-                    assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
-                    module.inner_attention = LPScaledDotProductAttentionWrapper(config=scheme_obj)
+                    assert isinstance(module.inner_attention, ScaledDotProductAttention), "Only SDPA attention is supported for now."
+                    module.inner_attention = LPScaledDotProductAttention(config=scheme_obj)
                 elif isinstance(module, torch.nn.Linear):
                     if self.lora_rank > 0:
                         module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)
@@ -183,6 +183,16 @@ class LowPrecisionTrainingModifier(Modifier):
                     raise ValueError(f"Unsupported module type: {type(module)}")
 
         logger.info(f"LowPrecisionTrainingModifier converted model: {model}")
+        return True
+    
+    def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
+        # convert configs to enable token alignment
+        from torchtitan.models.common.moe import GroupedExperts
+        from torchtitan.components.quantization.utils import swap_token_dispatcher
+
+        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
+            swap_token_dispatcher(config, ALIGN_SIZE_M)
+            raise NotImplementedError(f"GroupedExperts {_fqn}: {config}")
         return True
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:

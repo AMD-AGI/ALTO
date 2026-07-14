@@ -11,7 +11,7 @@
 # Subclasses override _process_block() for algorithm-specific per-block logic.
 
 import gc
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union, TYPE_CHECKING
 
 import torch
 import tqdm
@@ -28,6 +28,9 @@ from alto.modifiers import Modifier
 from alto.modifiers.quantization.mixin import QuantizationMixin
 from alto.modifiers.quantization.calibration import update_weight_zp_scale
 from alto.utils.pytorch.module import get_layers
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.model import BaseModel
 
 __all__ = ["QuantizationModifier"]
 
@@ -110,6 +113,9 @@ class QuantizationModifier(Modifier, QuantizationMixin):
         return True
 
     def on_convert(self, model: Module, **kwargs) -> bool:
+        return True
+
+    def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         return True
 
     # ---- sequential loop (template) -----------------------------------

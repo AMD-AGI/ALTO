@@ -11,4 +11,4 @@ sparsification_stage:
       admm_pruning_granularity: 32
       admm_iterations: 32
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["lm_head"]

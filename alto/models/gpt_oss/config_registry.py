@@ -22,12 +22,12 @@ __all__ = [
 
 def gpt_oss_debugmodel() -> Trainer.Config:
     config = gpt_oss_debugmodel_orig()
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 10
     config.training.local_batch_size = 4
     config.training.global_batch_size = 16
     config.training.seq_len = 2048
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 
@@ -44,7 +44,7 @@ def gpt_oss_20b() -> Trainer.Config:
     config = gpt_oss_20b_orig()
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
     config.dump_folder = "gpt_oss_20b-outputs"
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.seq_len = 8192
@@ -63,7 +63,7 @@ def gpt_oss_20b() -> Trainer.Config:
     config.validator.dataloader.dataset = "wikitext_test"
     config.validator.freq = 10
     config.validator.steps = 10
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 
@@ -72,7 +72,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config = gpt_oss_20b_orig()
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
     config.dump_folder = "gpt_oss_20b-pretrain-subset-lr4e-4-outputs"
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 1200000
     config.training.local_batch_size = 1
     config.training.global_batch_size = 16
@@ -101,7 +101,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
     config.validator.freq = 768
     config.validator.steps = 64
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 

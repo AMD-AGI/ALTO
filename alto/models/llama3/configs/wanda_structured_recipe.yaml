@@ -7,4 +7,4 @@ pruning_stage:
       sparsity: 0.25
       pruning_dimension: "mlp"
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["lm_head"]

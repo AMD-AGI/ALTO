@@ -54,12 +54,12 @@ __all__ = [
 
 def llama3_debugmodel() -> Trainer.Config:
     config = llama3_debugmodel_orig()
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 4
     config.training.global_batch_size = 16
     config.training.seq_len = 2048
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 
@@ -85,13 +85,13 @@ def llama3_1b() -> Trainer.Config:
     config = llama3_1b_orig()
     config.hf_assets_path = "/group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B"
     config.metrics.log_freq = 1
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.global_batch_size = 10
     config.training.seq_len = 8192
     config.dataloader.dataset = "c4_test"
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = True
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B"
@@ -128,7 +128,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.dump_folder = "llama3_8b-mi308-pretrain-subset-gbs384-lr1e-4-outputs"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 5000
     config.training.local_batch_size = 2
     config.training.global_batch_size = 384
@@ -143,7 +143,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 1
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = False
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
@@ -221,13 +221,13 @@ def llama3_8b() -> Trainer.Config:
     config = llama3_8b_orig()
     config.hf_assets_path = LLAMA3_8B_PATH
     config.metrics.log_freq = 1
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.global_batch_size = 8
     config.training.seq_len = 2048
     config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4_test")
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = True
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = LLAMA3_8B_PATH
@@ -385,13 +385,13 @@ def instella_3b() -> Trainer.Config:
     config = instella_3b_orig()
     config.hf_assets_path = "/group/ossmodelzoo/hanwang2/huggingface/hub/models--amd--Instella-3B-Stage1/snapshots/cb33253ab0a5b9f2ea0b98f3edd818d46454580e"
     config.metrics.log_freq = 1
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.global_batch_size = 10
     config.training.seq_len = 4096
     config.dataloader.dataset = "c4_test"
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = True
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/group/ossmodelzoo/hanwang2/huggingface/hub/models--amd--Instella-3B-Stage1/snapshots/cb33253ab0a5b9f2ea0b98f3edd818d46454580e"

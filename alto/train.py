@@ -148,9 +148,10 @@ class Trainer(ForgeTrainer):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, _, extra_inputs, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
         if parallel_dims.pp_enabled:
+            loss_kwargs = {"global_valid_tokens": global_valid_tokens}
             targets, losses = None, None
             result = None
             with self.train_context():
@@ -158,16 +159,18 @@ class Trainer(ForgeTrainer):
                     if self.pp_has_first_stage:
                         self.pp_schedule.eval(
                             inputs,
-                            **extra_inputs,
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
+                            loss_kwargs=loss_kwargs,
+                            return_outputs=False,
                         )
                     elif self.pp_has_last_stage:
                         result = self.pp_schedule.eval(
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
+                            loss_kwargs=loss_kwargs,
                             return_outputs=True,
                         )
                     else:
@@ -175,13 +178,15 @@ class Trainer(ForgeTrainer):
                             **extra_kwargs,
                             target=targets,
                             losses=losses,
+                            loss_kwargs=loss_kwargs,
+                            return_outputs=False,
                         )
         else:
             # Non-PP forward / backward
             with self.train_context():
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    result = model_parts[0](inputs, **extra_kwargs)
 
         return result
 

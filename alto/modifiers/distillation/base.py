@@ -4,7 +4,7 @@
 
 from abc import abstractmethod
 from functools import partial
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 import gc
 
 import torch
@@ -23,6 +23,8 @@ from alto.modifiers.quantization.calibration import calibrate_activations
 from alto.utils.pytorch.module import (
     get_layers,)
 from alto.modifiers.distillation.utils import losses
+if TYPE_CHECKING:
+    from torchtitan.protocols.model import BaseModel
 
 TEACHER_OBSERVER_BASE_NAME = "output"
 STUDENT_OBSERVER_BASE_NAME = "student_output"
@@ -283,4 +285,7 @@ class SelfDistillationModifier(Modifier):
         self._optimizers = config.build(model_parts=model_parts,)
 
     def on_convert(self, model: Module, **kwargs) -> bool:
+        return True
+    
+    def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         return True

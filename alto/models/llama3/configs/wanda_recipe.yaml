@@ -7,4 +7,4 @@ sparsification_stage:
       sparsity: 0.5
       mask_structure: "0:0"
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["lm_head"]

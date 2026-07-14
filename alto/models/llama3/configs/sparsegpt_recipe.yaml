@@ -9,4 +9,4 @@ sparsification_stage:
       block_size: 128
       dampening_frac: 0.01
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["lm_head"]

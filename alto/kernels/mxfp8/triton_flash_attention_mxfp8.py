@@ -34,8 +34,6 @@ from .mxfp8_quantization import (
     is_cdna4,
     _calculate_scales,
     _quantize_fp8,
-    FORMAT_TO_TARGET_MAX,
-    FORMAT_TO_MBITS,
 )
 
 fwd_torch_dtype: tl.constexpr = torch.bfloat16
@@ -45,9 +43,9 @@ philox_seed: tl.constexpr = 0x1BF52
 philox_offset: tl.constexpr = 0x1D4B42
 
 # e4m3 quantization constants (see mxfp8_quantization.FORMAT_TO_*).
-E4M3_TARGET_MAX_POW2: tl.constexpr = FORMAT_TO_TARGET_MAX["e4m3"]
-E4M3_MBITS: tl.constexpr = FORMAT_TO_MBITS["e4m3"]
-E4M3_FORMAT_ID: tl.constexpr = 0
+E4M3_TARGET_MAX_POW2 = tl.constexpr(8)
+E4M3_MBITS = tl.constexpr(3)
+E4M3_FORMAT_ID = tl.constexpr(0)
 
 AUTOTUNE = os.environ.get('FLASH_ATTENTION_TRITON_AMD_AUTOTUNE', '0').lower() in ('1', 'true', 'yes')
 DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1', 'true', 'yes')
@@ -129,7 +127,7 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
 # Convenience function to load with optional boundary checks.
 # "First" is the major dim, "second" is the minor dim.
 @triton.jit
-def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second, other=0):
+def load_fn(ptrs, offset_first, offset_second, boundary_first, boundary_second, other=0.0):
     if offset_first is not None and offset_second is not None:
         mask = (offset_first[:, None] < boundary_first) & \
                (offset_second[None, :] < boundary_second)
@@ -624,7 +622,7 @@ def attn_fwd(
         q_ptrs_mask = q_ptrs_mask & (offs_d_qk[None, :] < ACTUAL_BLOCK_DMODEL_QK)
         qs_ptrs_mask = qs_ptrs_mask & (offs_d_qk_scale[None, :] < SCALE_ACTUAL_BLOCK_DMODEL_QK)
 
-    q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0)
+    q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
     qs = tl.load(qs_ptrs, mask=qs_ptrs_mask, other=1)
 
     # Here we compute how many full and masked blocks we have.

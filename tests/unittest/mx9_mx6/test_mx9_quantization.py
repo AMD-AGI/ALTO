@@ -362,8 +362,9 @@ def test_non_contiguous_input(dtype):
     """Non-contiguous memory input (transposed stride) produces the same result
     as the equivalent contiguous tensor.
 
-    Host-side data_hp.contiguous() handles the re-layout; the kernel always
-    receives contiguous memory. This test verifies that path is not skipped.
+    The kernel gathers the high-precision input by stride (no host-side
+    .contiguous() copy), so non-contiguous layouts are consumed directly. This
+    test verifies that path is correct.
     """
     x = _rand((64, 32), dtype).cuda()
     x_t = x.T                                  # shape (32, 64), non-contiguous

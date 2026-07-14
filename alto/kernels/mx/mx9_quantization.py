@@ -28,7 +28,9 @@ clamp-127 variant (see tests):
 
 Constraints:
   - Blocks are formed along the last dimension only (host transposes the quant
-    axis to dim -1 then calls .contiguous()).
+    axis to dim -1). The tensor is passed to the kernel **by stride** (no forced
+    ``.contiguous()`` copy); the kernel addresses elements via row/column strides
+    and masks the ragged tail block instead of host-side ``F.pad``.
   - ``block_size`` is fixed at 16: each block has 8 pairs which pack into
     exactly 1 byte of prime bitmap.
 
@@ -61,7 +63,6 @@ Known limitations:
 """
 
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -274,8 +275,8 @@ def _unpack_mx9(
 
 # ============================================================================
 # Grid kernel (entry point): 1D grid, each program handles BLOCKS_PER_PROG
-# complete 16-element blocks. Inputs/outputs are addressed as flattened
-# [n_blocks, BLOCK_SIZE] views; the three-part tuple layout:
+# 16-element blocks. The high-precision side is addressed by stride (no forced
+# copy); the packed three-part tuple layout:
 #   q       : [n_blocks, BLOCK_SIZE]      (per-element, int8, clamp +/-127)
 #   max_exp : [n_blocks]                  (per-block, uint8 E8M0, true exp + 127)
 #   prime   : [n_blocks, N_PRIME_BYTES]   (per-block, N_PRIME_BYTES bytes, uint8 bitmap)
@@ -289,26 +290,49 @@ def _convert_to_mx9_kernel(
     e_ptr,
     p_ptr,
     n_blocks,
+    last,
+    blocks_per_row,
+    stride_row,
+    stride_col,
     BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_PROG: tl.constexpr,
     PRIME_GROUP: tl.constexpr,
     QUANT_BIT: tl.constexpr,
 ):
+    """Input ``x`` is addressed **by stride** as a 2D ``[rows, last]`` tensor
+    (``last`` = unpadded quant-axis length), so the host does not force a
+    ``.contiguous()`` copy. Each of the ``BLOCKS_PER_PROG`` blocks maps back to
+    ``(row, block-within-row)``; columns beyond ``last`` (the ragged tail block)
+    are masked to 0, replacing host-side ``F.pad``.
+
+    Outputs (q / max_exp / prime) are freshly allocated and contiguous, so they
+    are addressed with the classic flat ``[n_blocks, ...]`` offsets.
+    """
     N_PRIME_BYTES: tl.constexpr = (BLOCK_SIZE // PRIME_GROUP) // 8
 
     pid = tl.program_id(0)
-    blk = pid * BLOCKS_PER_PROG + tl.arange(0, BLOCKS_PER_PROG)   # block indices for this program [BPP]
-    col = tl.arange(0, BLOCK_SIZE)
-    offs = blk[:, None] * BLOCK_SIZE + col[None, :]              # input/output q offsets [BPP, BLOCK]
-    mask = blk[:, None] < n_blocks                              # tail block-level mask
+    blk = pid * BLOCKS_PER_PROG + tl.arange(0, BLOCKS_PER_PROG)   # global block indices [BPP]
     blk_mask = blk < n_blocks
+
+    # Map each block back to its source (row, block-within-row) coordinate.
+    row = blk // blocks_per_row                                  # [BPP]
+    brow = blk % blocks_per_row                                  # [BPP]
+    col = tl.arange(0, BLOCK_SIZE)                               # [BLOCK]
+    col_g = brow[:, None] * BLOCK_SIZE + col[None, :]           # column in the (unpadded) row [BPP, BLOCK]
+
+    # Strided gather: address = row*stride_row + col*stride_col. Columns past the
+    # unpadded width (last) are the padding tail -> masked to 0 (same statistics
+    # as the previous F.pad-with-zeros behaviour).
+    in_range = col_g < last
+    load_mask = blk_mask[:, None] & in_range
+    in_offs = row[:, None] * stride_row + col_g * stride_col
 
     tl.static_assert(
         x_ptr.type.element_ty == tl.float32 or
         x_ptr.type.element_ty == tl.bfloat16,
         "x must be fp32 / bf16",
     )
-    x = tl.load(x_ptr + offs, mask=mask, other=0.0)            # native dtype tile
+    x = tl.load(x_ptr + in_offs, mask=load_mask, other=0.0)     # native dtype tile
 
     shared_exp, max_exp, pair = _calculate_mx9_exp(
         x, BLOCKS_PER_PROG, BLOCK_SIZE, PRIME_GROUP
@@ -318,7 +342,8 @@ def _convert_to_mx9_kernel(
         BLOCKS_PER_PROG, BLOCK_SIZE, PRIME_GROUP, QUANT_BIT,
     )
 
-    tl.store(q_ptr + offs, q_int, mask=mask)
+    out_offs = blk[:, None] * BLOCK_SIZE + col[None, :]         # contiguous q offsets [BPP, BLOCK]
+    tl.store(q_ptr + out_offs, q_int, mask=blk_mask[:, None])
     # max_exp is the true exponent ([BPP] int32); store as E8M0 uint8: +127 bias.
     e_store = (max_exp + 127).to(tl.uint8)
     tl.store(e_ptr + blk, e_store, mask=blk_mask)
@@ -335,35 +360,45 @@ def _convert_from_mx9_kernel(
     p_ptr,
     y_ptr,
     n_blocks,
+    stride_q_blk,
+    stride_q_col,
+    stride_e,
+    stride_p_blk,
+    stride_p_col,
     BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_PROG: tl.constexpr,
     PRIME_GROUP: tl.constexpr,
     QUANT_BIT: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
 ):
+    """Packed inputs (q / max_exp / prime) are addressed **by stride** so the host
+    does not force a ``.contiguous()`` copy. The output ``y`` is freshly allocated
+    contiguous ``[n_blocks, BLOCK_SIZE]`` and uses classic flat offsets.
+    """
     N_PRIME_BYTES: tl.constexpr = (BLOCK_SIZE // PRIME_GROUP) // 8
 
     pid = tl.program_id(0)
     blk = pid * BLOCKS_PER_PROG + tl.arange(0, BLOCKS_PER_PROG)
     col = tl.arange(0, BLOCK_SIZE)
-    offs = blk[:, None] * BLOCK_SIZE + col[None, :]
-    mask = blk[:, None] < n_blocks
     blk_mask = blk < n_blocks
+    mask = blk_mask[:, None]
 
-    q = tl.load(q_ptr + offs, mask=mask, other=0)              # int8
+    q_offs = blk[:, None] * stride_q_blk + col[None, :] * stride_q_col
+    q = tl.load(q_ptr + q_offs, mask=mask, other=0)           # int8
     # max_exp is stored as E8M0 uint8 (with +127 bias); subtract back to true exponent.
-    max_exp_u = tl.load(e_ptr + blk, mask=blk_mask, other=0)   # [BPP] uint8
+    max_exp_u = tl.load(e_ptr + blk * stride_e, mask=blk_mask, other=0)   # [BPP] uint8
     max_exp = max_exp_u.to(tl.int32) - 127
 
     pcol = tl.arange(0, N_PRIME_BYTES)
-    offs_p = blk[:, None] * N_PRIME_BYTES + pcol[None, :]
-    prime = tl.load(p_ptr + offs_p, mask=blk_mask[:, None], other=0)          # [BPP, NB] uint8
+    offs_p = blk[:, None] * stride_p_blk + pcol[None, :] * stride_p_col
+    prime = tl.load(p_ptr + offs_p, mask=mask, other=0)       # [BPP, NB] uint8
 
     y = _unpack_mx9(
         q, max_exp[:, None], prime, OUT_DTYPE,
         BLOCKS_PER_PROG, BLOCK_SIZE, PRIME_GROUP, QUANT_BIT,
     )
-    tl.store(y_ptr + offs, y, mask=mask)
+    out_offs = blk[:, None] * BLOCK_SIZE + col[None, :]       # contiguous y offsets
+    tl.store(y_ptr + out_offs, y, mask=mask)
 
 
 # ============================================================================
@@ -394,24 +429,26 @@ def convert_to_mx9(
     assert block_size == 16, f"block_size only supports 16, got {block_size}"
 
     # Transpose quant axis to last dim, matching mxfp4 host processing.
+    # No forced .contiguous(): reshape returns a (possibly non-contiguous) view
+    # when possible, and the kernel gathers by stride. Padding of the ragged tail
+    # block is handled in-kernel via column masking instead of F.pad.
     data_hp = data_hp.transpose(axis, -1)
     last = data_hp.shape[-1]
-    x2d = data_hp.contiguous().reshape(-1, last)
-    pad = (block_size - last % block_size) % block_size
-    if pad:
-        x2d = F.pad(x2d, (0, pad))
-    rows, cols = x2d.shape
-    n_blocks = rows * (cols // block_size)
-    x_blocks = x2d.reshape(n_blocks, block_size).contiguous()
+    x2d = data_hp.reshape(-1, last)
+    rows = x2d.shape[0]
+    blocks_per_row = triton.cdiv(last, block_size)
+    n_blocks = rows * blocks_per_row
 
     n_prime_bytes = (block_size // 2) // 8
     q = torch.empty((n_blocks, block_size), dtype=torch.int8, device=data_hp.device)
     max_exp = torch.empty((n_blocks,), dtype=torch.uint8, device=data_hp.device)
     prime = torch.empty((n_blocks, n_prime_bytes), dtype=torch.uint8, device=data_hp.device)
 
+    stride_row, stride_col = x2d.stride()
     grid = (triton.cdiv(n_blocks, blocks_per_program),)
     _convert_to_mx9_kernel[grid](
-        x_blocks, q, max_exp, prime, n_blocks,
+        x2d, q, max_exp, prime, n_blocks, last, blocks_per_row,
+        stride_row, stride_col,
         BLOCK_SIZE=block_size,
         BLOCKS_PER_PROG=blocks_per_program,
         PRIME_GROUP=PRIME_GROUP,
@@ -456,9 +493,17 @@ def convert_from_mx9(
 
     y_blocks = torch.empty((n_blocks, block_size), dtype=out_dtype, device=q.device)
 
+    # No forced .contiguous(): pass the packed inputs by stride so already-laid-out
+    # (or non-contiguous view) tensors are consumed without an extra copy.
+    stride_q_blk, stride_q_col = q.stride()
+    stride_e = max_exp.stride(0)
+    stride_p_blk, stride_p_col = prime.stride()
     grid = (triton.cdiv(n_blocks, blocks_per_program),)
     _convert_from_mx9_kernel[grid](
-        q.contiguous(), max_exp.contiguous(), prime.contiguous(), y_blocks, n_blocks,
+        q, max_exp, prime, y_blocks, n_blocks,
+        stride_q_blk, stride_q_col,
+        stride_e,
+        stride_p_blk, stride_p_col,
         BLOCK_SIZE=block_size,
         BLOCKS_PER_PROG=blocks_per_program,
         PRIME_GROUP=PRIME_GROUP,
@@ -486,6 +531,9 @@ def convert_from_mx9(
         f"inferred rows*padded_cols={rows * padded_cols}, "
         f"but tuple has n_blocks*block_size={n_blocks * block_size}"
     )
+    # Aligned with mxfp4 (convert_from_mxfp4): return the transposed stride view
+    # without a forced .contiguous() copy. Only the ragged-tail slice reshape may
+    # trigger an internal copy; the common (no-pad / axis=-1) path stays a view.
     y2d = y_blocks.reshape(rows, padded_cols)
     y2d = y2d[:, :last]
-    return y2d.reshape(transposed_shape).transpose(axis, -1).contiguous()
+    return y2d.reshape(transposed_shape).transpose(axis, -1)

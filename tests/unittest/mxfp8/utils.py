@@ -174,3 +174,117 @@ def convert_from_mxfp8_pytorch(
         data_hp = data_hp.to(torch.bfloat16)
 
     return data_hp.transpose(axis, -1)
+
+
+def _mxfp8_qdq(x: torch.Tensor, axis: int, is_2d_block: bool, block_size: int = BLOCK_SIZE_DEFAULT) -> torch.Tensor:
+    """Round-trip a tensor through pure-PyTorch MXFP8 e4m3 quantize+dequantize.
+
+    Returns the value an mxfp8 kernel operand would actually see.
+    """
+    lp, s = convert_to_mxfp8_pytorch(x, block_size=block_size, mxfp_format="e4m3", axis=axis, is_2d_block=is_2d_block)
+    return convert_from_mxfp8_pytorch(lp, s, output_dtype=x.dtype, block_size=block_size, axis=axis,
+                                      is_2d_block=is_2d_block)
+
+
+def mxfp8_attention_forward_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sm_scale: float,
+    causal: bool,
+    block_n: int = 64,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pure-PyTorch golden reference for the MXFP8 (e4m3) flash-attention forward.
+
+    Faithfully replicates what ``triton_flash_attention_mxfp8.attn_fwd`` computes,
+    so a kernel-vs-this-reference gap isolates Triton port bugs (masking /
+    online-softmax / LSE) from mxfp8 quantization error itself:
+
+      * Q/K/V are quantized 2D-block along head_dim (``is_2d_block=True``,
+        ``axis=-1``), matching the autograd forward.
+      * The softmax probabilities ``P`` are quantized **per key block** exactly
+        like the kernel: within the online-softmax loop, using the *running* row
+        max (not the global max), 1D-block along the key axis with
+        ``block_size`` groups.
+      * Contains no ``tl.dot_scaled``: every matmul is a plain fp32 matmul on the
+        dequantized operands, so this runs on CPU / any device (no CDNA4).
+
+    Args:
+        q, k, v: ``[batch, nheads, seqlen, head_dim]`` (bhsd), fp32/bf16. GQA is
+            supported (``nheads_k`` may be < ``nheads_q``).
+        sm_scale: softmax scale applied to ``Q @ K^T``.
+        causal: bottom-right-aligned causal mask (matches ``F.sdpa(is_causal=True)``).
+        block_n: key-block width, must match the kernel ``BLOCK_N`` (default 64).
+        block_size: MXFP8 quant block, must match ``QUANT_BLOCK_SIZE`` (default 32).
+
+    Returns:
+        (o, softmax_lse): output ``[batch, nheads_q, seqlen_q, head_dim_v]`` and
+        log-sum-exp ``[batch, nheads_q, seqlen_q]``.
+    """
+    assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4
+    b, hq, sq, dqk = q.shape
+    _, hk, sk, _ = k.shape
+    dv = v.shape[-1]
+    assert hq % hk == 0, f"nheads_q ({hq}) must be a multiple of nheads_k ({hk})"
+    n_rep = hq // hk
+
+    # Quantize Q/K/V (2D block along head_dim) then dequantize -> operands the kernel sees.
+    q_dq = _mxfp8_qdq(q, axis=-1, is_2d_block=True).to(torch.float32)
+    k_dq = _mxfp8_qdq(k, axis=-1, is_2d_block=True).to(torch.float32)
+    v_dq = _mxfp8_qdq(v, axis=-1, is_2d_block=True).to(torch.float32)
+
+    # Expand K/V heads for GQA (head_q h -> head_k h // n_rep, matching off_h_k).
+    if n_rep > 1:
+        k_dq = k_dq.repeat_interleave(n_rep, dim=1)
+        v_dq = v_dq.repeat_interleave(n_rep, dim=1)
+
+    device = q.device
+    # Real -inf (not finfo.min): masked scores must dequantize to exp(-inf)=0.
+    # A finite sentinel would make a fully-masked block compute exp(0)=1.
+    neg_inf = float("-inf")
+
+    m_i = torch.full((b, hq, sq), float("-inf"), dtype=torch.float32, device=device)
+    l_i = torch.zeros((b, hq, sq), dtype=torch.float32, device=device)
+    acc = torch.zeros((b, hq, sq, dv), dtype=torch.float32, device=device)
+
+    q_pos = torch.arange(sq, device=device)
+    # Bottom-right causal alignment: query i attends key j iff j <= i + (sk - sq).
+    causal_shift = sk - sq
+
+    for j0 in range(0, sk, block_n):
+        j1 = min(j0 + block_n, sk)
+        k_blk = k_dq[:, :, j0:j1, :]  # [b, hq, bn, d]
+        v_blk = v_dq[:, :, j0:j1, :]
+
+        s = torch.matmul(q_dq, k_blk.transpose(-1, -2)) * sm_scale  # [b, hq, sq, bn]
+
+        if causal:
+            key_pos = torch.arange(j0, j1, device=device)
+            allowed = key_pos[None, :] <= (q_pos[:, None] + causal_shift)  # [sq, bn]
+            s = torch.where(allowed[None, None, :, :], s, torch.full_like(s, neg_inf))
+
+        m_ij = torch.maximum(m_i, s.max(dim=-1).values)  # [b, hq, sq]
+        p = torch.exp(s - m_ij[..., None])  # unnormalized, running max
+        # Rows fully masked in this block yield exp(neg_inf - (-inf)) issues; zero them.
+        p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
+        l_ij = p.sum(dim=-1)  # [b, hq, sq]
+
+        # Quantize P per key block exactly like the kernel (1D block along key axis).
+        p_dq = _mxfp8_qdq(p.to(torch.float32), axis=-1, is_2d_block=False, block_size=block_size)
+
+        alpha = torch.exp(m_i - m_ij)
+        alpha = torch.nan_to_num(alpha, nan=0.0, posinf=0.0, neginf=0.0)
+        acc = acc * alpha[..., None] + torch.matmul(p_dq, v_blk)
+        l_i = l_i * alpha + l_ij
+        m_i = m_ij
+
+    l_safe = torch.where(l_i > 0, l_i, torch.ones_like(l_i))
+    o = acc / l_safe[..., None]
+    softmax_lse = m_i + torch.log(l_safe)
+    # Fully-masked query rows (can happen with causal when sk < sq): zero output.
+    fully_masked = ~torch.isfinite(m_i) | (l_i <= 0)
+    o = torch.where(fully_masked[..., None], torch.zeros_like(o), o)
+    softmax_lse = torch.where(fully_masked, torch.zeros_like(softmax_lse), softmax_lse)
+
+    return o.to(q.dtype), softmax_lse

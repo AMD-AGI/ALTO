@@ -2,10 +2,10 @@
 #
 # SPDX-License-Identifier: MIT
 
-from typing import Literal, TYPE_CHECKING
+from typing import Literal, Iterable, TYPE_CHECKING
 import torch
 from torch.nn import Module
-from compressed_tensors.utils import match_named_modules
+from compressed_tensors.utils import match_named_modules, match_name
 from pydantic import PrivateAttr, Field, field_validator, model_validator
 from torchtitan.models.common.attention import BaseAttention, ScaledDotProductAttention
 from torchtitan.tools.logging import logger
@@ -184,22 +184,49 @@ class LowPrecisionTrainingModifier(Modifier):
 
         logger.info(f"LowPrecisionTrainingModifier converted model: {model}")
         return True
-    
+
     def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         # convert configs to enable token alignment
         from torchtitan.models.common.moe import GroupedExperts
         from torchtitan.components.quantization.utils import swap_token_dispatcher
+        from torchtitan.models.common.nn_modules import Linear
 
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(config, ALIGN_SIZE_M)
-            raise NotImplementedError(f"GroupedExperts {_fqn}: {config}")
+
+        def is_match(
+            name: str,
+            module_cls_name: str,
+            targets: str | Iterable[str],
+            ignore: str | Iterable[str] = tuple(),
+        ) -> bool:
+            targets = [targets] if isinstance(targets, str) else targets
+            ignore = [ignore] if isinstance(ignore, str) else ignore
+
+            return any(
+                match_name(name, target) or module_cls_name == target
+                for target in targets
+            ) and not any(
+                match_name(name, ign) or module_cls_name == ign for ign in ignore
+            )
+
+        # replace Linear with DecomposedLinear
+        if self.lora_rank > 0:
+            resolved_targets = list(self.resolved_config.values())
+            for _fqn, config, parent, attr in model_config.traverse(Linear.Config):
+                #raise ValueError(f"[{_fqn}] cfg={config},\nparent={parent},\nattr={attr}")
+                for target in resolved_targets:
+                    if is_match(_fqn, "Linear", target, self.ignore):
+                        new_config = DecomposedLinear.Config(
+                            in_features=config.in_features,
+                            out_features=config.out_features,
+                            bias=config.bias,
+                            param_init=config.param_init | DecomposedLinear._EXTRA_INIT,
+                        )
+                        setattr(parent, attr, new_config)
         return True
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
-        for model_part in model_parts:
-            for child in model_part.modules():
-                if isinstance(child, DecomposedLinear):
-                    child.init_lora_weights(init_std=0.02)
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:

@@ -214,7 +214,8 @@ def mxfp8_attention_forward_reference(
         q, k, v: ``[batch, nheads, seqlen, head_dim]`` (bhsd), fp32/bf16. GQA is
             supported (``nheads_k`` may be < ``nheads_q``).
         sm_scale: softmax scale applied to ``Q @ K^T``.
-        causal: bottom-right-aligned causal mask (matches ``F.sdpa(is_causal=True)``).
+        causal: top-left causal mask ``key_j <= query_i`` (matches
+            ``F.sdpa(is_causal=True)`` on bhsd tensors in PyTorch 2.x).
         block_n: key-block width, must match the kernel ``BLOCK_N`` (default 64).
         block_size: MXFP8 quant block, must match ``QUANT_BLOCK_SIZE`` (default 32).
 
@@ -249,8 +250,6 @@ def mxfp8_attention_forward_reference(
     acc = torch.zeros((b, hq, sq, dv), dtype=torch.float32, device=device)
 
     q_pos = torch.arange(sq, device=device)
-    # Bottom-right causal alignment: query i attends key j iff j <= i + (sk - sq).
-    causal_shift = sk - sq
 
     for j0 in range(0, sk, block_n):
         j1 = min(j0 + block_n, sk)
@@ -261,7 +260,7 @@ def mxfp8_attention_forward_reference(
 
         if causal:
             key_pos = torch.arange(j0, j1, device=device)
-            allowed = key_pos[None, :] <= (q_pos[:, None] + causal_shift)  # [sq, bn]
+            allowed = key_pos[None, :] <= q_pos[:, None]  # [sq, bn]
             s = torch.where(allowed[None, None, :, :], s, torch.full_like(s, neg_inf))
 
         m_ij = torch.maximum(m_i, s.max(dim=-1).values)  # [b, hq, sq]

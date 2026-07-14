@@ -21,6 +21,8 @@
 
 本 plan 撰写机为 gfx950（CDNA4/MI350），`is_cdna4()=True`。native `tl.dot_scaled` 路径可在本机验证；MI300/CDNA3 不在 V1 范围。
 
+**2026-07-14 补充（MI250 离线开发机）：** 当前开发/CI 环境为 gfx90a（MI250），`is_cdna4()=False`。Layer 2/3（kernel vs 黄金参照、kernel vs bf16 SDPA）在此硬件上跑不起来是预期行为，**不为 MI250 加 fallback 或 skip workaround**；待 CDNA4 硬件到位后一次性验证。Layer 1（纯 PyTorch 黄金参照 vs bf16 SDPA）可在任意设备离线跑。
+
 ---
 
 ## 0. 格式选择：V1 全 e4m3，e5m2 留给后续
@@ -291,18 +293,24 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 | Step 1–4（forward kernel + wrapper + autograd.forward） | ✅ 代码完成 / ⏳ 未验证 | 无 CDNA4,尚未跑通任何 kernel 测试 |
 | Step 5–8（backward：preprocess / dK-dV / dQ / autograd.backward） | ❌ 未开始 | 从零写,头号工作量,见 §9 |
 | Step 9（dispatch 接入 `mxfp8_e4m3`） | ❌ 未开始 | — |
-| Step 10（测试脚手架） | ✅ 三层脚手架就位 | 第 1 层可离线验,第 2/3 层待 CDNA4 |
+| Step 10（测试脚手架） | ✅ 三层脚手架就位 | 第 1 层已于 MI250 Docker 验证 6/6 通过；第 2/3 层待 CDNA4 |
 
 **已知偏差 / 修正记录：**
 
 - 写黄金参照时静态发现并修掉一处 masking bug：mask 值若用 `finfo.min`（有限）会让"整块被 mask 的行"算出 `exp(0)=1`（应为 0）；改用真 `-inf`（masked 项 `exp(-inf)=0`，全 mask 行的 nan 由 `nan_to_num` 兜住）。此 bug 正是"无黄金参照、只对 bf16"抓不到的类型。
+- **2026-07-14 — 黄金参照 causal mask 与 SDPA 不一致（非 CDNA4，Layer 1）**：`mxfp8_attention_forward_reference` 原用 bottom-right 对齐（`key_j <= query_i + (seqlen_k - seqlen_q)`），但 PyTorch `F.sdpa(is_causal=True)` 在 **bhsd** 布局下实际为 **top-left**（`key_j <= query_i`）。`seqlen_q == seqlen_k` 时两者等价；`seqlen_kv > seqlen_q` 且 `causal=True` 时差异显著（`test_reference_matches_bf16_sdpa[True-config2]` cosine-sim 仅 ~0.39）。**修复**：`tests/unittest/mxfp8/utils.py` 改为 top-left mask。**验证**：MI250（gfx90a）Docker 上 Layer 1 六项全过。
+- **2026-07-14 — Triton kernel 编译期两处真 bug（非 CDNA4 专属，CDNA4 上同样会触发）**：
+  1. **fp8 `tl.load` 的 `other` 类型**：`q = tl.load(q_ptrs, mask=..., other=0)` 中 `other=0`（int32）无法 cast 为 `fp8e4nv`，报 `cannot cast int32[...] to fp8e4nv`。**修复**：`triton_flash_attention_mxfp8.py` 中 Q load 及 `load_fn` 默认 `other` 改为 `0.0`。
+  2. **Triton constexpr 全局变量写法**：`E4M3_TARGET_MAX_POW2: tl.constexpr = FORMAT_TO_TARGET_MAX["e4m3"]` 等注解写法在 `@jit` 内不可见，报 `NameError: Cannot access global variable E4M3_TARGET_MAX_POW2`。**修复**：改为实例化写法 `E4M3_TARGET_MAX_POW2 = tl.constexpr(8)`、`E4M3_MBITS = tl.constexpr(3)`、`E4M3_FORMAT_ID = tl.constexpr(0)`。
+  - 上述修复待在 CDNA4 真机上跑 Layer 2 时一并验收；MI250 上 Layer 2 仍因 `tl.dot_scaled` 不可用而无法运行，**属预期，未做 workaround**。
 
 **Open items（阻塞真验证）：**
 
-- **CDNA4 硬件**：M350/M355 卡预计约一周后到；在此之前所有 kernel 测试（第 2/3 层）无法运行,forward 代码处于"已写未验"状态。
-- **第 1 层 CPU 自证**：需在有 torch 的环境跑一次 `test_reference_matches_bf16_sdpa`,确认黄金参照本身正确（它是 backward 验证的地基）。
-- **backward 全 e4m3 的数值风险**：见 §0 风险记录 / §5,真机验证后据实决定是否需切 e5m2。
+- **CDNA4 硬件**：M350/M355 卡预计约一周后到；在此之前所有 kernel 测试（第 2/3 层）无法运行，forward 代码处于"已写未验"状态（Triton 编译修复已合入，待真机确认 Layer 2）。
+- ~~**第 1 层 CPU 自证**~~：✅ 2026-07-14 于 MI250 Docker 跑通 `test_reference_matches_bf16_sdpa`（6/6 passed）。
+- **第 2 层 kernel vs 黄金参照**：待 CDNA4 硬件；届时验收 `test_kernel_matches_reference` 全网格。
+- **backward 全 e4m3 的数值风险**：见 §0 风险记录 / §5，真机验证后据实决定是否需切 e5m2。
 
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 无参照、按标准 FA v2 backward 数学从零写**（preprocess + dK/dV + dQ 三 kernel，每 dot 各自量化）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，ground-truth 由纯 PyTorch 黄金参照提供（CPU 可离线验）。量化基础设施已齐,forward FA v2 骨架复用；最大工作量与风险集中在从零的 backward。当前 forward + 三层测试脚手架已落地但未经硬件验证,backward 未开始。
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 无参照、按标准 FA v2 backward 数学从零写**（preprocess + dK/dV + dQ 三 kernel，每 dot 各自量化）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，ground-truth 由纯 PyTorch 黄金参照提供（Layer 1 已于 MI250 离线验 6/6 通过）。量化基础设施已齐，forward FA v2 骨架复用；Triton 编译两处真 bug 已修、待 CDNA4 验 Layer 2。最大工作量与风险集中在从零的 backward；backward 未开始。

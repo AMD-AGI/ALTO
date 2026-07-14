@@ -14,7 +14,7 @@ from pydantic import Field, PrivateAttr, field_validator, model_validator
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 
 from alto.observers import Observer
@@ -273,12 +273,18 @@ class SelfDistillationModifier(Modifier):
 
     def _build_optimizers(self, model_parts: list[Module]):
         config = OptimizersContainer.Config(
-            name=self.optimizer,
-            lr=self.lr,
-            beta1=self.beta1,
-            beta2=self.beta2,
-            eps=self.eps,
-            weight_decay=self.weight_decay,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name=self.optimizer,
+                    optimizer_kwargs={
+                        "lr": self.lr,
+                        "betas": (self.beta1, self.beta2),
+                        "eps": self.eps,
+                        "weight_decay": self.weight_decay,
+                    },
+                )
+            ],
             implementation=self.implementation,
         )
 

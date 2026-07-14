@@ -1,0 +1,133 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+#
+# SPDX-License-Identifier: MIT
+"""Golden-reference validation for the MXFP8 (e4m3) flash attention kernel.
+
+Additive to ``test_mxfp8_attention.py`` (which mirrors the mxfp4 attention test:
+kernel vs bf16 SDPA). This file adds the two layers that the pure-PyTorch golden
+reference enables — a strengthening over the mxfp4 reference, which has neither a
+golden reference nor asserts:
+
+  * Layer 1 ``test_reference_matches_bf16_sdpa`` — golden reference vs bf16 SDPA.
+    Pure PyTorch, **runs on CPU / any device without CDNA4**; validates the
+    algorithm and mxfp8 quantization placement *before* the hardware arrives.
+  * Layer 2 ``test_kernel_matches_reference`` — kernel vs golden reference.
+    Isolates Triton port bugs (masking / online-softmax / LSE) from the mxfp8
+    quantization error itself. Requires CDNA4 (native ``tl.dot_scaled``).
+
+(Layer 3 — kernel vs bf16 SDPA, total end-to-end error — is the committed
+``test_mxfp8_attention.py::test_attention``; not duplicated here.)
+"""
+
+import pytest
+from tabulate import tabulate
+import torch
+
+from .utils import calc_snr, calc_cossim, mxfp8_attention_forward_reference
+# Reuse the committed shape grid so Layer 2 stays in lock-step with Layer 3.
+from .test_mxfp8_attention import AttnConfig, test_cases
+
+cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA/ROCm device is required.")
+
+
+def _sdpa_bf16_bhsd(q, k, v, sm_scale, causal):
+    """bf16 SDPA reference in bhsd layout (the native SDPA head layout)."""
+    n_rep = q.shape[1] // k.shape[1]
+    return torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, is_causal=causal, scale=sm_scale, enable_gqa=n_rep > 1)
+
+
+def _make_qkv_bhsd(batch, config, device, dtype):
+    torch.manual_seed(1234)
+    q = torch.randn((batch, config.num_head_q, config.seqlen_q, config.head_dim_qk), device=device, dtype=dtype)
+    k = torch.randn((batch, config.num_head_kv, config.seqlen_kv, config.head_dim_qk), device=device, dtype=dtype)
+    v = torch.randn((batch, config.num_head_kv, config.seqlen_kv, config.head_dim_v), device=device, dtype=dtype)
+    return q, k, v
+
+
+# ---------------------------------------------------------------------------
+# Layer 1 — golden reference vs bf16 SDPA (pure PyTorch, runs anywhere, no CDNA4)
+# ---------------------------------------------------------------------------
+
+# Small shapes: the reference loops over key blocks in Python, keep it cheap for CPU.
+reference_cases = [
+    AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=4, num_head_kv=4, head_dim_qk=64, head_dim_v=64),
+    AttnConfig(seqlen_q=256, seqlen_kv=256, num_head_q=8, num_head_kv=2, head_dim_qk=128, head_dim_v=128),  # GQA
+    AttnConfig(seqlen_q=128, seqlen_kv=256, num_head_q=4, num_head_kv=4, head_dim_qk=128, head_dim_v=128),  # seqlen_kv > seqlen_q
+]
+
+
+@pytest.mark.parametrize("config", reference_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_reference_matches_bf16_sdpa(config, causal):
+    """The pure-PyTorch golden reference must track bf16 SDPA within mxfp8 error.
+
+    Runnable on CPU without CDNA4 — the check we can do *before* the hardware
+    arrives, to de-risk the algorithm and quantization placement.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float32 if device == "cpu" else torch.bfloat16
+
+    q, k, v = _make_qkv_bhsd(2, config, device, dtype)
+    sm_scale = config.head_dim_qk**(-0.5)
+
+    o_ref = _sdpa_bf16_bhsd(q, k, v, sm_scale, causal)
+    o_golden, _ = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal)
+
+    snr = calc_snr(o_ref, o_golden)
+    sim = calc_cossim(o_ref, o_golden)
+    print()
+    print(tabulate([["O (golden vs bf16)", snr, sim]], headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
+
+    assert sim > 0.99, f"golden reference cosine-sim vs bf16 SDPA too low: {sim}"
+    assert snr > 15, f"golden reference SNR vs bf16 SDPA too low: {snr}"
+
+
+# ---------------------------------------------------------------------------
+# Layer 2 — kernel vs golden reference (requires CDNA4 native tl.dot_scaled)
+# ---------------------------------------------------------------------------
+
+@cuda_only
+@pytest.mark.parametrize("config", test_cases)
+@pytest.mark.parametrize("causal", [True])
+def test_kernel_matches_reference(config, causal):
+    """Kernel vs golden reference — isolates Triton port bugs from quant error.
+
+    Both sides apply the same mxfp8 quantization, so a large gap here points at a
+    Triton port bug (masking / online-softmax / LSE / strides) rather than
+    quantization error.
+    """
+    from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    q, k, v = _make_qkv_bhsd(4, config, device, dtype)
+    sm_scale = config.head_dim_qk**(-0.5)
+
+    o_kernel = triton_attention_mxfp8(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        bias=None,
+        alibi_slopes=None,
+        sm_scale=sm_scale,
+        dropout_p=0.0,
+        cu_seqlens_q=0,
+        cu_seqlens_k=0,
+        max_seqlens_q=config.seqlen_q,
+        max_seqlens_k=config.seqlen_kv,
+        causal=causal,
+        return_scores=False,
+        use_exp2=True,
+        layout="bhsd",
+    )[0]
+    o_golden, _ = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal)
+
+    snr = calc_snr(o_golden, o_kernel)
+    sim = calc_cossim(o_golden, o_kernel)
+    print()
+    print(tabulate([["O (kernel vs golden)", snr, sim]], headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
+
+    # Threshold placeholder — calibrate on the first CDNA4 run.
+    assert sim > 0.99, f"kernel vs golden cosine-sim too low: {sim}"
+    assert snr > 30, f"kernel vs golden SNR too low: {snr}"

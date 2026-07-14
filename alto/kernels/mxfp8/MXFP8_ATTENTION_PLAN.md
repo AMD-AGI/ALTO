@@ -272,6 +272,37 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 
 ---
 
-## 10. 一句话总结
+## 10. 实施进展记录
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 无参照、按标准 FA v2 backward 数学从零写**（preprocess + dK/dV + dQ 三 kernel，每 dot 各自量化）。全 e4m3（backward 格式 ⚠️ 待确认，e5m2 参数化预留）、**仅 CDNA4 无 fallback**，ground-truth 由 PyTorch 模拟 reference 提供。量化基础设施已齐，forward FA v2 骨架复用；最大工作量与风险集中在从零的 backward。
+### 10.1 截至 2026-07-14
+
+**已落地（代码，未经硬件验证）：**
+
+- **forward kernel**：`alto/kernels/mxfp8/triton_flash_attention_mxfp8.py`——由 mxfp4 attention 机械改写（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`、Q/K/V 走 `convert_to_mxfp8`）。**forward-only**（backward 为 `None` 占位）、**仅 CDNA4 走 `tl.dot_scaled`，无 fallback**。`__init__.py` 导出 `triton_attention_mxfp8`。
+- **黄金参照**：`tests/unittest/mxfp8/utils.py` 的 `mxfp8_attention_forward_reference`——纯 PyTorch 复刻 forward（2D-block e4m3 Q/K/V、逐 key-block 在线 softmax + running-max 量化 P、全 fp32 matmul、无 `tl.dot_scaled`），可在 CPU / 任意设备跑。
+- **测试（三层，见 §8）**：
+  - 第 3 层 `test_mxfp8_attention.py::test_attention`（kernel vs bf16 SDPA，仿 mxfp4，硬断言 `cossim>0.99`/`SNR>20`）——**已 commit，作为基线不再改动**。
+  - 第 1 层 `test_mxfp8_attention_reference.py::test_reference_matches_bf16_sdpa`（黄金参照 vs bf16，**CPU 现在可跑**）+ 第 2 层 `test_kernel_matches_reference`（kernel vs 黄金参照，CDNA4；`import` 复用第 3 层的 `test_cases` 网格）——新增独立文件，纯增量。
+
+**对 §4 步骤的进度映射：**
+
+| 步骤 | 状态 | 备注 |
+|---|---|---|
+| Step 1–4（forward kernel + wrapper + autograd.forward） | ✅ 代码完成 / ⏳ 未验证 | 无 CDNA4,尚未跑通任何 kernel 测试 |
+| Step 5–8（backward：preprocess / dK-dV / dQ / autograd.backward） | ❌ 未开始 | 从零写,头号工作量,见 §9 |
+| Step 9（dispatch 接入 `mxfp8_e4m3`） | ❌ 未开始 | — |
+| Step 10（测试脚手架） | ✅ 三层脚手架就位 | 第 1 层可离线验,第 2/3 层待 CDNA4 |
+
+**已知偏差 / 修正记录：**
+
+- 写黄金参照时静态发现并修掉一处 masking bug：mask 值若用 `finfo.min`（有限）会让"整块被 mask 的行"算出 `exp(0)=1`（应为 0）；改用真 `-inf`（masked 项 `exp(-inf)=0`，全 mask 行的 nan 由 `nan_to_num` 兜住）。此 bug 正是"无黄金参照、只对 bf16"抓不到的类型。
+
+**Open items（阻塞真验证）：**
+
+- **CDNA4 硬件**：M350/M355 卡预计约一周后到；在此之前所有 kernel 测试（第 2/3 层）无法运行,forward 代码处于"已写未验"状态。
+- **第 1 层 CPU 自证**：需在有 torch 的环境跑一次 `test_reference_matches_bf16_sdpa`,确认黄金参照本身正确（它是 backward 验证的地基）。
+- **backward 全 e4m3 的数值风险**：见 §0 风险记录 / §5,真机验证后据实决定是否需切 e5m2。
+
+### 10.2 一句话总结
+
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 无参照、按标准 FA v2 backward 数学从零写**（preprocess + dK/dV + dQ 三 kernel，每 dot 各自量化）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，ground-truth 由纯 PyTorch 黄金参照提供（CPU 可离线验）。量化基础设施已齐,forward FA v2 骨架复用；最大工作量与风险集中在从零的 backward。当前 forward + 三层测试脚手架已落地但未经硬件验证,backward 未开始。

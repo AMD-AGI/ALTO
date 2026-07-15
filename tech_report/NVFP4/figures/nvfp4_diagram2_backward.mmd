@@ -1,0 +1,25 @@
+flowchart TD
+    dY["dY (BF16) from layer L+1"]
+    Wlp["W_lp (FP4 stored)"]
+    Xsaved["x_for_wgrad (saved BF16 or pre-rotated FP4)"]
+
+    dY --> QDg["SR-block-quantize on dY<br/>elem=E2M1, scale=E4M3, PTS,<br/>rounding=SR (no Hadamard on dgrad)<br/>injects fresh noise eps_d"]
+    QDg --> dYdq["dY_dq (BF16) = true dY + eps_d"]
+    dYdq --> Gd["BF16 GEMM (QDQ emulation)<br/>dX = dY_dq @ W_dq"]
+    Wlp --> DqW1["Dequantize W"]
+    DqW1 --> Gd
+    Gd --> dX["dX (BF16)<br/>flows to layer L-1 as dY_{L-1}<br/>(cross-layer noise carrier)"]
+
+    dY --> HW["Hadamard rotation H<br/>(applied to dY for wgrad only)"]
+    HW --> QWg["SR-block-quantize<br/>(same block params, SR=ON)"]
+    QWg --> dYHdq["dY_H_dq (BF16) = true dY rotated + eps_w"]
+
+    Xsaved --> HX["Hadamard H on saved X"]
+    HX --> QXw["block-quantize"]
+    QXw --> Xhdq["X_H_dq (BF16)"]
+
+    dYHdq --> Gw["BF16 GEMM (QDQ emulation)<br/>dW = dY_H_dq^T @ X_H_dq"]
+    Xhdq --> Gw
+    Gw --> dW["dW (BF16)"]
+    dW --> Opt["AdamW optimizer"]
+    dW --> GN["grad_norm = sqrt(sum over layers ||dW||_2^2)<br/>pre-clip global L2"]

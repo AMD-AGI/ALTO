@@ -1,0 +1,48 @@
+flowchart LR
+    IN["grad_output (dY, BF16)<br/>from layer L+1 autograd<br/>(upstream chain rule)"]
+
+    HAD["Hadamard rotate H<br/>left_mul=True<br/>(wgrad path only;<br/>dgrad path does NOT rotate)"]
+
+    DGRAD_QDQ["<b>SR-QDQ #1  (root cause)</b><br/>_qdq(grad_output,<br/>  axis=-1, use_sr=True)<br/><br/>autograd.py:200-203"]
+
+    WGRAD_QDQ["<b>SR-QDQ #2  (root cause)</b><br/>_qdq(grad_output_H,<br/>  axis=0, use_sr=True)<br/><br/>cg_backward.py:108-119<br/>(inside _nvfp4_grouped_wgrad)"]
+
+    GD["_nvfp4_grouped_dgrad<br/>dX = g_dq @ w_bwd<br/>(BF16 GEMM, QDQ emulation)"]
+
+    GW["_nvfp4_grouped_wgrad<br/>dW = g_m_dq^T @ x_bwd<br/>(BF16 GEMM, QDQ emulation)"]
+
+    W_BWD["w_bwd  (saved from forward)<br/>_qdq(W, axis=-2)<br/><br/>ABL.2 D2: innocent"]
+
+    X_BWD["x_bwd  (saved from forward)<br/>_qdq(Hadamard(X), axis=0)<br/><br/>ABL.2 D4: innocent"]
+
+    DX["dX (BF16)<br/>-> layer L-1's grad_output<br/><br/><b>This carries SR noise upstream;<br/>cross-layer ε² accumulates here</b>"]
+
+    DW["dW (BF16)<br/>-> AdamW optimizer<br/>-> contributes to global grad_norm"]
+
+    IN -->|"dgrad path<br/>(no Hadamard)"| DGRAD_QDQ
+    IN -->|"wgrad path"| HAD
+    HAD --> WGRAD_QDQ
+
+    DGRAD_QDQ --> GD
+    W_BWD --> GD
+
+    WGRAD_QDQ --> GW
+    X_BWD --> GW
+
+    GD --> DX
+    GW --> DW
+
+    classDef incoming fill:#cce5ff,stroke:#0056b3,color:#000,stroke-width:2px
+    classDef rootcause fill:#f8d7da,stroke:#dc3545,color:#000,stroke-width:3px
+    classDef safe fill:#d4edda,stroke:#28a745,color:#000,stroke-width:2px
+    classDef gemm fill:#fff3cd,stroke:#ffc107,color:#000,stroke-width:2px
+    classDef output fill:#e2e3e5,stroke:#383d41,color:#000,stroke-width:2px
+    classDef neutral fill:#ffffff,stroke:#6c757d,color:#000,stroke-width:2px
+
+    class IN incoming
+    class HAD neutral
+    class DGRAD_QDQ,WGRAD_QDQ rootcause
+    class W_BWD,X_BWD safe
+    class GD,GW gemm
+    class DX output
+    class DW output

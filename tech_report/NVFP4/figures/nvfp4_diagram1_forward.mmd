@@ -1,0 +1,21 @@
+flowchart TD
+    X["X (BF16, token activations)"]
+    Wlp["W_lp (FP4 stored, E2M1 codes)"]
+    SX["scales_X (E4M3) + pts_X (FP32)"]
+    SW["scales_W (E4M3) + pts_W (FP32)"]
+
+    X --> QF["Block-wise quantize<br/>elem=E2M1, block_scale=E4M3,<br/>tensorwise PTS, rounding=RNE<br/>(no Hadamard on forward path)"]
+    QF --> Xlp["X_lp (FP4 codes)"]
+    Xlp --> DQX["Dequantize X<br/>X_dq = X_lp * block_scale * pts"]
+    DQX --> Xdq["X_dq (BF16)"]
+    SX --> DQX
+
+    Wlp --> DQW["Dequantize W"]
+    SW --> DQW
+    DQW --> Wdq["W_dq (BF16)"]
+
+    Xdq --> GEMM["BF16 GEMM (QDQ emulation path)<br/>Y = X_dq @ W_dq^T"]
+    Wdq --> GEMM
+    GEMM --> Y["Y (BF16) -> next layer"]
+
+    X -. saved for wgrad .-> Save["Hadamard H + block-quantize<br/>(stored on ctx as x_for_wgrad)"]

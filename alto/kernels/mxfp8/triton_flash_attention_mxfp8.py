@@ -1023,7 +1023,7 @@ def attention_mxfp8_forward_triton_impl(
     return o, softmax_lse, exp_scores
 
 
-RCP_LN2: tl.constexpr = 1.4426950408889634
+RCP_LN2 = tl.constexpr(1.4426950408889634)
 
 
 @triton.jit

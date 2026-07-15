@@ -37,6 +37,7 @@ from typing import Optional, Tuple
 import torch
 
 from alto.kernels.fp4.mxfp4.mxfp_quantization import is_cdna4
+from alto.kernels.fp4.fp4_common.tensor_wrappers import unwrap_weight_wrapper
 from .transform_mode import TransformMode, assert_mode_supported
 
 HadamardTransformType = "HadamardTransform"  # type-hint placeholder; avoid hard import
@@ -110,6 +111,13 @@ class MXFP4AdaHOPLinearFunction(torch.autograd.Function):
         assert_mode_supported(forward_y_mode, "forward_y")
         assert_mode_supported(backward_gx_mode, "backward_gx")
         assert_mode_supported(backward_gw_mode, "backward_gw")
+
+        # The wrapper (grad-tracked) is passed into apply() so the weight gradient
+        # reaches the Parameter; unwrap to the plain payload HERE, inside forward
+        # (past the autograd boundary), for the quant math. Mirrors the plain
+        # MXFP4 path (mxfp_linear.py). Safe: forward runs in no-grad, so the graph
+        # input recorded by apply() is still the wrapper.
+        weight = unwrap_weight_wrapper(weight)
 
         original_shape = x.shape
         original_dtype = x.dtype

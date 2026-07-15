@@ -130,7 +130,14 @@ class MXFP4AdaHOPWrapper(MXFP4TrainingWeightWrapperTensor):
             # function's "none" path (unused by the recipe post-Phase-B).
             if weight.is_calibrating:
                 return super().__torch_function__(func, types, args, kwargs)
-            operand_w = weight._data if trans_b else weight._data.T
+            # Pass the WRAPPER tensor (grad-tracked) into apply(), NOT weight._data
+            # (which is requires_grad=False). Passing the raw payload severs the
+            # autograd link so the weight gradient is silently discarded and the
+            # Linear never updates. Transpose is subclass- and graph-preserving
+            # (see _ops_to_preserve_subclass in tensor.py), so weight.T keeps the
+            # link; the payload is unwrapped inside MXFP4AdaHOPLinearFunction.forward,
+            # past the autograd boundary. Mirrors the plain MXFP4 / NVFP4 paths.
+            operand_w = weight if trans_b else weight.T
             y = MXFP4AdaHOPLinearFunction.apply(
                 x,
                 operand_w,

@@ -460,6 +460,7 @@ def _backward_gx(
             trans_b=False,
             k=OUTLIER_K,
             original_dtype=original_dtype,
+            use_sr=use_sr_grad,  # grad_output is A -> stochastic-round its quant
         )
 
     # hadamard / outer_hadamard / none
@@ -522,6 +523,7 @@ def _backward_gw(
             trans_b=False,
             k=OUTLIER_K,
             original_dtype=original_dtype,
+            use_sr=use_sr_grad,  # grad_output is A -> stochastic-round its quant
         )
 
     # hadamard / inner_outlier_extract_left (same path per AdaHOP) /

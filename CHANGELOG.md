@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.0 [dev]
+
+- Changed
+  - Mixed precision is now handled by FSDP even if world_size=1.
+  - Dropped Instella-3B model config.
+
+
 ## v0.0.2 [dev]
 
 - Changed

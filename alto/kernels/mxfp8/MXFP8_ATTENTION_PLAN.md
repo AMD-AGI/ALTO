@@ -334,6 +334,19 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 - **阶段1 backward 未经任何硬件验证**（本机无 torch）；下一步在另一台机跑第 1 层（CPU）+ 第 2 层（MI250 即可，无需 CDNA4）拿反馈。
 - 阶段2（dot_scaled + MX 量化）仍待 CDNA4。
 
+### 10.1ter 截至 2026-07-15（backward 阶段1 于 MI250 验通）
+
+**已在 MI250（gfx90a）Docker 跑通 backward 两层测试：**
+
+- **第 1 层 `test_backward_reference_matches_sdpa`：6/6 passed。**
+- **第 2 层 `test_backward_kernel_matches_reference`：7/7 passed**（全 `test_cases` 网格），kernel vs 黄金参照 SNR≈55.5 dB、cos≈0.999999。证明阶段1 骨架的 FA v2 backward 数学 + strides + GQA + masking 移植正确。**注意：这验的是移植正确性，不是 mxfp8 backward 数值过关**——后者要阶段2 的 `tl.dot_scaled` + MX 量化，仍待 CDNA4。
+
+**修掉一个真 bug（与 §10.1 forward 那次同类）：**
+
+- **Triton constexpr 全局变量注解式写法**：backward 新增的模块级 `RCP_LN2: tl.constexpr = 1.4426950408889634` 被两个 backward inner kernel（`_attn_bwd_dq_inner` / `_attn_bwd_dkdv_inner`）访问时报 `NameError: Cannot access global variable RCP_LN2`。**修复**：改为实例化写法 `RCP_LN2 = tl.constexpr(1.4426950408889634)`。（forward 函数体内的局部 `RCP_LN2` 是局部变量，不受影响，未动。）
+
+**潜伏坑（非 bug，记录备查）：** backward kernel 的 causal 用 **bottom-right**（`col_offset = N_CTX_Q - N_CTX_K`，与 forward kernel 一致），黄金参照用 **top-left**。当前 `test_cases` 全是方阵（seqlen_q==seqlen_kv），两者等价故测不出差异；若日后加**非方阵 causal** 用例，kernel 与参照会对不上，需统一对齐方式。
+
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架已用高精度 bf16 `tl.dot` 接通（入口反量化 e4m3，MI250 可跑），阶段2 再逐 dot 换 `tl.dot_scaled` + 沿 reduction 轴 MX 量化（待 CDNA4）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，forward/backward 均有纯 PyTorch 黄金参照（forward Layer 1 已于 MI250 验 6/6；backward 参照 + 两层测试已就位待跑）。真正风险集中在阶段2 的 5-dot MX scale 轴对齐。
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架已用高精度 bf16 `tl.dot` 接通（入口反量化 e4m3，MI250 可跑），阶段2 再逐 dot 换 `tl.dot_scaled` + 沿 reduction 轴 MX 量化（待 CDNA4）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，forward/backward 均有纯 PyTorch 黄金参照（forward Layer 1 已于 MI250 验 6/6；backward 两层已于 MI250 验 6/6 + 7/7，SNR≈55dB）。真正风险集中在阶段2 的 5-dot MX scale 轴对齐（待 CDNA4）。

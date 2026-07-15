@@ -19,7 +19,12 @@ training_stage:
     AdaHOPModifier:
       enabled: true
       use_hadamard: true
-      use_randomized_hadamard: false
+      # Randomized Hadamard (random sign/permutation) to match the plain-MXFP4
+      # baseline, which keeps HadamardFactory's randomized=True default. A fixed
+      # (deterministic) Hadamard decorrelates outliers less well; the small
+      # per-step difference compounds over training into a widening val-loss gap
+      # vs plain MXFP4 (S5). See plan keen-questing-ember.
+      use_randomized_hadamard: true
       calibration_steps: 30
       layer_transform_config:
         "row-row": "hadamard"

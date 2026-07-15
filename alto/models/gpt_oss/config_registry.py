@@ -19,7 +19,10 @@ __all__ = [
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
+    "gpt_oss_20b_lpt_fresh",
+    "gpt_oss_20b_lpt_no2dw",
     "gpt_oss_20b_adahop",
+    "gpt_oss_20b_adahop_hadamard",
     "gpt_oss_20b_pretrain_c4",
     "gpt_oss_20b_lpt_c4",
     "gpt_oss_20b_grad_clip_lpt",
@@ -213,6 +216,20 @@ def gpt_oss_20b_adahop() -> Trainer.Config:
     ],)
     return config
 
+def gpt_oss_20b_adahop_hadamard() -> Trainer.Config:
+    """Phase-2 Run A: AdaHOP with every slot forced to `hadamard` (no outlier
+    extraction, no full_precision). Identical to gpt_oss_20b_adahop except the
+    recipe's layer_transform_config maps all pattern-pairs to "hadamard".
+    Isolates whether the AdaHOP training regression comes from mode SELECTION
+    (S3) rather than the transform math. Distinct dump_folder so it never
+    collides with the calibrated adahop or the nolora runs."""
+    config = gpt_oss_20b_adahop()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-allhadamard-randomized-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_all_hadamard.yaml",),
+    ],)
+    return config
+
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
     config.training.global_batch_size = 16
@@ -234,6 +251,26 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_lpt_fresh() -> Trainer.Config:
+    """Plain MXFP4 baseline, fresh from step 1, own dump folder — the control for
+    the weight-identity experiment (2D weight scaling ON). Distinct dump_folder
+    from gpt_oss_20b_lpt so it never resumes an existing checkpoint."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-2dw-fresh-outputs"
+    return config
+
+def gpt_oss_20b_lpt_no2dw() -> Trainer.Config:
+    """Plain MXFP4 with 2D weight scaling DISABLED (use_2dblock_w: false). Tests
+    the AdaHOP root-cause hypothesis: breaking the baseline's single-2D-Q(W)
+    identity (W re-quantized per-axis instead) should degrade plain MXFP4 toward
+    AdaHOP's ~5.9 val@768. Fresh from step 1, own dump folder."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-no2dw-fresh-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_no2dw.yaml",),
     ],)
     return config
 

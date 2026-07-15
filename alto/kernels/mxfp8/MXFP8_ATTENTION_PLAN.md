@@ -311,6 +311,29 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 - **第 2 层 kernel vs 黄金参照**：待 CDNA4 硬件；届时验收 `test_kernel_matches_reference` 全网格。
 - **backward 全 e4m3 的数值风险**：见 §0 风险记录 / §5，真机验证后据实决定是否需切 e5m2。
 
+### 10.1bis 截至 2026-07-15（backward 阶段1 + 参照）
+
+**关键决策修正：backward 不从零写。** 发现 `alto/kernels/blockwise_fp8/triton_flash_attention_fp8_block.py` 有一套完整 fp8 attention backward（`_bwd_preprocess` + `_bwd_kernel_dkdv` + `_bwd_kernel_dq`），结构与 §9 三 kernel 完全同构。因此 backward 改为**机械 port**（同 forward 从 mxfp4 改写的性质），§9"从零写、头号风险"前提作废。真正工作量集中在 **5 个 dot 的 MX scale 轴对齐**（②dp/③dv 的 dO、①qk/④dk 的 q 各需沿不同 reduction 轴的两套量化）。
+
+**分两阶段落地，采用 port_now（骨架先行）：**
+
+- **阶段1 ✅ 已落地（代码，未验）**：port 三 kernel（`_bwd_preprocess` / `_bwd_kernel_dq` + `_attn_bwd_dq_inner` / `_bwd_kernel_dkdv` + `_attn_bwd_dkdv_inner`）+ backward driver（注册 `alto::attention_mxfp8_backward_triton_impl` + `register_fake`）+ 接上 `autograd.backward`（返回 15 个梯度，顺手修正旧 stub 的 17 个 None bug）。
+  - **dot 用高精度 bf16 `tl.dot` 占位**，每处留 `TODO(stage2)` 标注该 dot 的 reduction 轴。
+  - **入口用 `convert_from_mxfp8` 把 saved e4m3 q/k/v 反量化回 bf16**——backward 吃的正是 forward 用过的那份量化输入，且**不含 `tl.dot_scaled`，MI250 可跑**。
+  - causal 用 **bottom-right**（与 forward kernel 一致，非参照的 top-left；方阵下无差别）。
+- **阶段2 ❌ 未开始**：逐 dot 换 `tl.dot_scaled` + 沿 reduction 轴的 MX e4m3 量化 + dO 量化。需 CDNA4 才能验。
+
+**backward 黄金参照 ✅ 已落地**：`tests/unittest/mxfp8/utils.py::mxfp8_attention_backward_reference`——纯 PyTorch 复刻阶段1 kernel（反量化 q/k/v、用 saved `lse` 在 fp32 重算 `P`、backward 不量化 P），标准 FA v2 backward（dV=Pᵀ@dO；dP=dO@Vᵀ；dS=P·(dP−delta)；dQ=sm·dS@K；dK=sm·dSᵀ@Q）。喂 forward 参照的同一份 `o`/`lse` 时应与 kernel 高精度吻合。
+
+**backward 测试（加在 `test_mxfp8_attention_reference.py`）：**
+
+- **第 1 层 `test_backward_reference_matches_sdpa`（CPU）**：参照 vs autograd fp32 SDPA backward，验算法+量化误差（`cossim>0.97`/`SNR>8`）。**本机无 torch，未跑，待另一台机跑。**
+- **第 2 层 `test_backward_kernel_matches_reference`（设备）**：直接调 backward op（喂 forward 参照的 `o`/`lse`，**绕过 forward 的 `tl.dot_scaled`**），故**阶段1 bf16 骨架 MI250 即可验**；kernel vs 参照（`cossim>0.99`/`SNR>25`，阈值待首跑校准）。
+
+**Open items 更新：**
+- **阶段1 backward 未经任何硬件验证**（本机无 torch）；下一步在另一台机跑第 1 层（CPU）+ 第 2 层（MI250 即可，无需 CDNA4）拿反馈。
+- 阶段2（dot_scaled + MX 量化）仍待 CDNA4。
+
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 无参照、按标准 FA v2 backward 数学从零写**（preprocess + dK/dV + dQ 三 kernel，每 dot 各自量化）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，ground-truth 由纯 PyTorch 黄金参照提供（Layer 1 已于 MI250 离线验 6/6 通过）。量化基础设施已齐，forward FA v2 骨架复用；Triton 编译两处真 bug 已修、待 CDNA4 验 Layer 2。最大工作量与风险集中在从零的 backward；backward 未开始。
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架已用高精度 bf16 `tl.dot` 接通（入口反量化 e4m3，MI250 可跑），阶段2 再逐 dot 换 `tl.dot_scaled` + 沿 reduction 轴 MX 量化（待 CDNA4）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，forward/backward 均有纯 PyTorch 黄金参照（forward Layer 1 已于 MI250 验 6/6；backward 参照 + 两层测试已就位待跑）。真正风险集中在阶段2 的 5-dot MX scale 轴对齐。

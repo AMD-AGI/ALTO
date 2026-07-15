@@ -287,3 +287,93 @@ def mxfp8_attention_forward_reference(
     softmax_lse = torch.where(fully_masked, torch.zeros_like(softmax_lse), softmax_lse)
 
     return o.to(q.dtype), softmax_lse
+
+
+def mxfp8_attention_backward_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    do: torch.Tensor,
+    o: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    sm_scale: float,
+    causal: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pure-PyTorch golden reference for the MXFP8 (e4m3) flash-attention backward.
+
+    Mirrors the Stage-1 backward kernel exactly so a kernel-vs-this-reference gap
+    isolates Triton port bugs from mxfp8 quantization error:
+
+      * Q/K/V are quantized 2D-block along head_dim then dequantized — the same
+        operands the (Stage-1) kernel runs on.
+      * The softmax probabilities ``P`` are recomputed in fp32 from the *saved*
+        ``softmax_lse`` (``P = exp(S - lse)``); backward does **not** re-quantize
+        ``P`` (matching the kernel).
+      * ``o`` / ``softmax_lse`` must be the values the forward produced (feed the
+        outputs of ``mxfp8_attention_forward_reference``), so ``delta = rowsum(o *
+        do)`` and ``P`` are consistent with the forward pass.
+
+    Uses the same top-left causal mask as the forward reference, so causal tests
+    must keep ``seqlen_q == seqlen_k`` (top-left == bottom-right there).
+
+    Standard FlashAttention-v2 backward::
+
+        dV = Pᵀ @ dO
+        dP = dO @ Vᵀ
+        delta = rowsum(O * dO)
+        dS = P * (dP - delta)
+        dQ = sm_scale * dS @ K
+        dK = sm_scale * dSᵀ @ Q
+
+    Args:
+        q, k, v: ``[batch, nheads, seqlen, head_dim]`` (bhsd). GQA supported.
+        do: upstream gradient, same shape/layout as ``o``.
+        o, softmax_lse: forward outputs (see above).
+        sm_scale: softmax scale.
+        causal: top-left causal mask.
+
+    Returns:
+        (dq, dk, dv) matching the shapes of q, k, v.
+    """
+    b, hq, sq, dqk = q.shape
+    _, hk, sk, dvv = v.shape
+    assert hq % hk == 0, f"nheads_q ({hq}) must be a multiple of nheads_k ({hk})"
+    n_rep = hq // hk
+
+    q_dq = _mxfp8_qdq(q, axis=-1, is_2d_block=True).to(torch.float32)
+    k_dq = _mxfp8_qdq(k, axis=-1, is_2d_block=True).to(torch.float32)
+    v_dq = _mxfp8_qdq(v, axis=-1, is_2d_block=True).to(torch.float32)
+    if n_rep > 1:
+        k_dq = k_dq.repeat_interleave(n_rep, dim=1)
+        v_dq = v_dq.repeat_interleave(n_rep, dim=1)
+
+    do_f = do.to(torch.float32)
+    o_f = o.to(torch.float32)
+    lse = softmax_lse.to(torch.float32)
+
+    s = torch.matmul(q_dq, k_dq.transpose(-1, -2)) * sm_scale  # [b, hq, sq, sk]
+    if causal:
+        q_pos = torch.arange(sq, device=q.device)
+        k_pos = torch.arange(sk, device=q.device)
+        allowed = k_pos[None, :] <= q_pos[:, None]  # [sq, sk], top-left
+        s = torch.where(allowed[None, None, :, :], s, torch.full_like(s, float("-inf")))
+
+    p = torch.exp(s - lse[..., None])  # softmax probabilities
+    p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
+
+    delta = (o_f * do_f).sum(dim=-1)  # [b, hq, sq]
+    dp = torch.matmul(do_f, v_dq.transpose(-1, -2))  # [b, hq, sq, sk]
+    ds = p * (dp - delta[..., None])  # [b, hq, sq, sk]
+
+    dv_full = torch.matmul(p.transpose(-1, -2), do_f)  # [b, hq, sk, dv]
+    dq = sm_scale * torch.matmul(ds, k_dq)  # [b, hq, sq, dqk]
+    dk_full = sm_scale * torch.matmul(ds.transpose(-1, -2), q_dq)  # [b, hq, sk, dqk]
+
+    if n_rep > 1:
+        dk = dk_full.view(b, hk, n_rep, sk, dqk).sum(dim=2)
+        dv = dv_full.view(b, hk, n_rep, sk, dvv).sum(dim=2)
+    else:
+        dk = dk_full
+        dv = dv_full
+
+    return dq, dk, dv

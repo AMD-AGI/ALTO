@@ -28,6 +28,7 @@ from .utils import (
     calc_cossim,
     mxfp8_attention_forward_reference,
     mxfp8_attention_backward_reference,
+    mxfp8_attention_backward_reference_stage2,
 )
 # Reuse the committed shape grid so Layer 2 stays in lock-step with Layer 3.
 from .test_mxfp8_attention import AttnConfig, test_cases
@@ -186,6 +187,57 @@ def test_backward_reference_matches_sdpa(config, causal):
         snr = calc_snr(ref, got)
         assert sim > 0.97, f"{name} golden-vs-sdpa cosine-sim too low: {sim}"
         assert snr > 8, f"{name} golden-vs-sdpa SNR too low: {snr}"
+
+
+# ---------------------------------------------------------------------------
+# Backward Stage-2 Layer 1 — full-quant reference vs autograd fp32 SDPA
+#   Quantizes every backward matmul operand along its reduction axis (a
+#   numerical model of tl.dot_scaled). The gap vs SDPA is the *full* mxfp8
+#   backward quantization error — the signal that decides whether all-e4m3 is
+#   viable or must go e5m2. Pure PyTorch, runs on CPU / MI250 (no CDNA4).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("config", reference_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_backward_stage2_reference_matches_sdpa(config, causal):
+    """Stage-2 (all-operand-quantized) backward reference vs autograd fp32 SDPA.
+
+    This is the pre-hardware numerical de-risk for the plan §9.5 stage-2 kernel:
+    if all-e4m3 grads already diverge here, the kernel can't do better and we
+    should switch dO/dP/dS to e5m2 before writing any tl.dot_scaled code.
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float32 if device == "cpu" else torch.bfloat16
+    n_rep = config.num_head_q // config.num_head_kv
+
+    q, k, v = _make_qkv_bhsd(2, config, device, dtype)
+    do = _make_do_bhsd(2, config, device, dtype)
+    sm_scale = config.head_dim_qk**(-0.5)
+
+    qg = q.clone().requires_grad_(True)
+    kg = k.clone().requires_grad_(True)
+    vg = v.clone().requires_grad_(True)
+    o_auto = torch.nn.functional.scaled_dot_product_attention(
+        qg, kg, vg, is_causal=causal, scale=sm_scale, enable_gqa=n_rep > 1)
+    o_auto.backward(do)
+
+    o_ref, lse_ref = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal)
+    dq, dk, dv = mxfp8_attention_backward_reference_stage2(q, k, v, do, o_ref, lse_ref, sm_scale, causal)
+
+    rows = []
+    for name, ref, got in [("dQ", qg.grad, dq), ("dK", kg.grad, dk), ("dV", vg.grad, dv)]:
+        rows.append([f"{name} (stage2 vs sdpa)", calc_snr(ref, got), calc_cossim(ref, got)])
+    print()
+    print(tabulate(rows, headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
+
+    # Calibrated on MI250 (first run): all-e4m3 backward lands at
+    # cossim~0.998 / SNR~23-26 dB across dQ/dK/dV — no e5m2 needed. Thresholds
+    # keep margin below those numbers.
+    for name, ref, got in [("dQ", qg.grad, dq), ("dK", kg.grad, dk), ("dV", vg.grad, dv)]:
+        sim = calc_cossim(ref, got)
+        snr = calc_snr(ref, got)
+        assert sim > 0.995, f"{name} stage2-vs-sdpa cosine-sim too low: {sim}"
+        assert snr > 18, f"{name} stage2-vs-sdpa SNR too low: {snr}"
 
 
 # ---------------------------------------------------------------------------

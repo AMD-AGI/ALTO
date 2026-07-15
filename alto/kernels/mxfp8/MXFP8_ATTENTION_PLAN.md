@@ -268,6 +268,43 @@ def triton_attention_mxfp8(
 
 把 `bwd_grad_format` 切 `"e5m2"` → dO/dP/dS 的量化与对应 `tl.dot_scaled` 的 `FORMAT_ID` 改 1，kernel 本体不动。这是 §5「backward 数值不过关」风险的兜底。
 
+### 9.5 阶段2 具体方案（2026-07-15 细化，7-dot 量化轴对齐）
+
+阶段1（bf16 骨架）已于 MI250 验通移植正确性（§10.1ter）。阶段2 = 把 backward 两个 inner kernel 里的 7 个 `tl.dot` 逐个换成 `tl.dot_scaled`，每个 dot 的两个 operand **沿它的 reduction 轴** MX e4m3 量化。
+
+**7 个 dot 与量化轴：**
+
+| dot | kernel | 计算 | reduction 轴 | LHS 量化轴 | RHS 量化轴 |
+|---|---|---|---|---|---|
+| a | dkdv | `qk = q@kᵀ` | head_dim | q 沿 head_dim | k 沿 head_dim |
+| b | dkdv | `dp = do@vᵀ` | head_dim_v | do 沿 head_dim_v | v 沿 head_dim_v |
+| c | dkdv | `dv += pᵀ@do` | seqlen_q (BLOCK_M) | p 沿 seqlen_q | do 沿 seqlen_q |
+| d | dkdv | `dk += dsᵀ@q` | seqlen_q (BLOCK_M) | ds 沿 seqlen_q | q 沿 seqlen_q |
+| e | dq | `qk = q@kᵀ` | head_dim | 同 a | 同 a |
+| f | dq | `dp = do@vᵀ` | head_dim_v | 同 b | 同 b |
+| g | dq | `dq += ds@k` | seqlen_k (BLOCK_N) | ds 沿 seqlen_k | k 沿 seqlen_k |
+
+**同一 operand 需多套量化（plan 早点名的核心工作量）：**
+
+- **q**：沿 head_dim（a/e，复用 forward 存的 2D-block e4m3）+ 沿 seqlen_q（d，新量化）→ **2 套**
+- **k**：沿 head_dim（a/e，复用 forward）+ 沿 seqlen_k（g，新量化）→ **2 套**
+- **do**：沿 head_dim_v（b/f）+ 沿 seqlen_q（c）→ **2 套**（均在 backward 入口/kernel 内新量化）
+- **v**：仅 head_dim_v（b/f，复用 forward）→ 1 套
+- **p / ds**：kernel 内现算现量化，沿各自 reduction 轴（p 沿 seqlen_q；ds 沿 seqlen_q 供 d、沿 seqlen_k 供 g → ds 2 套）
+
+**2D-block vs 1D-block 轴规则（沿用 forward 已定的约定，避免再拍脑袋）：**
+
+- reduction 轴 = **head_dim / head_dim_v** 的 operand → **2D-block**（对齐 forward Q/K/V 的 `is_2d_block=True, axis=-1`）
+- reduction 轴 = **seqlen_q / seqlen_k** 的 operand → **1D-block 沿该 seqlen 轴**（对齐 forward P 沿 `BLOCK_N` 的 `IS_2D_BLOCK=False`）
+
+**落地顺序（先参照后 kernel，不盲写）：**
+
+1. **先写阶段2 PyTorch 参照**（`mxfp8_attention_backward_reference_stage2`）：把上表 7 个 dot 的 operand 按 2D/1D 轴规则做 quantize→dequantize，再 fp32 matmul（数值上模拟 `dot_scaled`）。**不含 `tl.dot_scaled`，MI250 / CPU 即可跑**，对 bf16 SDPA autograd 度量 dQ/dK/dV。作用有二：① 先探清全 e4m3 grad 的数值可行性（§0 underflow 风险，若这步就不过关 → 直接切 e5m2，不必等硬件）；② 成为 kernel 的**验收合同**。
+2. **再改 kernel**：逐 dot 换 `tl.dot_scaled` + 接入上述量化（backward 入口补 do 两套量化、q/k 的 seqlen 轴量化；p/ds kernel 内 `_calculate_scales`+`_quantize_fp8`）。
+3. **CDNA4 验收**：kernel vs 步骤1 参照（隔离移植 bug）+ vs bf16 SDPA autograd（端到端量化误差）。
+
+> ⚠️ 阶段2 的 kernel 改动在 MI250 上**一行都验不了**（无 `tl.dot_scaled`）。步骤1 的 PyTorch 参照是这段"盲写期"唯一能拿到的数值信号，必须先做。
+
 ### 9.4 save_for_backward 清单
 
 forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`（确保 backward 三个 kernel 所需张量齐全，避免中途改 forward 签名）。
@@ -347,6 +384,17 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 
 **潜伏坑（非 bug，记录备查）：** backward kernel 的 causal 用 **bottom-right**（`col_offset = N_CTX_Q - N_CTX_K`，与 forward kernel 一致），黄金参照用 **top-left**。当前 `test_cases` 全是方阵（seqlen_q==seqlen_kv），两者等价故测不出差异；若日后加**非方阵 causal** 用例，kernel 与参照会对不上，需统一对齐方式。
 
+### 10.1quater 截至 2026-07-15（阶段2 数值先探路，全 e4m3 判定可行）
+
+**已落地（代码）+ 已于 MI250 验：**
+
+- **阶段2 PyTorch 参照** `mxfp8_attention_backward_reference_stage2`（`tests/unittest/mxfp8/utils.py`）：按 §9.5 的 7-dot 量化轴表，把每个 backward matmul 的 operand 沿其 reduction 轴做 qdq（head_dim 轴 2D-block、seqlen 轴 1D-block），fp32 matmul 模拟 `tl.dot_scaled`。不含 `tl.dot_scaled`，MI250/CPU 可跑。
+- **测试** `test_backward_stage2_reference_matches_sdpa`（stage-2 参照 vs autograd fp32 SDPA）：MI250 **6/6 passed**。
+
+**数值结论（关键决策依据）：** 全 e4m3 backward 对 SDPA 的误差——**dQ/dK SNR≈23.3 dB、cossim≈0.9977；dV SNR≈25 dB、cossim≈0.9985**。相比阶段1（只量化 Q/K/V，SNR≈55dB），额外量化 dO/P/dS 把 SNR 拉到 ~23dB，但 cossim 稳在 0.998——**未出现 §0 担心的 dP/dS 长尾 underflow 崩盘**。⇒ **全 e4m3 backward 判定可行，不预防性切 e5m2**；e5m2 仍作为 §9.3 兜底保留。测试阈值据此标定为 `cossim>0.995`/`SNR>18`（留裕度）。
+
+**下一步：** 按 §9.5 步骤2 改 kernel（逐 dot 换 `tl.dot_scaled` + 接量化轴），以本参照为验收合同，待 CDNA4 做步骤3 验收。
+
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架已用高精度 bf16 `tl.dot` 接通（入口反量化 e4m3，MI250 可跑），阶段2 再逐 dot 换 `tl.dot_scaled` + 沿 reduction 轴 MX 量化（待 CDNA4）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，forward/backward 均有纯 PyTorch 黄金参照（forward Layer 1 已于 MI250 验 6/6；backward 两层已于 MI250 验 6/6 + 7/7，SNR≈55dB）。真正风险集中在阶段2 的 5-dot MX scale 轴对齐（待 CDNA4）。
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架已用高精度 bf16 `tl.dot` 接通（入口反量化 e4m3，MI250 可跑），阶段2 再逐 dot 换 `tl.dot_scaled` + 沿 reduction 轴 MX 量化（待 CDNA4）。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**，forward/backward 均有纯 PyTorch 黄金参照（forward Layer 1 已于 MI250 验 6/6；backward 阶段1 两层 6/6 + 7/7 SNR≈55dB；backward 阶段2 全量化参照 vs SDPA 6/6，cossim≈0.998/SNR≈23dB → **全 e4m3 判定可行**）。阶段2 kernel（逐 dot 换 `tl.dot_scaled`）待 CDNA4，以阶段2 参照为验收合同。

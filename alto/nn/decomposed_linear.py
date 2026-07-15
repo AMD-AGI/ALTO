@@ -35,6 +35,20 @@ class DecomposedLinear(Module):
         self.v = nn.Parameter(torch.empty(self.in_features, config.lora_rank))
         self.sigma = nn.Parameter(torch.empty(config.lora_rank))
 
+    @classmethod
+    def from_linear(cls, linear: nn.Linear, lora_rank: int = 32) -> "DecomposedLinear":
+        config = cls.Config(
+            in_features=linear.in_features,
+            out_features=linear.out_features,
+            bias=linear.bias is not None,
+            lora_rank=lora_rank,
+        )
+        module = cls(config)
+        module.weight.data.copy_(linear.weight.data)
+        if linear.bias is not None:
+            module.bias.data.copy_(linear.bias.data)
+        return module
+
     def forward(self, input):
         lora_update = (input @ self.v) * self.sigma
         y = F.linear(input, self.weight) + lora_update @ self.u

@@ -41,7 +41,7 @@ def test_decomposed_linear(in_features, out_features, bias, lora_rank):
 @pytest.mark.parametrize("precision", ["mxfp4"])
 def test_decomposed_linear_quantization(in_features, out_features, bias, lora_rank, precision):
     STD = 0.1
-    decomposed_linear = DecomposedLinear(in_features, out_features, bias, lora_rank).to("cuda")
+    decomposed_linear = DecomposedLinear(DecomposedLinear.Config(in_features=in_features, out_features=out_features, bias=bias, lora_rank=lora_rank)).to("cuda")
     decomposed_linear.weight.data.normal_(mean=0, std=STD)
     if bias:
         decomposed_linear.bias.data.normal_(mean=0, std=STD)

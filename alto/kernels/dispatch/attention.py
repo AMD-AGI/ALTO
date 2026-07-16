@@ -6,6 +6,7 @@ import torch
 from torchtitan.models.common.attention import (ScaledDotProductAttentionWrapper)
 
 from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
+from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
 from .config import TrainingOpConfig
 
 __all__ = ["LPScaledDotProductAttentionWrapper"]
@@ -20,6 +21,8 @@ class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
 
         if isinstance(config, TrainingOpConfig) and config.precision == "mxfp4":
             self.attn_func = triton_attention_mxfp4
+        elif isinstance(config, TrainingOpConfig) and config.precision == "mxfp8_e4m3":
+            self.attn_func = triton_attention_mxfp8
         else:
             raise ValueError(f"Unsupported SDPA config: {config}")
 

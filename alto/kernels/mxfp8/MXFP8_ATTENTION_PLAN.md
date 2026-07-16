@@ -441,6 +441,24 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 - **A1 kernel `tl.dot_scaled` + 2D-scale 广播待 CDNA4 验**；`_load_scale_sq`（seqlen 轴广播）全仓无先例，最大盲区。
 - padded head_dim（如 192）的 scale mask 仅基础兜底，CDNA4 bring-up 时重点盯。
 
+### 10.1septies 截至 2026-07-16（A1 golden reference 已写并验、dispatch 已接）
+
+**A1 参照（stage-2 全量化）：** 在 `tests/unittest/mxfp8/utils.py` 加
+`mxfp8_attention_backward_reference_stage2`——q/k/v 单份 2D-block dequant 全程复用（A1，**零 seqlen 重量化、无双重量化**），只有 dO/P/dS 现场 1D per-row 量化，按 §9.5 各 dot 的 reduction 轴。纯 fp32 matmul、无 `tl.dot_scaled`，MI250/CPU 可跑。
+
+**测试：**
+| 检查 | 结果 |
+|---|---|
+| `test_backward_stage2_reference_matches_sdpa`（A1 参照 vs bf16 SDPA autograd，MI250） | ✅ 6/6，dQ/dK≈23.2dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985（无双重量化，符合/略优于已删 option-A 的 ≈23dB 基线） |
+| `test_backward_kernel_matches_reference`（A1 kernel vs A1 参照，CDNA4-only） | ⏳ 已写、待 CDNA4；MI250 上 `tl.dot_scaled` 编不过（预期，既有限制） |
+| 全参照套件（纯 PyTorch） | ✅ 18 passed；14 failed 全是 fwd/bwd kernel 的 `tl.dot_scaled` gfx90a 编译失败（既有限制、非本次改动） |
+
+**dispatch：** `alto/kernels/dispatch/attention.py` 加 `precision == "mxfp8_e4m3"` 分支 → `triton_attention_mxfp8`（与 mxfp4 同 kwargs 调用路径，签名兼容）。
+
+**仍待办：**
+- **CDNA4 验收**：A1 kernel vs A1 参照（隔离移植 bug）+ vs bf16 SDPA autograd（端到端量化误差）；`_load_scale_sq`（seqlen 轴广播）全仓无先例，最大盲区。
+- padded head_dim（如 192）的 scale mask 仅基础兜底，CDNA4 bring-up 时重点盯。
+
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA 于 MI250 验 6/6（阶段2 全量化参照 vs SDPA 曾 6/6、cossim≈0.998/SNR≈23dB，已随 A 删除，A1 参照待补）。**A1 kernel 的 `tl.dot_scaled` + 2D-scale 广播在 MI250 编不了、当前无 A1 参照，正确性完全待 CDNA4 + A1 参照**（`_load_scale_sq` 为最大盲区）。
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA、**A1 stage-2 全量化参照 vs SDPA** 均于 MI250 验 6/6（A1：dQ/dK≈23dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985）；dispatch 已接 `mxfp8_e4m3`。**A1 kernel 的 `tl.dot_scaled` + 2D-scale 广播在 MI250 编不了，kernel 正确性完全待 CDNA4（kernel vs A1 参照已写好待跑）**（`_load_scale_sq` 为最大盲区）。

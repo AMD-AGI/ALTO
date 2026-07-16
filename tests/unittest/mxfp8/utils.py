@@ -377,3 +377,104 @@ def mxfp8_attention_backward_reference(
         dv = dv_full
 
     return dq, dk, dv
+
+
+def mxfp8_attention_backward_reference_stage2(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    do: torch.Tensor,
+    o: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    sm_scale: float,
+    causal: bool,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pure-PyTorch golden reference for the **Stage-2 (A1)** MXFP8 backward.
+
+    Where Stage-1 (``mxfp8_attention_backward_reference``) runs every backward
+    matmul in fp32 on the dequantized Q/K/V, Stage-2 additionally quantizes the
+    backward-only tensors (dO / P / dS) along each dot's reduction axis — a
+    numerical model of what ``tl.dot_scaled`` does in the kernel. A kernel-vs-this
+    gap isolates Triton port bugs from mxfp8 error; a this-vs-bf16-SDPA gap
+    measures the full mxfp8 backward quantization error. No ``tl.dot_scaled``
+    here (plain fp32 matmul on dequantized operands), so it runs on CPU / MI250.
+
+    **A1 operand source (2026-07-16 decision):** the kernel reuses the forward's
+    saved e4m3 q/k/v + their 2D-block scale directly in *every* dot — including
+    the seqlen-reduction dots — with no re-quantization. So this reference uses a
+    single 2D-block dequant ``q_dq``/``k_dq``/``v_dq`` everywhere (no double
+    quantization along seqlen, unlike the retired option-A reference). Only
+    dO/P/dS are quantized fresh (1D per-row along their reduction axis), since the
+    forward never saw them.
+
+    Quantization axis per dot (plan §9.5)::
+
+        S  = Q  @ Kᵀ      reduction head_dim   : Q,K   = 2D-block dequant (reuse)
+        dP = dO @ Vᵀ      reduction head_dim_v : dO 1D axis=-1 ; V 2D reuse
+        dV = Pᵀ @ dO      reduction seqlen_q   : P,dO  1D along sq
+        dK = dSᵀ @ Q      reduction seqlen_q   : dS 1D along sq ; Q 2D reuse
+        dQ = dS @ K       reduction seqlen_k   : dS 1D along sk ; K 2D reuse
+
+    Same top-left causal mask as the other references (matches SDPA on bhsd), so
+    causal tests must keep ``seqlen_q == seqlen_k``. Args mirror
+    ``mxfp8_attention_backward_reference``; ``o`` / ``softmax_lse`` must be the
+    forward-reference outputs. Returns ``(dq, dk, dv)``.
+    """
+    b, hq, sq, dqk = q.shape
+    _, hk, sk, dvv = v.shape
+    assert hq % hk == 0, f"nheads_q ({hq}) must be a multiple of nheads_k ({hk})"
+    n_rep = hq // hk
+
+    def qdq(x, axis):
+        return _mxfp8_qdq(x.to(torch.float32), axis=axis, is_2d_block=False, block_size=block_size)
+
+    # q/k/v: single 2D-block dequant, reused in every dot (A1, no re-quant).
+    q_dq = _mxfp8_qdq(q, axis=-1, is_2d_block=True, block_size=block_size).to(torch.float32)
+    k_dq = _mxfp8_qdq(k, axis=-1, is_2d_block=True, block_size=block_size).to(torch.float32)
+    v_dq = _mxfp8_qdq(v, axis=-1, is_2d_block=True, block_size=block_size).to(torch.float32)
+    if n_rep > 1:
+        k_dq = k_dq.repeat_interleave(n_rep, dim=1)
+        v_dq = v_dq.repeat_interleave(n_rep, dim=1)
+
+    do_f = do.to(torch.float32)
+    o_f = o.to(torch.float32)
+    lse = softmax_lse.to(torch.float32)
+
+    # S -> P (recompute from saved lse; P feeding dS is elementwise, not quantized).
+    s = torch.matmul(q_dq, k_dq.transpose(-1, -2)) * sm_scale
+    if causal:
+        q_pos = torch.arange(sq, device=q.device)
+        k_pos = torch.arange(sk, device=q.device)
+        allowed = k_pos[None, :] <= q_pos[:, None]  # top-left
+        s = torch.where(allowed[None, None, :, :], s, torch.full_like(s, float("-inf")))
+    p = torch.exp(s - lse[..., None])
+    p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # dP = dO @ Vᵀ (reduction head_dim_v): dO 1D along head_dim_v, V 2D reuse.
+    do_hd = qdq(do_f, axis=-1)
+    dp = torch.matmul(do_hd, v_dq.transpose(-1, -2))
+    delta = (o_f * do_f).sum(dim=-1)
+    ds = p * (dp - delta[..., None])  # fp32 elementwise
+
+    # dV = Pᵀ @ dO (reduction seqlen_q): P and dO 1D along sq.
+    p_sq = qdq(p, axis=-2)
+    do_sq = qdq(do_f, axis=-2)
+    dv_full = torch.matmul(p_sq.transpose(-1, -2), do_sq)
+
+    # dQ = sm_scale * dS @ K (reduction seqlen_k): dS 1D along sk, K 2D reuse.
+    ds_sk = qdq(ds, axis=-1)
+    dq = sm_scale * torch.matmul(ds_sk, k_dq)
+
+    # dK = sm_scale * dSᵀ @ Q (reduction seqlen_q): dS 1D along sq, Q 2D reuse.
+    ds_sq = qdq(ds, axis=-2)
+    dk_full = sm_scale * torch.matmul(ds_sq.transpose(-1, -2), q_dq)
+
+    if n_rep > 1:
+        dk = dk_full.view(b, hk, n_rep, sk, dqk).sum(dim=2)
+        dv = dv_full.view(b, hk, n_rep, sk, dvv).sum(dim=2)
+    else:
+        dk = dk_full
+        dv = dv_full
+
+    return dq, dk, dv

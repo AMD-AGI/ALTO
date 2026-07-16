@@ -28,6 +28,7 @@ from .utils import (
     calc_cossim,
     mxfp8_attention_forward_reference,
     mxfp8_attention_backward_reference,
+    mxfp8_attention_backward_reference_stage2,
 )
 # Reuse the committed shape grid so Layer 2 stays in lock-step with Layer 3.
 from .test_mxfp8_attention import AttnConfig, test_cases
@@ -186,3 +187,112 @@ def test_backward_reference_matches_sdpa(config, causal):
         snr = calc_snr(ref, got)
         assert sim > 0.97, f"{name} golden-vs-sdpa cosine-sim too low: {sim}"
         assert snr > 8, f"{name} golden-vs-sdpa SNR too low: {snr}"
+
+
+# ---------------------------------------------------------------------------
+# Backward Stage-2 (A1) Layer 1 — full-quant reference vs autograd fp32 SDPA
+#   Adds dO/P/dS quantization on top of Stage-1 (a numerical model of the
+#   kernel's tl.dot_scaled). q/k/v reuse the forward 2D-block dequant (A1, no
+#   double quant). The gap vs SDPA is the *full* mxfp8 backward quant error —
+#   the signal that all-e4m3 backward is viable. Pure PyTorch, runs on CPU/MI250.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("config", reference_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_backward_stage2_reference_matches_sdpa(config, causal):
+    """Stage-2 (A1, all-operand-quantized) backward reference vs autograd fp32 SDPA."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float32 if device == "cpu" else torch.bfloat16
+    n_rep = config.num_head_q // config.num_head_kv
+
+    q, k, v = _make_qkv_bhsd(2, config, device, dtype)
+    do = _make_do_bhsd(2, config, device, dtype)
+    sm_scale = config.head_dim_qk**(-0.5)
+
+    qg = q.clone().requires_grad_(True)
+    kg = k.clone().requires_grad_(True)
+    vg = v.clone().requires_grad_(True)
+    o_auto = torch.nn.functional.scaled_dot_product_attention(
+        qg, kg, vg, is_causal=causal, scale=sm_scale, enable_gqa=n_rep > 1)
+    o_auto.backward(do)
+
+    o_ref, lse_ref = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal)
+    dq, dk, dv = mxfp8_attention_backward_reference_stage2(q, k, v, do, o_ref, lse_ref, sm_scale, causal)
+
+    rows = []
+    for name, ref, got in [("dQ", qg.grad, dq), ("dK", kg.grad, dk), ("dV", vg.grad, dv)]:
+        rows.append([f"{name} (stage2 vs sdpa)", calc_snr(ref, got), calc_cossim(ref, got)])
+    print()
+    print(tabulate(rows, headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
+
+    # A1 has no double-quant, so it should land at/above the retired option-A
+    # baseline (cossim~0.998 / SNR~23-26 dB). Thresholds keep margin.
+    for name, ref, got in [("dQ", qg.grad, dq), ("dK", kg.grad, dk), ("dV", vg.grad, dv)]:
+        sim = calc_cossim(ref, got)
+        snr = calc_snr(ref, got)
+        assert sim > 0.995, f"{name} stage2-vs-sdpa cosine-sim too low: {sim}"
+        assert snr > 18, f"{name} stage2-vs-sdpa SNR too low: {snr}"
+
+
+# ---------------------------------------------------------------------------
+# Backward Layer 2 — kernel vs Stage-2 (A1) golden reference
+#   The A1 backward kernel runs tl.dot_scaled in-kernel, so this requires CDNA4
+#   (like the forward Layer 2). Calls the backward op directly with the
+#   forward-reference o/lse (bypassing the forward kernel) and compares to the
+#   Stage-2 reference (same full quantization both sides -> gap = port bugs).
+# ---------------------------------------------------------------------------
+
+@cuda_only
+@pytest.mark.parametrize("config", test_cases)
+@pytest.mark.parametrize("causal", [True])
+def test_backward_kernel_matches_reference(config, causal):
+    """A1 backward kernel vs Stage-2 golden reference — isolates port bugs. CDNA4-only."""
+    from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    q, k, v = _make_qkv_bhsd(4, config, device, dtype)
+    do = _make_do_bhsd(4, config, device, dtype)
+    sm_scale = config.head_dim_qk**(-0.5)
+
+    o_ref, lse_ref = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal)
+
+    # Quantize operands the way the forward autograd does, then run the backward op.
+    q8, q_scale = convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    k8, k_scale = convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    v8, v_scale = convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+
+    dq_k, dk_k, dv_k = torch.ops.alto.attention_mxfp8_backward_triton_impl(
+        do.contiguous(),
+        q8.contiguous(),
+        k8.contiguous(),
+        v8.contiguous(),
+        o_ref.contiguous(),
+        lse_ref.contiguous(),
+        q_scale,
+        k_scale,
+        v_scale,
+        sm_scale=sm_scale,
+        causal=causal,
+        layout="bhsd",
+        cu_seqlens_q=0,
+        cu_seqlens_k=0,
+        max_seqlen_q=config.seqlen_q,
+        max_seqlen_k=config.seqlen_kv,
+        use_exp2=True,
+    )
+    dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(q, k, v, do, o_ref, lse_ref, sm_scale, causal)
+
+    rows = []
+    pairs = [("dQ", dq_r, dq_k), ("dK", dk_r, dk_k), ("dV", dv_r, dv_k)]
+    for name, ref, got in pairs:
+        rows.append([f"{name} (kernel vs golden)", calc_snr(ref, got), calc_cossim(ref, got)])
+    print()
+    print(tabulate(rows, headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
+
+    # Threshold placeholder — calibrate on the first CDNA4 run.
+    for name, ref, got in pairs:
+        sim = calc_cossim(ref, got)
+        snr = calc_snr(ref, got)
+        assert sim > 0.99, f"{name} kernel-vs-golden cosine-sim too low: {sim}"
+        assert snr > 25, f"{name} kernel-vs-golden SNR too low: {snr}"

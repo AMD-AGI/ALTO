@@ -1810,20 +1810,18 @@ def attention_mxfp8_backward_triton_impl(
     max_seqlen_k: Optional[int],
     use_exp2: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """MXFP8 flash-attention backward (stage-2, ``tl.dot_scaled``).
+    """MXFP8 flash-attention backward (stage-2 / A1, ``tl.dot_scaled``).
 
-    The saved e4m3 q/k/v are dequantized back to bf16 at entry (the exact inputs
-    the forward consumed; option A — no extra fwd memory), then **each of the 7
-    backward dots quantizes its two operands in-kernel with 1D per-row MX scales
-    along that dot's reduction axis** and runs ``tl.dot_scaled`` (plan §9.5).
-    This uniform per-row layout is exactly what ``tl.dot_scaled`` consumes (no
-    broadcast), and matches ``mxfp8_attention_backward_reference_stage2``.
+    A1 operand source: the forward-saved e4m3 q/k/v and their compact 2D-block
+    scales are passed straight in and reused in *every* dot (no entry dequant, no
+    re-quantization of q/k/v). For head_dim-reduction dots the 2D scale already
+    groups along the reduction axis; for seqlen-reduction dots the same compact
+    2D scale is re-indexed (``_load_scale_sq``) to broadcast per reduction row.
+    Only the backward-only tensors dO/P/dS are quantized in-kernel (1D per-row
+    along each dot's reduction axis), then fed to ``tl.dot_scaled`` (plan §9.5).
+    Matches ``mxfp8_attention_backward_reference_stage2``.
 
     Requires CDNA4 (native ``tl.dot_scaled``).
-
-    A1 (AB decision): the saved e4m3 q/k/v and their compact 2D-block scales are
-    passed straight into the kernels, which reuse them in every dot (no entry
-    dequant, no re-quantization of q/k/v). Only dO/P/dS are quantized in-kernel.
     """
     q = q.contiguous()
     k = k.contiguous()

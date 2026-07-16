@@ -20,7 +20,9 @@ This is a mechanical port of ``triton_flash_attention_mxfp4.py``:
 The scale layout is identical to the FP4 kernel (uint8, ``[.., dim/32]``, 2D
 block), so all scale pointer arithmetic carries over unchanged.
 
-Forward only, matching the FP4 reference (backward is not implemented).
+Forward is a mechanical port of the FP4 kernel; backward is implemented from
+the blockwise-fp8 backward structure with per-reduction-axis MXFP8 scales
+(stage-2, ``tl.dot_scaled``; see the plan §9.5 and the backward section below).
 """
 from typing import Tuple, Optional
 import os
@@ -34,7 +36,6 @@ from .mxfp8_quantization import (
     is_cdna4,
     _calculate_scales,
     _quantize_fp8,
-    convert_from_mxfp8,
 )
 
 fwd_torch_dtype: tl.constexpr = torch.bfloat16
@@ -1027,6 +1028,127 @@ RCP_LN2 = tl.constexpr(1.4426950408889634)
 
 
 @triton.jit
+def _mx_quant(
+    x,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    IS_2D_BLOCK: tl.constexpr,
+    USE_ASM: tl.constexpr,
+):
+    """Quantize a [BM, BN] tile to e4m3 with MX block scales along the last axis.
+
+    Wraps ``_calculate_scales`` + ``_quantize_fp8`` with the e4m3 constants, so
+    each backward dot can quantize an operand along its reduction axis (which the
+    caller places last, transposing the tile when needed). ``IS_2D_BLOCK=True``
+    groups both axes (head_dim reduction, like fwd Q/K/V); ``False`` is a 1D block
+    along the last axis (seqlen reduction, like fwd P). Non-SR path, so philox is
+    unused.
+    """
+    scales = _calculate_scales(
+        x,
+        BLOCK_M=BM,
+        BLOCK_N=BN,
+        QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+        target_max_pow2=E4M3_TARGET_MAX_POW2,
+        mbits=E4M3_MBITS,
+        IS_2D_BLOCK=IS_2D_BLOCK,
+    )
+    xq = _quantize_fp8(
+        x,
+        scales,
+        philox_seed,
+        0,
+        BLOCK_M=BM,
+        BLOCK_N=BN,
+        QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+        FP8_FORMAT=E4M3_FORMAT_ID,
+        IS_2D_BLOCK=IS_2D_BLOCK,
+        USE_ASM=USE_ASM,
+        USE_SR=False,
+    )
+    return xq, scales
+
+
+# Backward operands split into two families (A1, plan §9.5 / AB decision):
+#
+#   * Q/K/V come from the forward pass as saved e4m3 + a compact 2D-block scale
+#     ``[.., seqlen/32, head_dim/32]``. A1 **reuses** that exact quantization —
+#     no dequant, no re-quantization. Each dot rebuilds the scale tile the
+#     ``tl.dot_scaled`` layout wants (``[outer, reduction/32]``) directly from the
+#     saved compact scale via pointer index math (the same broadcast the forward
+#     kernel uses for QK). Because a 32x32 block shares one scale, the same saved
+#     e4m3 values + tile serve both the head_dim-reduction dots (a/b/e/f) and the
+#     seqlen-reduction dots (d/g); only the broadcast axis differs.
+#   * dO/P/dS are backward-only tensors the forward never saw, so they are
+#     quantized fresh in-kernel with 1D per-row scales (``IS_2D_BLOCK=False``)
+#     along their reduction axis — the canonical layout ``tl.dot_scaled`` eats
+#     with no broadcast.
+_MX_2D = tl.constexpr(False)
+
+
+@triton.jit
+def _load_scale_hd(
+    scale_base,
+    offs_outer,
+    stride_sg,
+    stride_dg,
+    N_CTX,
+    SCALE_D: tl.constexpr,
+    SCALE_ACTUAL_D: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+):
+    """Rebuild a ``[len(offs_outer), SCALE_D]`` scale tile for a **head_dim**-
+    reduction dot from the saved compact 2D-block scale.
+
+    ``offs_outer`` indexes the outer (token/seqlen) rows; each maps to compact
+    seqlen-group ``offs_outer // QUANT_BLOCK_SIZE``. ``SCALE_D = head_dim/32``
+    columns index the reduction (head_dim) groups directly. This mirrors the
+    forward kernel's ``qs_ptrs`` broadcast (a 32-row block shares one scale).
+    Out-of-range rows (past ``N_CTX``) and padded head groups load a neutral
+    scale; they only ever multiply masked-to-zero e4m3 values.
+    """
+    offs_dg = tl.arange(0, SCALE_D)
+    mask = (offs_outer[:, None] < N_CTX) & (offs_dg[None, :] < SCALE_ACTUAL_D)
+    ptrs = (scale_base + (offs_outer[:, None] // QUANT_BLOCK_SIZE) * stride_sg +
+            offs_dg[None, :] * stride_dg)
+    return tl.load(ptrs, mask=mask, other=127)
+
+
+@triton.jit
+def _load_scale_sq(
+    scale_base,
+    start_outer,
+    offs_d,
+    stride_sg,
+    stride_dg,
+    N_CTX,
+    BLOCK_OUTER: tl.constexpr,
+    SCALE_ACTUAL_D: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+):
+    """Rebuild a ``[len(offs_d), BLOCK_OUTER/32]`` scale tile for a **seqlen**-
+    reduction dot from the same saved compact 2D-block scale.
+
+    This is the transpose-symmetric reuse (AB decision A1): the reduction axis is
+    now the seqlen block ``[start_outer, start_outer+BLOCK_OUTER)``, grouped by 32
+    into ``BLOCK_OUTER/32`` columns, while ``offs_d`` (head_dim rows) map to
+    compact head_dim-group ``offs_d // QUANT_BLOCK_SIZE`` and are broadcast across
+    the 32 rows of each group. Element ``[d, sg] = scale[start_outer/32 + sg,
+    d/32]`` — the same 32x32 block scale the head_dim path reads, indexed for the
+    other axis.
+    """
+    n_sg: tl.constexpr = BLOCK_OUTER // QUANT_BLOCK_SIZE
+    offs_sg = tl.arange(0, n_sg)
+    seq_group = start_outer // QUANT_BLOCK_SIZE + offs_sg
+    mask = (offs_d[:, None] < SCALE_ACTUAL_D * QUANT_BLOCK_SIZE) & \
+           ((seq_group[None, :] * QUANT_BLOCK_SIZE) < N_CTX)
+    ptrs = (scale_base + seq_group[None, :] * stride_sg +
+            (offs_d[:, None] // QUANT_BLOCK_SIZE) * stride_dg)
+    return tl.load(ptrs, mask=mask, other=127)
+
+
+@triton.jit
 def _bwd_preprocess(
     Out,
     DO,
@@ -1084,10 +1206,15 @@ def _bwd_preprocess(
 
 @triton.jit
 def _attn_bwd_dkdv_inner(
-    k,
-    v,
+    kt_fp8,
+    ks_hd,
+    vt_fp8,
+    vs_hd,
     dk,
     dv,
+    q_scale_base,
+    stride_qsm,
+    stride_qsk,
     offs_d_qk,
     offs_d_v,
     offs_n,
@@ -1104,6 +1231,10 @@ def _attn_bwd_dkdv_inner(
     stride_ldm,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    BLOCK_DMODEL_QK: tl.constexpr,
+    BLOCK_DMODEL_V: tl.constexpr,
+    SCALE_BLOCK_DMODEL_QK: tl.constexpr,
+    SCALE_ACTUAL_BLOCK_DMODEL_QK: tl.constexpr,
     sm_scale: tl.constexpr,
     lo,
     num_block_m: tl.constexpr,
@@ -1111,8 +1242,19 @@ def _attn_bwd_dkdv_inner(
     N_CTX_Q: tl.constexpr,
     N_CTX_K: tl.constexpr,
     CAUSAL: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    USE_ASM: tl.constexpr,
 ):
-    """Accumulate dk, dv over query blocks for one key block. k,v come in transposed."""
+    """Accumulate dk, dv over query blocks for one key block (A1, dot_scaled).
+
+    ``kt_fp8`` / ``vt_fp8`` are the saved-e4m3 key/value tiles transposed to
+    ``[head_dim, BLOCK_N]`` (fixed across the m-loop); ``ks_hd`` / ``vs_hd`` are
+    their ``[BLOCK_N, head_dim/32]`` scales rebuilt from the forward's compact 2D
+    scale by the caller. ``q`` is likewise the **saved e4m3** and is reused with
+    no re-quantization: dot a reads its head_dim-grouped scale, dot d reads the
+    same 2D block scale re-indexed along seqlen. Only dO/P/dS are quantized fresh
+    (plan §9.5 dots a/b/c/d).
+    """
     for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
         offs_m = start_m + tl.arange(0, BLOCK_M)
         q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d_qk[None, :] * stride_qk
@@ -1122,9 +1264,12 @@ def _attn_bwd_dkdv_inner(
         q_mask = mask_m[:, None] & mask_d_qk[None, :]
         do_mask = mask_m[:, None] & mask_d_v[None, :]
 
+        # Saved e4m3 q — reused directly, no re-quantization (A1).
         q = tl.load(q_ptrs, mask=q_mask, other=0.0)
-        # TODO(stage2): dot_scaled(q[e4m3, scale//head_dim], k[e4m3, scale//head_dim]); reduction axis = head_dim_qk.
-        qk = tl.dot(q, k, out_dtype=tl.float32)
+        # dot a: qk = q @ kᵀ, reduction = head_dim. Reuse q's saved head_dim scale.
+        qs_hd = _load_scale_hd(q_scale_base, offs_m, stride_qsm, stride_qsk, N_CTX_Q,
+                               SCALE_BLOCK_DMODEL_QK, SCALE_ACTUAL_BLOCK_DMODEL_QK, QUANT_BLOCK_SIZE)
+        qk = tl.dot_scaled(q, qs_hd, "e4m3", kt_fp8, ks_hd, "e4m3", out_dtype=tl.float32)
 
         if CAUSAL:
             # Bottom-right causal, matches the forward kernel (offs_n_causal = offs_n + N_CTX_Q - N_CTX_K).
@@ -1142,18 +1287,26 @@ def _attn_bwd_dkdv_inner(
             p = tl.math.exp(qk - l_i[:, None])
 
         do = tl.load(do_ptrs, mask=do_mask, other=0.0)
-        # TODO(stage2): dot_scaled(do[e4m3, scale//head_dim_v], v[e4m3, scale//head_dim_v]); reduction axis = head_dim_v.
-        dp = tl.dot(do, v, out_dtype=tl.float32)
+        # dot b: dp = do @ vᵀ, reduction = head_dim_v. dO is fresh -> quantize here.
+        do_fp8_hd, dos_hd = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+        dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", vt_fp8, vs_hd, "e4m3", out_dtype=tl.float32)
 
         d_ptrs = d_offset + offs_m * stride_ldm
         Di = tl.load(d_ptrs, mask=mask_m, other=0.0)
         ds = p * (dp - Di[:, None])
-        ds = ds.to(q.dtype)
 
-        # TODO(stage2): dot_scaled(p^T[e4m3, scale//BLOCK_M], do[e4m3, scale//BLOCK_M]); reduction axis = seqlen_q.
-        dv += tl.dot(tl.trans(p.to(k.dtype)), do, out_dtype=tl.float32)
-        # TODO(stage2): dot_scaled(ds^T[e4m3, scale//BLOCK_M], q[e4m3, scale//BLOCK_M]); reduction axis = seqlen_q.
-        dk += tl.dot(tl.trans(ds), q, out_dtype=tl.float32)
+        # dot c: dv += pᵀ @ do, reduction = seqlen_q (BLOCK_M). P/dO fresh -> quantize
+        # 1D-block along BLOCK_M (their last axis after transpose).
+        pt_fp8, ps_c = _mx_quant(tl.trans(p), BLOCK_N, BLOCK_M, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+        do_t_fp8, dos_c = _mx_quant(tl.trans(do), BLOCK_DMODEL_V, BLOCK_M, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+        dv += tl.dot_scaled(pt_fp8, ps_c, "e4m3", tl.trans(do_t_fp8), dos_c, "e4m3", out_dtype=tl.float32)
+
+        # dot d: dk += dsᵀ @ q, reduction = seqlen_q (BLOCK_M). dS fresh (1D along
+        # BLOCK_M); q reuses the saved 2D block scale re-indexed along seqlen.
+        dst_fp8, dss_d = _mx_quant(tl.trans(ds), BLOCK_N, BLOCK_M, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+        qs_sq = _load_scale_sq(q_scale_base, start_m, offs_d_qk, stride_qsm, stride_qsk, N_CTX_Q,
+                               BLOCK_M, SCALE_ACTUAL_BLOCK_DMODEL_QK, QUANT_BLOCK_SIZE)
+        dk += tl.dot_scaled(dst_fp8, dss_d, "e4m3", q, qs_sq, "e4m3", out_dtype=tl.float32)
 
     return dk, dv
 
@@ -1163,6 +1316,9 @@ def _bwd_kernel_dkdv(
     Q,
     K,
     V,
+    Q_scale,
+    K_scale,
+    V_scale,
     sm_scale: tl.constexpr,
     DO,
     DK,
@@ -1185,6 +1341,18 @@ def _bwd_kernel_dkdv(
     stride_doh,
     stride_dom,
     stride_dok,
+    stride_qsz,
+    stride_qsh,
+    stride_qsm,
+    stride_qsk,
+    stride_ksz,
+    stride_ksh,
+    stride_ksn,
+    stride_ksk,
+    stride_vsz,
+    stride_vsh,
+    stride_vsn,
+    stride_vsk,
     stride_ldz,
     stride_ldh,
     stride_ldm,
@@ -1205,8 +1373,20 @@ def _bwd_kernel_dkdv(
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    USE_ASM: tl.constexpr,
 ):
-    """One program per (batch*head_k, key block). Parallelizes dk/dv over keys."""
+    """One program per (batch*head_k, key block). Parallelizes dk/dv over keys.
+
+    A1: q/k/v arrive as the forward's saved e4m3 with compact 2D-block scales;
+    the kernel reuses them (no re-quant), rebuilding each dot's scale tile from
+    the saved scale. Only dO/P/dS are quantized fresh (see ``_attn_bwd_dkdv_inner``).
+    """
+    SCALE_BLOCK_DMODEL_QK: tl.constexpr = BLOCK_DMODEL_QK // QUANT_BLOCK_SIZE
+    SCALE_BLOCK_DMODEL_V: tl.constexpr = BLOCK_DMODEL_V // QUANT_BLOCK_SIZE
+    SCALE_ACTUAL_BLOCK_DMODEL_QK: tl.constexpr = ACTUAL_BLOCK_DMODEL_QK // QUANT_BLOCK_SIZE
+    SCALE_ACTUAL_BLOCK_DMODEL_V: tl.constexpr = ACTUAL_BLOCK_DMODEL_V // QUANT_BLOCK_SIZE
+
     off_hz = tl.program_id(0)
     start_n = tl.program_id(1)
     off_z = off_hz // HK
@@ -1226,10 +1406,16 @@ def _bwd_kernel_dkdv(
         N_CTX_Q = max_seqlen_q
         N_CTX_K = max_seqlen_k
 
+    q_scale_start = q_start // QUANT_BLOCK_SIZE
+    k_scale_start = k_start // QUANT_BLOCK_SIZE
+
     q_offset = Q + off_z * stride_qz + off_h_q * stride_qh + q_start * stride_qm
     k_offset = K + off_z * stride_kz + off_h_k * stride_kh + k_start * stride_kn
     v_offset = V + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
     do_offset = DO + off_z * stride_doz + off_h_q * stride_doh + q_start * stride_dom
+    q_scale_base = Q_scale + off_z * stride_qsz + off_h_q * stride_qsh + q_scale_start * stride_qsm
+    k_scale_base = K_scale + off_z * stride_ksz + off_h_k * stride_ksh + k_scale_start * stride_ksn
+    v_scale_base = V_scale + off_z * stride_vsz + off_h_k * stride_vsh + k_scale_start * stride_vsn
     adj_delta = off_z * stride_ldz + off_h_q * stride_ldh + q_start * stride_ldm
     l_offset = LSE + adj_delta
     d_offset = Delta + adj_delta
@@ -1252,20 +1438,31 @@ def _bwd_kernel_dkdv(
 
     k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d_qk[None, :] * stride_kk
     v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d_v[None, :] * stride_vk
-    k = tl.load(k_ptrs, mask=mask_n[:, None] & mask_d_qk[None, :], other=0.0)
-    v = tl.load(v_ptrs, mask=mask_n[:, None] & mask_d_v[None, :], other=0.0)
-    k = tl.trans(k)
-    v = tl.trans(v)
+    # Saved e4m3 k/v reused directly; transpose to [head_dim, BLOCK_N] for the
+    # QK / dP dots (a/b). Scales are rebuilt from the saved compact 2D scale.
+    k_fp8 = tl.load(k_ptrs, mask=mask_n[:, None] & mask_d_qk[None, :], other=0.0)
+    v_fp8 = tl.load(v_ptrs, mask=mask_n[:, None] & mask_d_v[None, :], other=0.0)
+    ks_hd = _load_scale_hd(k_scale_base, offs_n, stride_ksn, stride_ksk, N_CTX_K,
+                           SCALE_BLOCK_DMODEL_QK, SCALE_ACTUAL_BLOCK_DMODEL_QK, QUANT_BLOCK_SIZE)
+    vs_hd = _load_scale_hd(v_scale_base, offs_n, stride_vsn, stride_vsk, N_CTX_K,
+                           SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_V, QUANT_BLOCK_SIZE)
+    kt_fp8 = tl.trans(k_fp8)
+    vt_fp8 = tl.trans(v_fp8)
 
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL_QK], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL_V], dtype=tl.float32)
 
     for _ in range(GROUP_SIZE):
         dk, dv = _attn_bwd_dkdv_inner(
-            k,
-            v,
+            kt_fp8,
+            ks_hd,
+            vt_fp8,
+            vs_hd,
             dk,
             dv,
+            q_scale_base,
+            stride_qsm,
+            stride_qsk,
             offs_d_qk,
             offs_d_v,
             offs_n,
@@ -1282,6 +1479,10 @@ def _bwd_kernel_dkdv(
             stride_ldm,
             BLOCK_M,
             BLOCK_N,
+            BLOCK_DMODEL_QK,
+            BLOCK_DMODEL_V,
+            SCALE_BLOCK_DMODEL_QK,
+            SCALE_ACTUAL_BLOCK_DMODEL_QK,
             sm_scale,
             lo,
             num_block_m,
@@ -1289,9 +1490,12 @@ def _bwd_kernel_dkdv(
             N_CTX_Q,
             N_CTX_K,
             CAUSAL,
+            QUANT_BLOCK_SIZE,
+            USE_ASM,
         )
         q_offset += stride_qh
         do_offset += stride_qh
+        q_scale_base += stride_qsh
         l_offset += stride_ldh
         d_offset += stride_ldh
 
@@ -1306,13 +1510,21 @@ def _bwd_kernel_dkdv(
 @triton.jit
 def _attn_bwd_dq_inner(
     dq,
-    q,
+    q_fp8_hd,
+    qs_hd,
+    do_fp8_hd,
+    dos_hd,
+    k_scale_base,
+    v_scale_base,
+    stride_ksn,
+    stride_ksk,
+    stride_vsn,
+    stride_vsk,
     offs_d_qk,
     offs_d_v,
     offs_m,
     l_i,
     Di,
-    do,
     mask_d_qk,
     mask_d_v,
     k_offset,
@@ -1323,14 +1535,29 @@ def _attn_bwd_dq_inner(
     stride_vk,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    BLOCK_DMODEL_QK: tl.constexpr,
+    BLOCK_DMODEL_V: tl.constexpr,
+    SCALE_BLOCK_DMODEL_QK: tl.constexpr,
+    SCALE_BLOCK_DMODEL_V: tl.constexpr,
+    SCALE_ACTUAL_BLOCK_DMODEL_QK: tl.constexpr,
+    SCALE_ACTUAL_BLOCK_DMODEL_V: tl.constexpr,
     sm_scale: tl.constexpr,
     hi,
     USE_EXP2: tl.constexpr,
     N_CTX_Q: tl.constexpr,
     N_CTX_K: tl.constexpr,
     CAUSAL: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    USE_ASM: tl.constexpr,
 ):
-    """Accumulate dq over key blocks for one query block."""
+    """Accumulate dq over key blocks for one query block (A1, dot_scaled).
+
+    ``q_fp8_hd`` / ``qs_hd`` are the saved-e4m3 q + its head_dim scale (fixed
+    across the n-loop, built once by the caller); ``do_fp8_hd`` / ``dos_hd`` are
+    the fresh-quantized dO. k/v are the saved e4m3 reused with no re-quant: dots
+    e/f read their head_dim scale, dot g reads k's 2D block scale re-indexed along
+    seqlen. Only dS is quantized fresh (plan §9.5 dots e/f/g).
+    """
     if USE_EXP2:
         l_i *= RCP_LN2
 
@@ -1342,11 +1569,14 @@ def _attn_bwd_dq_inner(
 
         k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d_qk[None, :] * stride_kk
         v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d_v[None, :] * stride_vk
+        # Saved e4m3 k/v, reused directly.
         k = tl.load(k_ptrs, mask=mask_k, other=0.0)
         v = tl.load(v_ptrs, mask=mask_v, other=0.0)
 
-        # TODO(stage2): dot_scaled(q[e4m3, scale//head_dim], k^T[e4m3, scale//head_dim]); reduction axis = head_dim_qk.
-        qk = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
+        # dot e: qk = q @ kᵀ, reduction = head_dim. Reuse k's saved head_dim scale.
+        ks_e = _load_scale_hd(k_scale_base, offs_n, stride_ksn, stride_ksk, N_CTX_K,
+                              SCALE_BLOCK_DMODEL_QK, SCALE_ACTUAL_BLOCK_DMODEL_QK, QUANT_BLOCK_SIZE)
+        qk = tl.dot_scaled(q_fp8_hd, qs_hd, "e4m3", tl.trans(k), ks_e, "e4m3", out_dtype=tl.float32)
 
         if CAUSAL:
             col_offset = N_CTX_Q - N_CTX_K
@@ -1360,12 +1590,18 @@ def _attn_bwd_dq_inner(
             qk *= sm_scale
             p = tl.math.exp(qk - l_i[:, None])
 
-        # TODO(stage2): dot_scaled(do[e4m3, scale//head_dim_v], v^T[e4m3, scale//head_dim_v]); reduction axis = head_dim_v.
-        dp = tl.dot(do, tl.trans(v), out_dtype=tl.float32)
+        # dot f: dp = do @ vᵀ, reduction = head_dim_v. Reuse v's saved head_dim scale.
+        vs_f = _load_scale_hd(v_scale_base, offs_n, stride_vsn, stride_vsk, N_CTX_K,
+                              SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_V, QUANT_BLOCK_SIZE)
+        dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", tl.trans(v), vs_f, "e4m3", out_dtype=tl.float32)
         ds = p * (dp - Di[:, None])
-        ds = ds.to(q.dtype)
-        # TODO(stage2): dot_scaled(ds[e4m3, scale//BLOCK_N], k[e4m3, scale//BLOCK_N]); reduction axis = seqlen_k.
-        dq += tl.dot(ds, k, out_dtype=tl.float32)
+
+        # dot g: dq += ds @ k, reduction = seqlen_k (BLOCK_N). dS fresh (1D along
+        # BLOCK_N); k reuses the saved 2D block scale re-indexed along seqlen.
+        ds_fp8, dss_g = _mx_quant(ds, BLOCK_M, BLOCK_N, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+        ks_sk = _load_scale_sq(k_scale_base, start_n, offs_d_qk, stride_ksn, stride_ksk, N_CTX_K,
+                               BLOCK_N, SCALE_ACTUAL_BLOCK_DMODEL_QK, QUANT_BLOCK_SIZE)
+        dq += tl.dot_scaled(ds_fp8, dss_g, "e4m3", k, ks_sk, "e4m3", out_dtype=tl.float32)
 
     return dq
 
@@ -1375,6 +1611,9 @@ def _bwd_kernel_dq(
     Q,
     K,
     V,
+    Q_scale,
+    K_scale,
+    V_scale,
     sm_scale: tl.constexpr,
     DO,
     DQ,
@@ -1396,6 +1635,18 @@ def _bwd_kernel_dq(
     stride_doh,
     stride_dom,
     stride_dok,
+    stride_qsz,
+    stride_qsh,
+    stride_qsm,
+    stride_qsk,
+    stride_ksz,
+    stride_ksh,
+    stride_ksn,
+    stride_ksk,
+    stride_vsz,
+    stride_vsh,
+    stride_vsn,
+    stride_vsk,
     stride_ldz,
     stride_ldh,
     stride_ldm,
@@ -1416,8 +1667,19 @@ def _bwd_kernel_dq(
     CAUSAL: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    USE_ASM: tl.constexpr,
 ):
-    """One program per (batch*head_q, query block). Parallelizes dq over queries."""
+    """One program per (batch*head_q, query block). Parallelizes dq over queries.
+
+    A1: q/k/v are the forward's saved e4m3 + compact 2D-block scales, reused with
+    no re-quant. Only dO (fresh input) and dS are quantized in-kernel.
+    """
+    SCALE_BLOCK_DMODEL_QK: tl.constexpr = BLOCK_DMODEL_QK // QUANT_BLOCK_SIZE
+    SCALE_BLOCK_DMODEL_V: tl.constexpr = BLOCK_DMODEL_V // QUANT_BLOCK_SIZE
+    SCALE_ACTUAL_BLOCK_DMODEL_QK: tl.constexpr = ACTUAL_BLOCK_DMODEL_QK // QUANT_BLOCK_SIZE
+    SCALE_ACTUAL_BLOCK_DMODEL_V: tl.constexpr = ACTUAL_BLOCK_DMODEL_V // QUANT_BLOCK_SIZE
+
     off_hz = tl.program_id(0)
     start_m = tl.program_id(1)
     off_z = off_hz // HQ
@@ -1437,10 +1699,16 @@ def _bwd_kernel_dq(
         N_CTX_Q = max_seqlen_q
         N_CTX_K = max_seqlen_k
 
+    q_scale_start = q_start // QUANT_BLOCK_SIZE
+    k_scale_start = k_start // QUANT_BLOCK_SIZE
+
     q_offset = Q + off_z * stride_qz + off_h_q * stride_qh + q_start * stride_qm
     k_offset = K + off_z * stride_kz + off_h_k * stride_kh + k_start * stride_kn
     v_offset = V + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
     do_offset = DO + off_z * stride_doz + off_h_q * stride_doh + q_start * stride_dom
+    q_scale_base = Q_scale + off_z * stride_qsz + off_h_q * stride_qsh + q_scale_start * stride_qsm
+    k_scale_base = K_scale + off_z * stride_ksz + off_h_k * stride_ksh + k_scale_start * stride_ksn
+    v_scale_base = V_scale + off_z * stride_vsz + off_h_k * stride_vsh + k_scale_start * stride_vsn
     adj_delta = off_z * stride_ldz + off_h_q * stride_ldh + q_start * stride_ldm
     l_offset = LSE + adj_delta
     d_offset = Delta + adj_delta
@@ -1461,22 +1729,36 @@ def _bwd_kernel_dq(
 
     q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d_qk[None, :] * stride_qk
     do_ptrs = do_offset + offs_m[:, None] * stride_dom + offs_d_v[None, :] * stride_dok
-    q = tl.load(q_ptrs, mask=mask_m[:, None] & mask_d_qk[None, :], other=0.0)
+    # Saved e4m3 q reused directly; dO is a fresh input and is quantized here.
+    q_fp8_hd = tl.load(q_ptrs, mask=mask_m[:, None] & mask_d_qk[None, :], other=0.0)
     do = tl.load(do_ptrs, mask=mask_m[:, None] & mask_d_v[None, :], other=0.0)
 
     l_i = tl.load(l_offset + offs_m * stride_ldm, mask=mask_m, other=0.0)
     Di = tl.load(d_offset + offs_m * stride_ldm, mask=mask_m, other=0.0)
 
+    # q's saved head_dim scale (dot e), fixed across the n-loop; dO quantized fresh.
+    qs_hd = _load_scale_hd(q_scale_base, offs_m, stride_qsm, stride_qsk, N_CTX_Q,
+                           SCALE_BLOCK_DMODEL_QK, SCALE_ACTUAL_BLOCK_DMODEL_QK, QUANT_BLOCK_SIZE)
+    do_fp8_hd, dos_hd = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+
     dq = tl.zeros([BLOCK_M, BLOCK_DMODEL_QK], dtype=tl.float32)
     dq = _attn_bwd_dq_inner(
         dq,
-        q,
+        q_fp8_hd,
+        qs_hd,
+        do_fp8_hd,
+        dos_hd,
+        k_scale_base,
+        v_scale_base,
+        stride_ksn,
+        stride_ksk,
+        stride_vsn,
+        stride_vsk,
         offs_d_qk,
         offs_d_v,
         offs_m,
         l_i,
         Di,
-        do,
         mask_d_qk,
         mask_d_v,
         k_offset,
@@ -1487,12 +1769,20 @@ def _bwd_kernel_dq(
         stride_vk,
         BLOCK_M,
         BLOCK_N,
+        BLOCK_DMODEL_QK,
+        BLOCK_DMODEL_V,
+        SCALE_BLOCK_DMODEL_QK,
+        SCALE_BLOCK_DMODEL_V,
+        SCALE_ACTUAL_BLOCK_DMODEL_QK,
+        SCALE_ACTUAL_BLOCK_DMODEL_V,
         sm_scale,
         hi,
         USE_EXP2,
         N_CTX_Q,
         N_CTX_K,
         CAUSAL,
+        QUANT_BLOCK_SIZE,
+        USE_ASM,
     )
 
     dq *= sm_scale
@@ -1520,22 +1810,27 @@ def attention_mxfp8_backward_triton_impl(
     max_seqlen_k: Optional[int],
     use_exp2: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """MXFP8 flash-attention backward.
+    """MXFP8 flash-attention backward (stage-2, ``tl.dot_scaled``).
 
-    Stage 1 (current): q/k/v arrive as saved e4m3 tensors; they are dequantized
-    back to bf16 here so the three ported kernels run the standard FA v2 backward
-    math in high precision. This is numerically correct w.r.t. the *quantized*
-    forward inputs and is runnable without CDNA4.
+    The saved e4m3 q/k/v are dequantized back to bf16 at entry (the exact inputs
+    the forward consumed; option A — no extra fwd memory), then **each of the 7
+    backward dots quantizes its two operands in-kernel with 1D per-row MX scales
+    along that dot's reduction axis** and runs ``tl.dot_scaled`` (plan §9.5).
+    This uniform per-row layout is exactly what ``tl.dot_scaled`` consumes (no
+    broadcast), and matches ``mxfp8_attention_backward_reference_stage2``.
 
-    Stage 2 (TODO): keep operands in e4m3 and replace each ``tl.dot`` inside the
-    kernels with ``tl.dot_scaled`` plus per-reduction-axis MXFP8 scales (see the
-    ``TODO(stage2)`` markers). dO will additionally be quantized to e4m3.
+    Requires CDNA4 (native ``tl.dot_scaled``).
+
+    A1 (AB decision): the saved e4m3 q/k/v and their compact 2D-block scales are
+    passed straight into the kernels, which reuse them in every dot (no entry
+    dequant, no re-quantization of q/k/v). Only dO/P/dS are quantized in-kernel.
     """
-    # Dequantize the saved e4m3 operands back to bf16 (the exact inputs the
-    # forward pass consumed). Uses the non-ASM path on non-CDNA4 hardware.
-    q = convert_from_mxfp8(q, q_scale, output_dtype=fwd_torch_dtype, axis=-1, is_2d_block=True).contiguous()
-    k = convert_from_mxfp8(k, k_scale, output_dtype=fwd_torch_dtype, axis=-1, is_2d_block=True).contiguous()
-    v = convert_from_mxfp8(v, v_scale, output_dtype=fwd_torch_dtype, axis=-1, is_2d_block=True).contiguous()
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+    q_scale = q_scale.contiguous()
+    k_scale = k_scale.contiguous()
+    v_scale = v_scale.contiguous()
 
     if not do.is_contiguous():
         do = do.contiguous()
@@ -1547,6 +1842,11 @@ def attention_mxfp8_backward_triton_impl(
     stride_vz, stride_vh, stride_vn, stride_vk = get_strides_from_layout(v, layout)
     stride_oz, stride_oh, stride_om, stride_ok = get_strides_from_layout(o, layout)
     stride_doz, stride_doh, stride_dom, stride_dok = get_strides_from_layout(do, layout)
+    # Compact 2D-block scale strides ([.., seqlen/32, head_dim/32]); reused by the
+    # kernels for both head_dim- and seqlen-reduction dots (A1).
+    stride_qsz, stride_qsh, stride_qsm, stride_qsk = get_strides_from_layout(q_scale, layout)
+    stride_ksz, stride_ksh, stride_ksn, stride_ksk = get_strides_from_layout(k_scale, layout)
+    stride_vsz, stride_vsh, stride_vsn, stride_vsk = get_strides_from_layout(v_scale, layout)
     is_varlen = layout == "thd"
 
     padded_d_model_qk = get_padded_head_dim(head_size_qk)
@@ -1596,6 +1896,9 @@ def attention_mxfp8_backward_triton_impl(
         q,
         k,
         v,
+        q_scale,
+        k_scale,
+        v_scale,
         sm_scale,
         do,
         dq,
@@ -1617,6 +1920,18 @@ def attention_mxfp8_backward_triton_impl(
         stride_doh,
         stride_dom,
         stride_dok,
+        stride_qsz,
+        stride_qsh,
+        stride_qsm,
+        stride_qsk,
+        stride_ksz,
+        stride_ksh,
+        stride_ksn,
+        stride_ksk,
+        stride_vsz,
+        stride_vsh,
+        stride_vsn,
+        stride_vsk,
         stride_lse_z,
         stride_lse_h,
         stride_lse_m,
@@ -1637,12 +1952,17 @@ def attention_mxfp8_backward_triton_impl(
         CAUSAL=causal,
         USE_EXP2=use_exp2,
         IS_VARLEN=is_varlen,
+        QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
+        USE_ASM=is_cdna4(),
     )
 
     wrap_triton(_bwd_kernel_dkdv)[(batch * nheads_k, num_block_n)](
         q,
         k,
         v,
+        q_scale,
+        k_scale,
+        v_scale,
         sm_scale,
         do,
         dk,
@@ -1665,6 +1985,18 @@ def attention_mxfp8_backward_triton_impl(
         stride_doh,
         stride_dom,
         stride_dok,
+        stride_qsz,
+        stride_qsh,
+        stride_qsm,
+        stride_qsk,
+        stride_ksz,
+        stride_ksh,
+        stride_ksn,
+        stride_ksk,
+        stride_vsz,
+        stride_vsh,
+        stride_vsn,
+        stride_vsk,
         stride_lse_z,
         stride_lse_h,
         stride_lse_m,
@@ -1685,6 +2017,8 @@ def attention_mxfp8_backward_triton_impl(
         CAUSAL=causal,
         USE_EXP2=use_exp2,
         IS_VARLEN=is_varlen,
+        QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
+        USE_ASM=is_cdna4(),
     )
 
     return dq, dk, dv

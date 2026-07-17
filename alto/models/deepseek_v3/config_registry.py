@@ -51,7 +51,6 @@ def deepseek_v3_16b() -> Trainer.Config:
     config.metrics.enable_tensorboard = True
     config.dataloader.dataset = "c4_test"
     config.parallelism.expert_parallel_degree = 1
-    config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
     config.checkpoint.initial_load_path = "/huggingface/hub/models--deepseek-ai--deepseek-moe-16b-base/snapshots/521d2bc4fb69a3f3ae565310fcc3b65f97af2580"

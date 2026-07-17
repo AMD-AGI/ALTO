@@ -133,7 +133,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.training.local_batch_size = 2
     config.training.global_batch_size = 384
     config.training.seq_len = 8192
-    config.optimizer.lr = 1e-4
+    config.optimizer.param_groups[0].optimizer_kwargs["lr"] = 1e-4
     config.lr_scheduler.min_lr_factor = 0.0
     config.lr_scheduler.warmup_steps = 500
     config.lr_scheduler.decay_ratio = 0.9
@@ -141,7 +141,6 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.dataloader.dataset = "megatron"
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 1
-    config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.activation_checkpoint = None
     config.checkpoint.enable = False

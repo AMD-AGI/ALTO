@@ -43,10 +43,23 @@ class DecomposedLinear(Module):
             bias=linear.bias is not None,
             lora_rank=lora_rank,
         )
-        module = cls(config)
-        module.weight.data.copy_(linear.weight.data)
-        if linear.bias is not None:
-            module.bias.data.copy_(linear.bias.data)
+        module = cls(config).to(device=linear.weight.device, dtype=linear.weight.dtype)
+
+        # Meta tensors cannot be copied-from; keep original params and rely on later init.
+        if linear.weight.is_meta:
+            module.weight = linear.weight
+            module.bias = linear.bias
+        else:
+            module.weight.data.copy_(linear.weight.data)
+            if linear.bias is not None:
+                module.bias.data.copy_(linear.bias.data)
+
+        # Initialize LoRA parameters (matches the previous init_lora_weights defaults)
+        if not module.u.is_meta:
+            nn.init.normal_(module.u, mean=0.0, std=0.02)
+            nn.init.zeros_(module.v)
+            nn.init.ones_(module.sigma)
+
         return module
 
     def forward(self, input):

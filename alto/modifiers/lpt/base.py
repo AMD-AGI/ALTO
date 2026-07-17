@@ -221,6 +221,7 @@ class LowPrecisionTrainingModifier(Modifier):
                             in_features=config.in_features,
                             out_features=config.out_features,
                             bias=config.bias,
+                            lora_rank=config.lora_rank,
                             param_init=config.param_init | DecomposedLinear._EXTRA_INIT,
                         )
                         setattr(parent, attr, new_config)

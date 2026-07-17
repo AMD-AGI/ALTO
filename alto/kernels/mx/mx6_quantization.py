@@ -36,14 +36,15 @@ Development is incremental. This file currently implements:
   - Stage 3: ``_pack_mx6`` / ``_unpack_mx6`` (Python-export QDQ pack + inverse).
   - Stage 4: ``_convert_to_mx6_kernel`` / ``_convert_from_mx6_kernel`` grid entries
     (stride-addressed load/store, ragged-tail masking, E8M0 bias).
-
-Still to come: the ``convert_to_mx6`` / ``convert_from_mx6`` host wrappers (Stage 5).
+  - Stage 5: ``convert_to_mx6`` / ``convert_from_mx6`` host wrappers (axis
+    transpose, padding-aware shape restore -- mirrors ``mx9_quantization.py``).
 
 See ``mx9_quantization.py`` for the full rationale behind the shared design
 decisions (scale exponent clamp to -126 / FTZ independence, exponent extraction
 from native dtype bits, E8M0 max_exp, stride addressing, ragged-tail masking).
 """
 
+import torch
 import triton
 import triton.language as tl
 
@@ -52,9 +53,11 @@ QUANT_BIT = 5
 PRIME_GROUP = 2
 BLOCKS_PER_PROG_DEFAULT = 64
 
-# Python export-compatible packing (Stage 3+): per block, mantissa nibbles
-# occupy block_size/2 bytes and the sign bitmap occupies block_size/8 bytes.
-MANTISSA_BIT = QUANT_BIT - 1   # 4-bit low mantissa bits (q & 0xF)
+# torch dtype -> triton dtype (used by unpack output cast, Stage 5 host wrapper).
+_TORCH_TO_TL = {
+    torch.float32: tl.float32,
+    torch.bfloat16: tl.bfloat16,
+}
 
 
 @triton.jit
@@ -402,4 +405,135 @@ def _convert_from_mx6_kernel(
     )
     out_offs = blk[:, None] * BLOCK_SIZE + col[None, :]                  # contiguous y offsets
     tl.store(y_ptr + out_offs, y, mask=mask)
+
+
+# ============================================================================
+# Host wrappers (bare launch, mirroring mx9_quantization.py). Unlike MX9's
+# three-part tuple (q / max_exp / prime), MX6 packs everything into a SINGLE
+# uint8 tensor per the Python-export-compatible byte layout described above,
+# so these wrappers take/return one tensor instead of three.
+# ============================================================================
+
+
+def _mx6_packed_bytes(block_size: int) -> int:
+    """Bytes per block for the packed layout [max_exp | prime | sign | mantissa]."""
+    n_prime_bytes = (block_size // 2) // 8
+    n_sign_bytes = block_size // 8
+    n_mantissa_bytes = block_size // 2
+    return 1 + n_prime_bytes + n_sign_bytes + n_mantissa_bytes
+
+
+def convert_to_mx6(
+    data_hp: torch.Tensor,
+    block_size: int = BLOCK_SIZE,
+    axis: int = -1,
+    blocks_per_program: int = BLOCKS_PER_PROG_DEFAULT,
+) -> torch.Tensor:
+    """High-precision tensor -> packed MX6 tensor (Python-export-compatible byte
+    layout: ``[max_exp(1B) | prime(1B) | sign(2B) | mantissa(8B)]`` per block).
+
+    Blocks are formed along the ``axis`` dimension (axis is transposed to the last
+    dim internally). The returned tensor is a flattened view:
+      packed : [n_blocks, n_packed_bytes]   uint8
+    Shape reconstruction info (original shape / axis / padding) must be passed
+    back by the caller in convert_from_mx6.
+    """
+    assert data_hp.dtype in (torch.float32, torch.bfloat16), \
+        f"mx6_quantization only supports fp32 / bf16, got {data_hp.dtype}"
+    assert block_size == 16, f"block_size only supports 16, got {block_size}"
+
+    # Transpose quant axis to last dim, matching mx9 host processing. No forced
+    # .contiguous(): reshape returns a (possibly non-contiguous) view when
+    # possible, and the kernel gathers by stride. The ragged tail block is
+    # handled in-kernel via column masking instead of host-side F.pad.
+    data_hp = data_hp.transpose(axis, -1)
+    last = data_hp.shape[-1]
+    x2d = data_hp.reshape(-1, last)
+    rows = x2d.shape[0]
+    blocks_per_row = triton.cdiv(last, block_size)
+    n_blocks = rows * blocks_per_row
+
+    n_packed_bytes = _mx6_packed_bytes(block_size)
+    packed = torch.empty((n_blocks, n_packed_bytes), dtype=torch.uint8, device=data_hp.device)
+
+    stride_row, stride_col = x2d.stride()
+    grid = (triton.cdiv(n_blocks, blocks_per_program),)
+    _convert_to_mx6_kernel[grid](
+        x2d, packed, n_blocks, last, blocks_per_row,
+        stride_row, stride_col,
+        BLOCK_SIZE=block_size,
+        BLOCKS_PER_PROG=blocks_per_program,
+        PRIME_GROUP=PRIME_GROUP,
+        QUANT_BIT=QUANT_BIT,
+    )
+    return packed
+
+
+def convert_from_mx6(
+    packed: torch.Tensor,
+    out_dtype: torch.dtype,
+    out_shape,
+    block_size: int = BLOCK_SIZE,
+    axis: int = -1,
+    blocks_per_program: int = BLOCKS_PER_PROG_DEFAULT,
+) -> torch.Tensor:
+    """Packed MX6 tensor -> reconstructed high-precision tensor.
+
+    out_shape / axis must match the original convert_to_mx6 call, used to
+    reverse the transpose and padding. Returns shape = out_shape, dtype = out_dtype.
+    """
+    assert out_dtype in _TORCH_TO_TL, \
+        f"out_dtype must be one of {tuple(_TORCH_TO_TL)}, got {out_dtype}"
+    assert packed.dtype == torch.uint8, f"packed dtype must be uint8, got {packed.dtype}"
+    assert block_size == 16, f"block_size only supports 16, got {block_size}"
+
+    # Layout consistency check: packed must carry a whole number of blocks with
+    # the expected per-block byte count; otherwise the kernel addressing would
+    # read misaligned bytes or raise an unhelpful dimension error downstream.
+    n_blocks = packed.shape[0]
+    n_packed_bytes = _mx6_packed_bytes(block_size)
+    assert packed.shape == (n_blocks, n_packed_bytes), \
+        f"packed shape should be ({n_blocks}, {n_packed_bytes}), got {tuple(packed.shape)}"
+
+    y_blocks = torch.empty((n_blocks, block_size), dtype=out_dtype, device=packed.device)
+
+    # No forced .contiguous(): pass the packed input by stride so an already
+    # laid-out (or non-contiguous view) tensor is consumed without an extra copy.
+    stride_blk, stride_col = packed.stride()
+    grid = (triton.cdiv(n_blocks, blocks_per_program),)
+    _convert_from_mx6_kernel[grid](
+        packed, y_blocks, n_blocks,
+        stride_blk, stride_col,
+        BLOCK_SIZE=block_size,
+        BLOCKS_PER_PROG=blocks_per_program,
+        PRIME_GROUP=PRIME_GROUP,
+        QUANT_BIT=QUANT_BIT,
+        OUT_DTYPE=_TORCH_TO_TL[out_dtype],
+    )
+
+    # Reverse: remove padding, reshape back to post-transpose shape, then
+    # transpose back to original axis. out_shape is the original (pre-transpose)
+    # shape; axis indicates which dimension was the quant axis.
+    transposed_shape = list(out_shape)
+    transposed_shape[axis], transposed_shape[-1] = transposed_shape[-1], transposed_shape[axis]
+    last = transposed_shape[-1]
+    rows = 1
+    for s in transposed_shape[:-1]:
+        rows *= s
+    pad = (block_size - last % block_size) % block_size
+    padded_cols = last + pad
+    # out_shape/axis must be consistent with convert_to: if the inferred block
+    # count doesn't match the packed tensor, intercept here with a readable
+    # error rather than letting the reshape below raise a cryptic dimension error.
+    assert rows * padded_cols == n_blocks * block_size, (
+        f"out_shape/axis/block_size inconsistent with packed tensor: "
+        f"inferred rows*padded_cols={rows * padded_cols}, "
+        f"but tuple has n_blocks*block_size={n_blocks * block_size}"
+    )
+    # Aligned with mx9 (convert_from_mx9): return the transposed stride view
+    # without a forced .contiguous() copy. Only the ragged-tail slice reshape may
+    # trigger an internal copy; the common (no-pad / axis=-1) path stays a view.
+    y2d = y_blocks.reshape(rows, padded_cols)
+    y2d = y2d[:, :last]
+    return y2d.reshape(transposed_shape).transpose(axis, -1)
 

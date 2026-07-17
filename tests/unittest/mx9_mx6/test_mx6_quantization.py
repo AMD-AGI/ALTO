@@ -23,10 +23,9 @@ Coverage by stage
   - Stage 4: ``_convert_to_mx6_kernel`` / ``_convert_from_mx6_kernel`` (storage
     format, single packed tensor layout, E8M0 bias, blocks-per-program invariance,
     end-to-end round-trip)
-
-(Stage 5 -- ``convert_to_mx6`` / ``convert_from_mx6`` host wrappers with
-transpose / padding / shape restore -- is added later, reusing the MX9 host
-test suite.)
+  - Stage 5: ``convert_to_mx6`` / ``convert_from_mx6`` host wrappers (axis
+    transpose, padding-aware shape restore, non-contiguous input, invalid-input
+    rejection), mirroring the MX9 host test suite.
 """
 
 import pytest
@@ -47,6 +46,8 @@ from alto.kernels.mx.mx6_quantization import (
     _unpack_mx6,
     _convert_to_mx6_kernel,
     _convert_from_mx6_kernel,
+    convert_to_mx6,
+    convert_from_mx6,
 )
 from alto.modifiers.quantization import mx as _mxref
 from alto.modifiers.quantization.mx import mx6_fake_quantize
@@ -673,17 +674,10 @@ def test_kernel_zeros_and_block_independence():
 
 
 # --------------------------------------------------------------------------- #
-# Layer: differential test against production mx.py (fake-quant reference)
-#   The tests above compare against a hand-written torch reimplementation. This
-#   layer cross-checks against the *production* Quark-aligned code in
-#   alto/modifiers/quantization/mx.py, in two ways:
-#     (1) a SECOND independent reference that reuses mx.py's own primitives
-#         (_reshape_to_blocks / _t_exponent / SHARED_PRIME_BIT_GROUP), only
-#         swapping the value clamp to +/-15 -- it must agree with our hand ref
-#         AND with the kernel, so a shared bug in one reference cannot hide;
-#     (2) a divergence check vs the raw mx6_fake_quantize (clamp 31 for demoted
-#         pairs): the two may only differ at the rare "demoted AND rounds to
-#         +/-16" edge, so the mismatch fraction must be tiny.
+# Stage 5 reference: full-tensor clamp-15 QDQ reusing mx.py primitives
+#   Unlike _mx6_clamp15_blockref (block-granularity, no transpose/padding), this
+#   operates on the full tensor at axis=-1 (transpose + pad handled internally
+#   by mx.py's _reshape_to_blocks), matching what the Stage 5 host wrappers do.
 # --------------------------------------------------------------------------- #
 def _mx6_clamp15_ref_via_mxpy(x, block_size=BLOCK_SIZE, quant_bit=QUANT_BIT):
     """Second independent clamp-15 reference reusing mx.py production primitives.
@@ -719,6 +713,165 @@ def _mx6_clamp15_ref_via_mxpy(x, block_size=BLOCK_SIZE, quant_bit=QUANT_BIT):
     out = out.reshape(out.size(0), -1)
     out = out[:, : input_shape[-1]].reshape(input_shape).to(input_dtype)
     return out.transpose(axis, -1)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: host wrappers (convert_to_mx6 / convert_from_mx6)
+#   The Stage 4 tests above launch the grid kernels directly on an already-2D,
+#   block-aligned tensor. These tests instead go through the public host
+#   wrappers, exercising what Stage 4 deliberately skips: axis transpose,
+#   arbitrary tensor rank, padding-aware shape restore, and non-contiguous
+#   input arising naturally from the transpose (rather than constructed via
+#   slicing/``.t()`` as in the Stage 4 strided-input tests).
+# --------------------------------------------------------------------------- #
+def _host_roundtrip(x, block_size=BLOCK_SIZE, axis=-1):
+    packed = convert_to_mx6(x, block_size=block_size, axis=axis)
+    return convert_from_mx6(packed, x.dtype, x.shape, block_size=block_size, axis=axis)
+
+
+def test_host_output_dtype_and_shape():
+    x = _rand((4, 64), torch.float32).cuda()
+    packed = convert_to_mx6(x, block_size=BLOCK_SIZE)
+    n_blocks = (4 * 64) // BLOCK_SIZE
+    assert packed.dtype == torch.uint8
+    assert packed.shape == (n_blocks, _N_PACKED_BYTES)
+
+
+def test_host_max_exp_biased_range():
+    # E8M0 stores true exponent + 127; finite fp32 true exponent in [-126, 127],
+    # biased to [1, 254]; should never be 0 or 255.
+    x = _rand((16, 64), torch.float32).cuda()
+    packed = convert_to_mx6(x, block_size=BLOCK_SIZE)
+    assert packed[:, 0].min().item() >= 1
+    assert packed[:, 0].max().item() <= 254
+
+
+@pytest.mark.parametrize("shape", [(4, 64), (8, 16), (2, 3, 32), (3, 40), (1, 4096)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_host_roundtrip_matches_clamp15_ref(shape, dtype):
+    x = _rand(shape, dtype).cuda()
+    ref = _mx6_clamp15_ref_via_mxpy(x, block_size=BLOCK_SIZE)
+    out = _host_roundtrip(x)
+    assert out.shape == x.shape
+    assert out.dtype == dtype
+    assert torch.equal(out, ref), \
+        f"max diff={(out.float() - ref.float()).abs().max().item()}"
+
+
+@pytest.mark.parametrize("axis", [0, 1, -1])
+def test_host_roundtrip_axis(axis):
+    x = _rand((32, 64), torch.float32).cuda()
+    out = _host_roundtrip(x, block_size=BLOCK_SIZE, axis=axis)
+    assert out.shape == x.shape
+    assert out.dtype == x.dtype
+    ref = _mx6_clamp15_ref_via_mxpy(
+        x.transpose(axis, -1).contiguous(), block_size=BLOCK_SIZE
+    ).transpose(axis, -1).contiguous()
+    assert torch.equal(out, ref), \
+        f"axis={axis} max diff={(out - ref).abs().max().item()}"
+
+
+@pytest.mark.parametrize("blocks_per_program", [1, 16, 64, 256])
+def test_host_blocks_per_program_does_not_change_numerics(blocks_per_program):
+    x = _rand((32, 512), torch.float32).cuda()
+    ref = _host_roundtrip(x)
+    packed = convert_to_mx6(x, block_size=BLOCK_SIZE, blocks_per_program=blocks_per_program)
+    out = convert_from_mx6(packed, x.dtype, x.shape, block_size=BLOCK_SIZE,
+                           blocks_per_program=blocks_per_program)
+    assert torch.equal(out, ref)
+
+
+def test_host_zeros_stay_zero():
+    x = torch.zeros((4, 64), dtype=torch.float32).cuda()
+    out = _host_roundtrip(x)
+    assert torch.equal(out, x)
+
+
+def test_host_block_independence():
+    big = torch.full((1, BLOCK_SIZE), 100.0).cuda()
+    small = torch.full((1, BLOCK_SIZE), 0.01).cuda()
+    joint = _host_roundtrip(torch.cat([big, small], dim=0))
+    alone = _host_roundtrip(small)
+    assert torch.equal(joint[1:2], alone)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_host_non_contiguous_input(dtype):
+    """Non-contiguous memory input (transposed stride) produces the same result
+    as the equivalent contiguous tensor: the host's ``transpose(axis, -1)`` plus
+    the kernel's stride-addressed load means no ``.contiguous()`` copy is forced."""
+    x = _rand((64, 32), dtype).cuda()
+    x_t = x.T                                  # shape (32, 64), non-contiguous
+    assert not x_t.is_contiguous()
+    out_t = _host_roundtrip(x_t, axis=0)
+    ref_t = _mx6_clamp15_ref_via_mxpy(x, block_size=BLOCK_SIZE).T.contiguous()
+    assert torch.equal(out_t, ref_t), \
+        f"non-contiguous max diff={(out_t.float() - ref_t.float()).abs().max().item()}"
+
+
+def test_host_padding_non_divisible_last_dim():
+    x = _rand((3, 40), torch.float32).cuda()   # 40 not divisible by 16
+    out = _host_roundtrip(x, block_size=BLOCK_SIZE)
+    ref = _mx6_clamp15_ref_via_mxpy(x, block_size=BLOCK_SIZE)
+    assert out.shape == x.shape
+    assert torch.equal(out, ref)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_host_divergence_vs_mxpy_31clamp_is_tiny(dtype):
+    """Host-level counterpart of test_divergence_vs_mxpy_31clamp_is_tiny: the
+    +/-15 clamp only diverges from raw mx6_fake_quantize at the rare "demoted
+    AND rounds to +/-16" edge."""
+    x = _rand((8, 256), dtype).cuda()
+    out = _host_roundtrip(x)
+    mxpy = mx6_fake_quantize(x, block_size=BLOCK_SIZE)
+    n_div = (out.float() != mxpy.float()).sum().item()
+    assert n_div < x.numel() * 0.05, \
+        f"divergence {n_div}/{x.numel()} too large, likely a bug rather than the +/-16 edge"
+
+
+# --------------------------------------------------------------------------- #
+# Stage 5: invalid input rejection
+# --------------------------------------------------------------------------- #
+def test_host_rejects_non_float_dtype():
+    x = torch.randint(0, 10, (4, 16)).cuda()
+    with pytest.raises(AssertionError):
+        convert_to_mx6(x)
+
+
+def test_host_rejects_float16():
+    x = _rand((4, 16), torch.float16).cuda()
+    with pytest.raises(AssertionError):
+        convert_to_mx6(x)
+
+
+def test_host_rejects_block_size_not_16():
+    x = _rand((4, 64), torch.float32).cuda()
+    with pytest.raises(AssertionError):
+        convert_to_mx6(x, block_size=24)   # not 16
+    with pytest.raises(AssertionError):
+        convert_to_mx6(x, block_size=32)   # even though multiple of 16, only 16 is supported
+
+
+def test_host_rejects_unknown_out_dtype():
+    x = _rand((4, 16), torch.float32).cuda()
+    packed = convert_to_mx6(x)
+    with pytest.raises(AssertionError):
+        convert_from_mx6(packed, torch.int32, x.shape)
+
+
+def test_host_rejects_bad_packed_dtype():
+    x = _rand((4, 16), torch.float32).cuda()
+    packed = convert_to_mx6(x).to(torch.int8)   # wrong dtype (should be uint8)
+    with pytest.raises(AssertionError):
+        convert_from_mx6(packed, torch.float32, x.shape)
+
+
+def test_host_rejects_out_shape_inconsistent_with_packed():
+    x = _rand((4, 64), torch.float32).cuda()
+    packed = convert_to_mx6(x)
+    with pytest.raises(AssertionError):
+        convert_from_mx6(packed, torch.float32, (3, 64))   # wrong row count for n_blocks
 
 
 @pytest.mark.parametrize("shape", [(4, 64), (8, 96), (16, 256)])

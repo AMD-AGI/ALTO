@@ -58,27 +58,37 @@ class ModelPatcher:
             @staticmethod
             def forward(ctx, x, scale, zero_point, args, g_idx, global_scale):
                 if getattr(args, "format", None) == "mx9":
+                    # Dispatches to the REAL packed Triton kernel (quantize ->
+                    # bit-packed bytes -> dequantize), not the torch fake-quant
+                    # emulation -- this is the intentional, validated design
+                    # (commit 95b1114: LLaMA-3.2-1B wikitext loss 2.1141 == the
+                    # fake-quant path's 2.1140). Requires a CUDA tensor (Triton
+                    # kernel launch); mx6 below mirrors this same method.
                     from alto.kernels.mx.mx9_quantization import (
                         convert_to_mx9,
                         convert_from_mx9,
                     )
 
-                    q, max_exp, prime = convert_to_mx9(x)
+                    packed = convert_to_mx9(x)
                     return convert_from_mx9(
-                        q, max_exp, prime, x.dtype, x.shape,
+                        packed, x.dtype, x.shape,
                     )
                 if getattr(args, "format", None) == "mx6":
-                    from alto.modifiers.quantization.mx import (
+                    # Same method as "mx9" above: dispatches to the REAL packed
+                    # Triton kernel (quantize -> bit-packed bytes -> dequantize),
+                    # not the mx6_fake_quantize emulation. Requires a CUDA tensor
+                    # (Triton kernel launch). quant_bit is not a parameter here:
+                    # the packed kernel's 5-bit width is a fixed module constant
+                    # (QUANT_BIT), not configurable.
+                    from alto.kernels.mx.mx6_quantization import (
                         BLOCK_SIZE,
-                        MX6_QUANT_BIT,
-                        mx6_fake_quantize,
+                        convert_to_mx6,
+                        convert_from_mx6,
                     )
 
-                    return mx6_fake_quantize(
-                        x,
-                        block_size=(args.group_size or BLOCK_SIZE),
-                        quant_bit=(args.num_bits or MX6_QUANT_BIT),
-                    )
+                    packed = convert_to_mx6(x, block_size=(args.group_size or BLOCK_SIZE))
+                    return convert_from_mx6(packed, x.dtype, x.shape,
+                                            block_size=(args.group_size or BLOCK_SIZE))
                 return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod

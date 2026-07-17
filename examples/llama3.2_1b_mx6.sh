@@ -3,15 +3,17 @@
 #
 # SPDX-License-Identifier: MIT
 
-# MX9 W8A8 dynamic validation on Llama-3.2-1B
+# MX6 W5A5 dynamic validation on Llama-3.2-1B
 # Weight and input activations are quantized dynamically through
-# alto/models/llama3/configs/mx9_wa_recipe.yaml. format=="mx9" dispatches to the
-# packed Triton kernel (convert_to_mx9 / convert_from_mx9) in alto/models/patcher.py.
+# alto/models/llama3/configs/mx6_wa_recipe.yaml. format=="mx6" dispatches to the
+# packed Triton kernel (convert_to_mx6 / convert_from_mx6) in alto/models/patcher.py,
+# not the mx6_fake_quantize emulation.
 #
 # Usage (MODEL_PATH is required, point it at your local Llama-3.2-1B dir):
-#   MODEL_PATH=/path/to/Llama-3.2-1B bash examples/llama3.2_1b_mx9.sh
-#   MODEL_PATH=/path/to/Llama-3.2-1B VALIDATOR_STEPS=100 bash examples/llama3.2_1b_mx9.sh
-#   MODEL_PATH=/path/to/Llama-3.2-1B CONFIG=llama3_1b bash examples/llama3.2_1b_mx9.sh  # BF16 baseline
+#   MODEL_PATH=/path/to/Llama-3.2-1B bash examples/llama3.2_1b_mx6.sh
+#   MODEL_PATH=/path/to/Llama-3.2-1B VALIDATOR_STEPS=100 bash examples/llama3.2_1b_mx6.sh
+#   MODEL_PATH=/path/to/Llama-3.2-1B VALIDATOR_STEPS=-1 bash examples/llama3.2_1b_mx6.sh  # full validation set once
+#   MODEL_PATH=/path/to/Llama-3.2-1B CONFIG=llama3_1b bash examples/llama3.2_1b_mx6.sh    # BF16 baseline
 rm -rf outputs/
 set -ex
 
@@ -21,7 +23,7 @@ export HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES}}
 export LOG_RANK=${LOG_RANK:-0}
 TRAIN_FILE=${TRAIN_FILE:-"alto.train"}
 MODULE=${MODULE:-"llama3"}
-CONFIG=${CONFIG:-"llama3_1b_mx9_wa"}
+CONFIG=${CONFIG:-"llama3_1b_mx6_wa"}
 COMM_MODE=${COMM_MODE:-""}
 
 MODEL_PATH=${MODEL_PATH:-""}

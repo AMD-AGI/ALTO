@@ -7,6 +7,14 @@ Acceptance criterion: unpack(pack(x)) == mx9_clamp127_ref(x) bit-exact.
 clamp127_ref is the clamp-127 variant of mx9_fake_quantize (demoted +/-128
 truncated to +/-127), serving as the true reference for the pack path.
 
+``convert_to_mx9``/``convert_from_mx9`` exchange a SINGLE packed uint8 tensor
+(byte layout ``[max_exp(1B) | prime(1B) | q(16B)]`` per block; ``q`` is int8
+values bit-reinterpreted as uint8), not a three-tensor tuple -- mirroring
+``mx6_quantization.py``. Most tests below go through the ``_roundtrip`` helper
+and never see the packed layout directly; only the tests that inspect
+individual components (storage-format / intermediates / prime-bitmap /
+blocks-per-program / invalid-dtype tests) slice into ``packed`` explicitly.
+
 Tests are organized in four layers:
   1. Storage format assertions: dtype / shape correctness.
   2. Round-trip bit-exact: vs clamp127_ref, covering shape/dtype/axis.
@@ -27,6 +35,12 @@ from alto.kernels.fp4.testing_utils import calc_snr
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA/HIP device"
 )
+
+# Packed byte layout (single tensor): [max_exp(1B) | prime(N_PRIME_BYTES) | q(BLOCK_SIZE)].
+_N_PRIME_BYTES = (BLOCK_SIZE // 2) // 8          # 1
+_PRIME_OFFSET = 1
+_Q_OFFSET = _PRIME_OFFSET + _N_PRIME_BYTES       # 2
+_N_PACKED_BYTES = _Q_OFFSET + BLOCK_SIZE         # 18
 
 # --------------------------------------------------------------------------- #
 # Reference implementation: clamp-127 variant of mx9_fake_quantize
@@ -167,8 +181,8 @@ def _rand_with_outliers(shape, dtype, seed=0, p=0.005, spike=100.0):
 
 
 def _roundtrip(x, block_size=BLOCK_SIZE, axis=-1):
-    q, max_exp, prime = convert_to_mx9(x, block_size=block_size, axis=axis)
-    return convert_from_mx9(q, max_exp, prime, x.dtype, x.shape,
+    packed = convert_to_mx9(x, block_size=block_size, axis=axis)
+    return convert_from_mx9(packed, x.dtype, x.shape,
                             block_size=block_size, axis=axis)
 
 
@@ -178,28 +192,26 @@ def _roundtrip(x, block_size=BLOCK_SIZE, axis=-1):
 
 def test_output_dtypes_and_shapes():
     x = _rand((4, 64), torch.float32).cuda()
-    q, max_exp, prime = convert_to_mx9(x, block_size=16)
+    packed = convert_to_mx9(x, block_size=16)
     n_blocks = (4 * 64) // 16
-    assert q.dtype == torch.int8
-    assert max_exp.dtype == torch.uint8
-    assert prime.dtype == torch.uint8
-    assert q.shape == (n_blocks, 16)
-    assert max_exp.shape == (n_blocks,)
-    assert prime.shape == (n_blocks, 1)      # block_size=16 -> 8 pairs -> 1 byte
+    assert packed.dtype == torch.uint8
+    assert packed.shape == (n_blocks, _N_PACKED_BYTES)   # 1 + 1 + 16 = 18
 
 
 def test_max_exp_biased_range():
     # E8M0 stores true exponent + 127; finite fp32 true exponent in [-126, 127],
     # biased to [1, 254]; should never be 0 or 255.
     x = _rand((16, 64), torch.float32).cuda()
-    _, max_exp, _ = convert_to_mx9(x, block_size=16)
+    packed = convert_to_mx9(x, block_size=16)
+    max_exp = packed[:, 0]
     assert max_exp.min().item() >= 1
     assert max_exp.max().item() <= 254
 
 
 def test_q_within_int8_range():
     x = _rand((8, 128), torch.float32).cuda()
-    q, _, _ = convert_to_mx9(x, block_size=16)
+    packed = convert_to_mx9(x, block_size=16)
+    q = packed[:, _Q_OFFSET:].view(torch.int8)   # bit-reinterpret uint8 -> int8
     assert q.min().item() >= -127
     assert q.max().item() <= 127
 
@@ -255,11 +267,12 @@ def _torch_intermediates(x, block_size=BLOCK_SIZE, quant_bit=8):
 def test_intermediates_match_torch_reference(shape, dtype):
     """Each component (q, max_exp, prime) matches torch recomputation bit-exact."""
     x = _rand(shape, dtype).cuda()
-    q, max_exp, prime = convert_to_mx9(x, block_size=BLOCK_SIZE)
+    packed = convert_to_mx9(x, block_size=BLOCK_SIZE)
     rq, re, rp, _ = _torch_intermediates(x, block_size=BLOCK_SIZE)
+    q = packed[:, _Q_OFFSET:].view(torch.int8)
     assert torch.equal(q, rq), f"q mismatch: {(q != rq).sum().item()} elements"
-    assert torch.equal(max_exp, re), f"max_exp mismatch"
-    assert torch.equal(prime, rp), f"prime mismatch"
+    assert torch.equal(packed[:, 0], re), f"max_exp mismatch"
+    assert torch.equal(packed[:, _PRIME_OFFSET:_Q_OFFSET], rp), f"prime mismatch"
 
 
 def test_intermediates_constructed_demote():
@@ -272,11 +285,11 @@ def test_intermediates_constructed_demote():
     x[0, 0] = 4.0
     _, _, _, pair = _torch_intermediates(x)
     assert pair[0].tolist() == [0, 1, 1, 1, 1, 1, 1, 1]
-    q, max_exp, prime = convert_to_mx9(x)
+    packed = convert_to_mx9(x)
     rq, re, rp, _ = _torch_intermediates(x)
-    assert torch.equal(q, rq)
-    assert torch.equal(max_exp, re)
-    assert torch.equal(prime, rp)
+    assert torch.equal(packed[:, _Q_OFFSET:].view(torch.int8), rq)
+    assert torch.equal(packed[:, 0], re)
+    assert torch.equal(packed[:, _PRIME_OFFSET:_Q_OFFSET], rp)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,9 +325,9 @@ def test_roundtrip_axis(axis):
 def test_blocks_per_program_does_not_change_numerics(blocks_per_program):
     x = _rand((32, 512), torch.float32).cuda()
     ref = _roundtrip(x, block_size=BLOCK_SIZE)
-    q, me, pr = convert_to_mx9(x, block_size=BLOCK_SIZE,
-                                blocks_per_program=blocks_per_program)
-    out = convert_from_mx9(q, me, pr, x.dtype, x.shape,
+    packed = convert_to_mx9(x, block_size=BLOCK_SIZE,
+                            blocks_per_program=blocks_per_program)
+    out = convert_from_mx9(packed, x.dtype, x.shape,
                            block_size=BLOCK_SIZE,
                            blocks_per_program=blocks_per_program)
     assert torch.equal(out, ref)
@@ -415,10 +428,10 @@ def test_prime_bitmap_round_trips():
     x = torch.zeros((1, BLOCK_SIZE), dtype=torch.float32).cuda()
     x[0, :8]  = 1.0    # t_exp=0, max_exp=3, diff 3 -> demotable
     x[0, 8:]  = 8.0    # t_exp=3, max_exp=3, diff 0 -> not demotable, amax
-    q, max_exp, prime = convert_to_mx9(x, block_size=BLOCK_SIZE)
+    packed = convert_to_mx9(x, block_size=BLOCK_SIZE)
     # pairs 0-3 (idx 0-7) all demote -> bits 0-3 = 1; pairs 4-7 not demote -> bits 4-7 = 0
-    assert prime[0, 0].item() == 0x0F, f"got {hex(prime[0, 0].item())}"
-    out = convert_from_mx9(q, max_exp, prime, x.dtype, x.shape)
+    assert packed[0, _PRIME_OFFSET].item() == 0x0F, f"got {hex(packed[0, _PRIME_OFFSET].item())}"
+    out = convert_from_mx9(packed, x.dtype, x.shape)
     ref = _mx9_clamp127_ref(x)
     assert torch.equal(out, ref)
 
@@ -563,6 +576,13 @@ def test_rejects_block_size_not_16():
 
 def test_rejects_unknown_out_dtype():
     x = _rand((4, 16), torch.float32).cuda()
-    q, me, pr = convert_to_mx9(x)
+    packed = convert_to_mx9(x)
     with pytest.raises(AssertionError):
-        convert_from_mx9(q, me, pr, torch.int32, x.shape)
+        convert_from_mx9(packed, torch.int32, x.shape)
+
+
+def test_rejects_bad_packed_dtype():
+    x = _rand((4, 16), torch.float32).cuda()
+    packed = convert_to_mx9(x).to(torch.int8)   # wrong dtype (should be uint8)
+    with pytest.raises(AssertionError):
+        convert_from_mx9(packed, torch.float32, x.shape)

@@ -4,12 +4,18 @@
 """Packed MX9 quantization Triton device kernels (called by grid kernels).
 
 Unlike the fake-quant path (``alto/kernels/mx/quantize_triton.py`` which outputs
-dequantized bf16), this module performs *real packed* quantization: each MX9 block
-is compressed into a three-part tuple stored separately:
-  - ``q``       : per-element quantized integer (int8, symmetric clamp +/-127)
-  - ``max_exp`` : per-block shared exponent, uint8 E8M0 (floor(log2(amax)) + 127 bias)
-  - ``prime``   : per-block prime bitmap (1 bit per pair of 2 elements, indicates
-                  whether that pair gets a 1-exponent demotion)
+dequantized bf16), this module performs *real packed* quantization: each MX9
+block is compressed into a **single packed uint8 tensor**, with each block's
+bytes laid out as ``[max_exp(1B) | prime(1B) | q(16B)]`` (mirroring MX6's
+prefix convention in ``mx6_quantization.py``):
+  - ``max_exp`` : 1 byte, per-block shared exponent, uint8 E8M0
+                  (floor(log2(amax)) + 127 bias)
+  - ``prime``   : 1 byte, per-block prime bitmap (1 bit per pair of 2 elements,
+                  indicates whether that pair gets a 1-exponent demotion)
+  - ``q``       : 16 bytes, per-element quantized integer (symmetric clamp
+                  +/-127), stored as the bit-identical uint8 reinterpretation of
+                  int8 -- reconstruct via ``packed[..., 2:].view(torch.int8)``.
+-> 18 bytes/block = 9 bits/element (8b value + 0.5b amortized max_exp + 0.5b prime).
 
 The exponent extraction / scale / prime math is aligned with
 ``alto/modifiers/quantization/mx.py`` (exponent extracted from native dtype bits
@@ -54,6 +60,12 @@ these before modifying):
   4. max_exp is stored as uint8 E8M0 (true exponent + 127), not int32: true
      exponents for any finite input fall in [-127, 127], +127 -> [0, 254] which
      fits uint8 without overflow; this achieves 1 byte/block and 9 bits/element.
+  5. All three components live in one uint8 tensor (not three separate tensors):
+     ``q`` is computed as int8 in registers (see ``_pack_mx9`` / ``_unpack_mx9``,
+     unchanged) but stored/loaded via the packed uint8 tensor using
+     ``.to(tl.uint8/tl.int8, bitcast=True)`` -- a pure bit reinterpretation, not a
+     value cast (which would incorrectly clamp/wrap negative values). This mirrors
+     ``mx6_quantization.py``'s single-tensor, Python-export-compatible layout.
 
 Known limitations:
   - NaN: packed integers cannot represent NaN; blocks containing NaN will have
@@ -276,19 +288,19 @@ def _unpack_mx9(
 # ============================================================================
 # Grid kernel (entry point): 1D grid, each program handles BLOCKS_PER_PROG
 # 16-element blocks. The high-precision side is addressed by stride (no forced
-# copy); the packed three-part tuple layout:
-#   q       : [n_blocks, BLOCK_SIZE]      (per-element, int8, clamp +/-127)
-#   max_exp : [n_blocks]                  (per-block, uint8 E8M0, true exp + 127)
-#   prime   : [n_blocks, N_PRIME_BYTES]   (per-block, N_PRIME_BYTES bytes, uint8 bitmap)
+# copy). Single packed tensor layout (mirrors mx6_quantization.py):
+#   packed : [n_blocks, N_PACKED_BYTES]  per block uint8 bytes
+#            [0]                          max_exp E8M0 (true exp + 127)
+#            [1 : 1 + N_PRIME_BYTES]      prime bitmap
+#            [1 + N_PRIME_BYTES : ]       q values (int8, bit-reinterpreted uint8)
+# For BLOCK_SIZE=16 this is [max_exp, prime, q0..q15] = 18 bytes/block.
 # ============================================================================
 
 
 @triton.jit
 def _convert_to_mx9_kernel(
     x_ptr,
-    q_ptr,
-    e_ptr,
-    p_ptr,
+    packed_ptr,
     n_blocks,
     last,
     blocks_per_row,
@@ -305,10 +317,14 @@ def _convert_to_mx9_kernel(
     ``(row, block-within-row)``; columns beyond ``last`` (the ragged tail block)
     are masked to 0, replacing host-side ``F.pad``.
 
-    Outputs (q / max_exp / prime) are freshly allocated and contiguous, so they
-    are addressed with the classic flat ``[n_blocks, ...]`` offsets.
+    Output is a freshly allocated contiguous packed tensor; ``q`` (int8 in
+    registers) is bit-reinterpreted to uint8 before storing (a bitcast, not a
+    value cast, so negative values are preserved exactly).
     """
     N_PRIME_BYTES: tl.constexpr = (BLOCK_SIZE // PRIME_GROUP) // 8
+    N_PACKED_BYTES: tl.constexpr = 1 + N_PRIME_BYTES + BLOCK_SIZE
+    PRIME_OFFSET: tl.constexpr = 1
+    Q_OFFSET: tl.constexpr = PRIME_OFFSET + N_PRIME_BYTES
 
     pid = tl.program_id(0)
     blk = pid * BLOCKS_PER_PROG + tl.arange(0, BLOCKS_PER_PROG)   # global block indices [BPP]
@@ -342,40 +358,44 @@ def _convert_to_mx9_kernel(
         BLOCKS_PER_PROG, BLOCK_SIZE, PRIME_GROUP, QUANT_BIT,
     )
 
-    out_offs = blk[:, None] * BLOCK_SIZE + col[None, :]         # contiguous q offsets [BPP, BLOCK]
-    tl.store(q_ptr + out_offs, q_int, mask=blk_mask[:, None])
-    # max_exp is the true exponent ([BPP] int32); store as E8M0 uint8: +127 bias.
+    # Byte 0: max_exp true exponent ([BPP] int32) -> E8M0 uint8: +127 bias.
     e_store = (max_exp + 127).to(tl.uint8)
-    tl.store(e_ptr + blk, e_store, mask=blk_mask)
+    tl.store(packed_ptr + blk * N_PACKED_BYTES, e_store, mask=blk_mask)
 
+    # Byte 1..: prime bitmap.
     pcol = tl.arange(0, N_PRIME_BYTES)
-    offs_p = blk[:, None] * N_PRIME_BYTES + pcol[None, :]
-    tl.store(p_ptr + offs_p, prime, mask=blk_mask[:, None])
+    offs_p = blk[:, None] * N_PACKED_BYTES + (PRIME_OFFSET + pcol[None, :])
+    tl.store(packed_ptr + offs_p, prime, mask=blk_mask[:, None])
+
+    # Last BLOCK_SIZE bytes: q values, bit-reinterpreted int8 -> uint8.
+    q_offs = blk[:, None] * N_PACKED_BYTES + (Q_OFFSET + col[None, :])
+    tl.store(packed_ptr + q_offs, q_int.to(tl.uint8, bitcast=True), mask=blk_mask[:, None])
 
 
 @triton.jit
 def _convert_from_mx9_kernel(
-    q_ptr,
-    e_ptr,
-    p_ptr,
+    packed_ptr,
     y_ptr,
     n_blocks,
-    stride_q_blk,
-    stride_q_col,
-    stride_e,
-    stride_p_blk,
-    stride_p_col,
+    stride_blk,
+    stride_col,
     BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_PROG: tl.constexpr,
     PRIME_GROUP: tl.constexpr,
     QUANT_BIT: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
 ):
-    """Packed inputs (q / max_exp / prime) are addressed **by stride** so the host
-    does not force a ``.contiguous()`` copy. The output ``y`` is freshly allocated
-    contiguous ``[n_blocks, BLOCK_SIZE]`` and uses classic flat offsets.
+    """Packed input is addressed **by stride** so the host does not force a
+    ``.contiguous()`` copy. The output ``y`` is freshly allocated contiguous
+    ``[n_blocks, BLOCK_SIZE]`` and uses classic flat offsets.
+
+    The packed row is split as ``[max_exp, prime, q]``; ``q`` bytes are loaded
+    as uint8 then bit-reinterpreted back to int8 (a bitcast, not a value cast)
+    before dequantizing.
     """
     N_PRIME_BYTES: tl.constexpr = (BLOCK_SIZE // PRIME_GROUP) // 8
+    PRIME_OFFSET: tl.constexpr = 1
+    Q_OFFSET: tl.constexpr = PRIME_OFFSET + N_PRIME_BYTES
 
     pid = tl.program_id(0)
     blk = pid * BLOCKS_PER_PROG + tl.arange(0, BLOCKS_PER_PROG)
@@ -383,15 +403,17 @@ def _convert_from_mx9_kernel(
     blk_mask = blk < n_blocks
     mask = blk_mask[:, None]
 
-    q_offs = blk[:, None] * stride_q_blk + col[None, :] * stride_q_col
-    q = tl.load(q_ptr + q_offs, mask=mask, other=0)           # int8
-    # max_exp is stored as E8M0 uint8 (with +127 bias); subtract back to true exponent.
-    max_exp_u = tl.load(e_ptr + blk * stride_e, mask=blk_mask, other=0)   # [BPP] uint8
+    # max_exp stored as E8M0 uint8 (+127 bias); subtract back to true exponent.
+    max_exp_u = tl.load(packed_ptr + blk * stride_blk, mask=blk_mask, other=0)   # [BPP] uint8
     max_exp = max_exp_u.to(tl.int32) - 127
 
     pcol = tl.arange(0, N_PRIME_BYTES)
-    offs_p = blk[:, None] * stride_p_blk + pcol[None, :] * stride_p_col
-    prime = tl.load(p_ptr + offs_p, mask=mask, other=0)       # [BPP, NB] uint8
+    offs_p = blk[:, None] * stride_blk + (PRIME_OFFSET + pcol[None, :]) * stride_col
+    prime = tl.load(packed_ptr + offs_p, mask=mask, other=0)       # [BPP, NB] uint8
+
+    q_offs = blk[:, None] * stride_blk + (Q_OFFSET + col[None, :]) * stride_col
+    q_u8 = tl.load(packed_ptr + q_offs, mask=mask, other=0)        # uint8
+    q = q_u8.to(tl.int8, bitcast=True)                             # bit-reinterpret -> int8
 
     y = _unpack_mx9(
         q, max_exp[:, None], prime, OUT_DTYPE,
@@ -403,8 +425,15 @@ def _convert_from_mx9_kernel(
 
 # ============================================================================
 # Host wrappers (not yet registered as @triton_op / register_fake; using bare
-# launch for ease of round-trip verification).
+# launch for ease of round-trip verification). Single packed uint8 tensor
+# in/out (mirrors mx6_quantization.py), not a three-tensor tuple.
 # ============================================================================
+
+
+def _mx9_packed_bytes(block_size: int) -> int:
+    """Bytes per block for the packed layout [max_exp(1B) | prime | q(block_size)B]."""
+    n_prime_bytes = (block_size // 2) // 8
+    return 1 + n_prime_bytes + block_size
 
 
 def convert_to_mx9(
@@ -412,17 +441,16 @@ def convert_to_mx9(
     block_size: int = BLOCK_SIZE,
     axis: int = -1,
     blocks_per_program: int = BLOCKS_PER_PROG_DEFAULT,
-):
-    """High-precision tensor -> packed MX9 three-part tuple (q:int8, max_exp:uint8
-    E8M0, prime:uint8).
+) -> torch.Tensor:
+    """High-precision tensor -> packed MX9 tensor (single uint8 tensor, byte
+    layout ``[max_exp(1B) | prime(1B) | q(block_size bytes)]`` per block).
 
     Blocks are formed along the ``axis`` dimension (axis is transposed to the last
-    dim internally). The returned three-part tuple is a flattened view:
-      q       : [n_blocks, block_size]      int8 (clamp +/-127)
-      max_exp : [n_blocks]                  uint8 (E8M0, true exponent + 127)
-      prime   : [n_blocks, n_prime_bytes]   uint8
+    dim internally). The returned tensor is a flattened view:
+      packed : [n_blocks, n_packed_bytes]   uint8
     Shape reconstruction info (original shape / axis / padding) must be passed
-    back by the caller in convert_from_mx9.
+    back by the caller in convert_from_mx9. ``q`` is recoverable bit-exact via
+    ``packed[..., 2:].view(torch.int8)`` (int8, clamp +/-127).
     """
     assert data_hp.dtype in (torch.float32, torch.bfloat16), \
         f"mx9_quantization only supports fp32 / bf16, got {data_hp.dtype}"
@@ -439,71 +467,57 @@ def convert_to_mx9(
     blocks_per_row = triton.cdiv(last, block_size)
     n_blocks = rows * blocks_per_row
 
-    n_prime_bytes = (block_size // 2) // 8
-    q = torch.empty((n_blocks, block_size), dtype=torch.int8, device=data_hp.device)
-    max_exp = torch.empty((n_blocks,), dtype=torch.uint8, device=data_hp.device)
-    prime = torch.empty((n_blocks, n_prime_bytes), dtype=torch.uint8, device=data_hp.device)
+    n_packed_bytes = _mx9_packed_bytes(block_size)
+    packed = torch.empty((n_blocks, n_packed_bytes), dtype=torch.uint8, device=data_hp.device)
 
     stride_row, stride_col = x2d.stride()
     grid = (triton.cdiv(n_blocks, blocks_per_program),)
     _convert_to_mx9_kernel[grid](
-        x2d, q, max_exp, prime, n_blocks, last, blocks_per_row,
+        x2d, packed, n_blocks, last, blocks_per_row,
         stride_row, stride_col,
         BLOCK_SIZE=block_size,
         BLOCKS_PER_PROG=blocks_per_program,
         PRIME_GROUP=PRIME_GROUP,
         QUANT_BIT=QUANT_BIT,
     )
-    return q, max_exp, prime
+    return packed
 
 
 def convert_from_mx9(
-    q: torch.Tensor,
-    max_exp: torch.Tensor,
-    prime: torch.Tensor,
+    packed: torch.Tensor,
     out_dtype: torch.dtype,
     out_shape,
     block_size: int = BLOCK_SIZE,
     axis: int = -1,
     blocks_per_program: int = BLOCKS_PER_PROG_DEFAULT,
 ) -> torch.Tensor:
-    """Packed MX9 three-part tuple -> reconstructed high-precision tensor.
+    """Packed MX9 tensor -> reconstructed high-precision tensor.
 
     out_shape / axis must match the original convert_to_mx9 call, used to
     reverse the transpose and padding. Returns shape = out_shape, dtype = out_dtype.
     """
     assert out_dtype in _TORCH_TO_TL, \
         f"out_dtype must be one of {tuple(_TORCH_TO_TL)}, got {out_dtype}"
-    assert q.dtype == torch.int8, f"q dtype must be int8, got {q.dtype}"
-    assert max_exp.dtype == torch.uint8, f"max_exp dtype must be uint8, got {max_exp.dtype}"
-    assert prime.dtype == torch.uint8, f"prime dtype must be uint8, got {prime.dtype}"
+    assert packed.dtype == torch.uint8, f"packed dtype must be uint8, got {packed.dtype}"
     assert block_size == 16, f"block_size only supports 16, got {block_size}"
 
-    # Three-part consistency check: q/max_exp/prime must share the same n_blocks
-    # and shapes must match the storage spec; otherwise the kernel addressing /
-    # reshape would read misaligned data or raise unhelpful dimension errors.
-    n_blocks = q.shape[0]
-    n_prime_bytes = (block_size // 2) // 8
-    assert q.shape == (n_blocks, block_size), \
-        f"q shape should be ({n_blocks}, {block_size}), got {tuple(q.shape)}"
-    assert max_exp.shape == (n_blocks,), \
-        f"max_exp shape should be ({n_blocks},), got {tuple(max_exp.shape)}"
-    assert prime.shape == (n_blocks, n_prime_bytes), \
-        f"prime shape should be ({n_blocks}, {n_prime_bytes}), got {tuple(prime.shape)}"
+    # Layout consistency check: packed must carry a whole number of blocks with
+    # the expected per-block byte count; otherwise the kernel addressing would
+    # read misaligned bytes or raise an unhelpful dimension error downstream.
+    n_blocks = packed.shape[0]
+    n_packed_bytes = _mx9_packed_bytes(block_size)
+    assert packed.shape == (n_blocks, n_packed_bytes), \
+        f"packed shape should be ({n_blocks}, {n_packed_bytes}), got {tuple(packed.shape)}"
 
-    y_blocks = torch.empty((n_blocks, block_size), dtype=out_dtype, device=q.device)
+    y_blocks = torch.empty((n_blocks, block_size), dtype=out_dtype, device=packed.device)
 
-    # No forced .contiguous(): pass the packed inputs by stride so already-laid-out
-    # (or non-contiguous view) tensors are consumed without an extra copy.
-    stride_q_blk, stride_q_col = q.stride()
-    stride_e = max_exp.stride(0)
-    stride_p_blk, stride_p_col = prime.stride()
+    # No forced .contiguous(): pass the packed input by stride so an already
+    # laid-out (or non-contiguous view) tensor is consumed without an extra copy.
+    stride_blk, stride_col = packed.stride()
     grid = (triton.cdiv(n_blocks, blocks_per_program),)
     _convert_from_mx9_kernel[grid](
-        q, max_exp, prime, y_blocks, n_blocks,
-        stride_q_blk, stride_q_col,
-        stride_e,
-        stride_p_blk, stride_p_col,
+        packed, y_blocks, n_blocks,
+        stride_blk, stride_col,
         BLOCK_SIZE=block_size,
         BLOCKS_PER_PROG=blocks_per_program,
         PRIME_GROUP=PRIME_GROUP,
@@ -524,10 +538,10 @@ def convert_from_mx9(
     pad = (block_size - last % block_size) % block_size
     padded_cols = last + pad
     # out_shape/axis must be consistent with convert_to: if the inferred block
-    # count doesn't match the three-part tuple, intercept here with a readable
+    # count doesn't match the packed tensor, intercept here with a readable
     # error rather than letting the reshape below raise a cryptic dimension error.
     assert rows * padded_cols == n_blocks * block_size, (
-        f"out_shape/axis/block_size inconsistent with three-part tuple: "
+        f"out_shape/axis/block_size inconsistent with packed tensor: "
         f"inferred rows*padded_cols={rows * padded_cols}, "
         f"but tuple has n_blocks*block_size={n_blocks * block_size}"
     )

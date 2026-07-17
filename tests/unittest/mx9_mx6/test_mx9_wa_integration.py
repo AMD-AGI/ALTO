@@ -8,6 +8,13 @@ first full ALTO wiring layer:
 
 recipe yaml -> QuantizationModifier -> Linear quantization_scheme ->
 post_step dynamic-weight skip -> wrapped Linear forward -> MX9 W+A QDQ.
+
+MX9 W+A QDQ dispatches to the REAL packed Triton kernel (``convert_to_mx9`` /
+``convert_from_mx9``), not the ``mx9_fake_quantize`` emulation -- see
+``alto/models/patcher.py`` and commit ``95b1114`` (validated end-to-end on
+LLaMA-3.2-1B: wikitext loss 2.1141 vs the fake-quant path's 2.1140). This test
+therefore requires CUDA and counts calls on both functions to prove the real
+kernel path fires and the emulation does not.
 """
 
 import importlib.util
@@ -15,6 +22,7 @@ import os
 import sys
 import types
 
+import pytest
 import torch
 import yaml
 
@@ -127,9 +135,10 @@ def _load_mx9_modifier_from_recipe(monkeypatch):
     return QuantizationModifier(**mod_args), quantize_mod
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="mx9 dispatch launches the real Triton kernel")
 def test_mx9_wa_recipe_toy_linear_lifecycle(monkeypatch):
     modifier, quantize_mod = _load_mx9_modifier_from_recipe(monkeypatch)
-    model = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=False))
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=False)).cuda()
     linear = model[0]
 
     modifier.initialize([model])
@@ -142,16 +151,31 @@ def test_mx9_wa_recipe_toy_linear_lifecycle(monkeypatch):
     assert not hasattr(linear, "weight_observer")
     assert not hasattr(linear, "input_observer")
 
-    calls = []
-    original_mx9 = quantize_mod.mx9_fake_quantize
+    # format=="mx9" dispatches to the REAL packed kernel (see patcher.py), not
+    # the mx9_fake_quantize emulation. Count calls on BOTH to prove which path
+    # actually fires: emulation must stay untouched, the real kernel must be
+    # hit exactly twice (weight + input activation).
+    import alto.kernels.mx.mx9_quantization as mx9_kernel_mod
 
-    def counted_mx9(input_tensor, *args, **kwargs):
-        calls.append(tuple(input_tensor.shape))
-        return original_mx9(input_tensor, *args, **kwargs)
+    fake_calls = []
+    original_mx9_fake = quantize_mod.mx9_fake_quantize
 
-    monkeypatch.setattr(quantize_mod, "mx9_fake_quantize", counted_mx9)
+    def counted_mx9_fake(input_tensor, *args, **kwargs):
+        fake_calls.append(tuple(input_tensor.shape))
+        return original_mx9_fake(input_tensor, *args, **kwargs)
 
-    x = torch.randn(2, 16)
+    monkeypatch.setattr(quantize_mod, "mx9_fake_quantize", counted_mx9_fake)
+
+    packed_calls = []
+    original_convert_to_mx9 = mx9_kernel_mod.convert_to_mx9
+
+    def counted_convert_to_mx9(input_tensor, *args, **kwargs):
+        packed_calls.append(tuple(input_tensor.shape))
+        return original_convert_to_mx9(input_tensor, *args, **kwargs)
+
+    monkeypatch.setattr(mx9_kernel_mod, "convert_to_mx9", counted_convert_to_mx9)
+
+    x = torch.randn(2, 16).cuda()
     modifier.pre_step([model])
     modifier.post_step([model])  # must skip static weight baking for MX9 dynamic weight
     assert not hasattr(linear, "weight_observer")
@@ -159,8 +183,9 @@ def test_mx9_wa_recipe_toy_linear_lifecycle(monkeypatch):
 
     out = model(x)
     assert out.shape == (2, 16)
-    assert len(calls) == 2
-    assert (2, 16) in calls      # input activation QDQ
-    assert (16, 16) in calls     # weight QDQ
+    assert len(fake_calls) == 0        # emulation must NOT be used
+    assert len(packed_calls) == 2      # real packed kernel used for weight + activation
+    assert (2, 16) in packed_calls     # input activation QDQ
+    assert (16, 16) in packed_calls    # weight QDQ
 
     modifier.finalize([model])

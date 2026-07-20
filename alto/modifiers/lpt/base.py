@@ -214,7 +214,6 @@ class LowPrecisionTrainingModifier(Modifier):
         if self.lora_rank > 0:
             resolved_targets = list(self.resolved_config.values())
             for _fqn, config, parent, attr in model_config.traverse(Linear.Config):
-                #raise ValueError(f"[{_fqn}] cfg={config},\nparent={parent},\nattr={attr}")
                 for target in resolved_targets:
                     if is_match(_fqn, "Linear", target, self.ignore):
                         new_config = DecomposedLinear.Config(

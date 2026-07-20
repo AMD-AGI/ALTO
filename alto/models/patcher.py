@@ -129,4 +129,4 @@ class ModelPatcher:
             ).contiguous()
             return original_apply_rotary_emb_complex(xq, xk, rope_cache)
 
-        ComplexRoPE.apply_rotary_emb = apply_rotary_emb_complex
+        ComplexRoPE.apply_rotary_emb = classmethod(apply_rotary_emb_complex)

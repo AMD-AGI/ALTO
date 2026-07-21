@@ -1057,7 +1057,7 @@ def _mx_quant(
     xq = _quantize_fp8(
         x,
         scales,
-        philox_seed,
+        0,
         0,
         BLOCK_M=BM,
         BLOCK_N=BN,

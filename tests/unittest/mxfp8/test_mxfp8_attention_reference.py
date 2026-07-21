@@ -235,6 +235,84 @@ def test_backward_stage2_reference_matches_sdpa(config, causal):
 
 
 # ---------------------------------------------------------------------------
+# Public autograd path — user-facing forward + backward wrapper
+# ---------------------------------------------------------------------------
+
+public_autograd_cases = [
+    AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=4, num_head_kv=4, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=8, num_head_kv=2, head_dim_qk=128, head_dim_v=128),  # GQA
+]
+
+
+@cuda_only
+@pytest.mark.parametrize("config", public_autograd_cases)
+@pytest.mark.parametrize("causal", [True])
+def test_public_autograd_matches_sdpa(config, causal):
+    """Public ``triton_attention_mxfp8`` forward/backward must wire gradients correctly.
+
+    The lower-level backward op is tested across the large shape grid below. This
+    smaller test covers the user-facing autograd wrapper: saved tensors, ctx
+    metadata, backward op dispatch, and returned gradient positions.
+    """
+    from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    n_rep = config.num_head_q // config.num_head_kv
+
+    q, k, v = _make_qkv_bhsd(1, config, device, dtype)
+    do = _make_do_bhsd(1, config, device, dtype)
+    sm_scale = config.head_dim_qk**(-0.5)
+
+    q_ref = q.clone().detach().requires_grad_(True)
+    k_ref = k.clone().detach().requires_grad_(True)
+    v_ref = v.clone().detach().requires_grad_(True)
+    o_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v_ref, is_causal=causal, scale=sm_scale, enable_gqa=n_rep > 1)
+    o_ref.backward(do)
+
+    q_kernel = q.clone().detach().requires_grad_(True)
+    k_kernel = k.clone().detach().requires_grad_(True)
+    v_kernel = v.clone().detach().requires_grad_(True)
+    o_kernel = triton_attention_mxfp8(
+        q_kernel.contiguous(),
+        k_kernel.contiguous(),
+        v_kernel.contiguous(),
+        bias=None,
+        alibi_slopes=None,
+        sm_scale=sm_scale,
+        dropout_p=0.0,
+        cu_seqlens_q=0,
+        cu_seqlens_k=0,
+        max_seqlens_q=config.seqlen_q,
+        max_seqlens_k=config.seqlen_kv,
+        causal=causal,
+        return_scores=False,
+        use_exp2=True,
+        layout="bhsd",
+    )[0]
+    o_kernel.backward(do)
+
+    pairs = [
+        ("O", o_ref, o_kernel, 0.99, 20),
+        ("dQ", q_ref.grad, q_kernel.grad, 0.995, 18),
+        ("dK", k_ref.grad, k_kernel.grad, 0.995, 18),
+        ("dV", v_ref.grad, v_kernel.grad, 0.995, 18),
+    ]
+    rows = []
+    for name, ref, got, _, _ in pairs:
+        rows.append([f"{name} (public autograd vs sdpa)", calc_snr(ref, got), calc_cossim(ref, got)])
+    print()
+    print(tabulate(rows, headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
+
+    for name, ref, got, sim_threshold, snr_threshold in pairs:
+        sim = calc_cossim(ref, got)
+        snr = calc_snr(ref, got)
+        assert sim > sim_threshold, f"{name} public-autograd-vs-sdpa cosine-sim too low: {sim}"
+        assert snr > snr_threshold, f"{name} public-autograd-vs-sdpa SNR too low: {snr}"
+
+
+# ---------------------------------------------------------------------------
 # Backward Layer 2 — kernel vs Stage-2 (A1) golden reference
 #   The A1 backward kernel runs tl.dot_scaled in-kernel, so this requires CDNA4
 #   (like the forward Layer 2). Calls the backward op directly with the

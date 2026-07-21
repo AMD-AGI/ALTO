@@ -4,7 +4,7 @@
 
 ## Abstract
 
-Training large language models (LLMs) in sub-8-bit arithmetic promises substantial gains in memory bandwidth and compute throughput, yet FP4 formats introduce severe quantization error that can destabilize optimization. We present an open-source training recipe ([ALTO](https://github.com/AMD-AGI/ALTO)) for **GPT-OSS-20B**—a 20-billion-parameter mixture-of-experts (MoE) model—on the **MLPerf Small MoE** benchmark under the **MXFP4** microscaling format. Our recipe composes established techniques from [arXiv:2509.25149]—hybrid 1D/2D block quantization, randomized Hadamard transforms (RHT), and stochastic rounding (SR)—with a simplified weight de-oscillation scheme adapted from TetraJet-v2 [arXiv:2510.27527]. On C4 validation with global batch size 16, **MXFP4 + RHT + SR + de-oscillation** reaches a validation loss of **3.3350** at 16,128 steps, within **0.007** of the BF16 baseline (3.3283)—closing roughly **50%** of the gap left by MXFP4 without de-oscillation (3.3418). We additionally report negative end-to-end results from differential gradient estimation, outlier clipping, and macro-block scaling despite operator-level SNR gains. All experiments employ fake-quantized MXFP4 kernels on AMD MI300 hardware; wall-clock speed has not been optimized.
+Training large language models (LLMs) in sub-8-bit arithmetic promises substantial gains in memory bandwidth and compute throughput, yet FP4 formats introduce severe quantization error that can destabilize optimization. We present an open-source training recipe ([ALTO](https://github.com/AMD-AGI/ALTO)) for **GPT-OSS-20B**—a 20-billion-parameter mixture-of-experts (MoE) model—on the **MLPerf Small MoE** benchmark under the **MXFP4** microscaling format. Our recipe composes established techniques from [arXiv:2509.25149]—hybrid 1D/2D block quantization, randomized Hadamard transforms (RHT), and stochastic rounding (SR)—with a simplified weight de-oscillation scheme adapted from TetraJet-v2 [arXiv:2510.27527]. On C4 validation with global batch size 16, **MXFP4 + RHT + SR + de-oscillation** reaches a validation loss of **3.3350** at 16,128 steps, within **0.007** of the BF16 baseline (3.3283)—closing roughly **50%** of the gap left by MXFP4 without de-oscillation (3.3418). Measured by steps to reach the MLPerf quality target (validation loss 3.34), de-oscillation cuts the FP4 convergence overhead relative to BF16 from **+20.0%** to **+5.0%** at GBS=16 and from **+37.5%** to **+12.5%** at GBS=64. We additionally report negative end-to-end results from differential gradient estimation, outlier clipping, and macro-block scaling despite operator-level SNR gains. All experiments employ fake-quantized MXFP4 kernels on AMD MI300 hardware; wall-clock speed has not been optimized.
 
 ---
 
@@ -160,9 +160,9 @@ Compared to TetraJet-v2 [arXiv:2510.27527], our simplification uses a lower thre
 
 ### 3.5 Differential Gradient Estimation (DGE)
 
-[arXiv:2501.17116] introduces a **differentiable gradient estimator** (DGE) to replace the **straight-through estimator** (STE) when back-propagating through FP4 weight quantization. The idea is to approximate the gradient of the quantization mapping with a smooth function whose magnitude reflects local sensitivity within each representable bin.
+**Problem.** The straight-through estimator (STE) back-propagates through FP4 weight quantization as if the quantizer were the identity, discarding all information about local sensitivity within each representable bin. This yields a biased gradient that misrepresents how a weight perturbation actually moves the quantized value. [arXiv:2501.17116] addresses this with a **differentiable gradient estimator** (DGE) that approximates the gradient of the quantization mapping with a smooth function whose magnitude reflects local sensitivity within each bin—but its estimator is not continuous across bin boundaries, introducing discontinuities in the gradient field.
 
-We adopt this concept but use a modified formula. The estimator in [arXiv:2501.17116] is not continuous across bin boundaries, which can introduce discontinuities in the gradient field. ALTO instead uses a piecewise power-law surrogate that is continuous between segments. For a value $x$ lying in a bin of width $\delta$ with midpoint $m$, and smoothing parameter $k=5$, we define
+**Solution.** We adopt the DGE concept but use a modified formula: ALTO uses a piecewise power-law surrogate that is continuous between segments. For a value $x$ lying in a bin of width $\delta$ with midpoint $m$, and smoothing parameter $k=5$, we define
 
 $$
 f(x) = \left(\frac{\delta}{2}\right)^{1 - 1/k}\cdot\mathrm{sgn}(x - m)\cdot|x - m|^{1/k} + m,
@@ -189,16 +189,18 @@ For MXFP4, bin widths $\delta$ and midpoints $m$ are determined by the E2M1 repr
 
 ### 3.6 Outlier Clipping
 
-Two clipping modes are supported:
+**Problem.** A few large-magnitude elements inflate the per-block scale, consuming representable range and compressing or saturating the remaining elements, which lowers effective precision for the bulk of the distribution.
+
+**Solution.** We cap outliers before quantization to reclaim precision for the majority of elements. Two clipping modes are supported:
 
 - **Static clipping** scales inputs by $3/4$ before quantization and by $4/3$ after dequantization, with a compensating factor of $16/9$ on the weight-gradient path to preserve gradient consistency.
 - **Dynamic clipping** follows [arXiv:2502.05003] (*QuEST*): a per-block clipping threshold is estimated from the block standard deviation, $\hat{m} = (2.922/6)\,\mathrm{std}(\mathbf{x}_{\mathrm{block}})$, and requires co-use with RHT in our implementation.
 
 ### 3.7 Macro-Block Scaling
 
-[arXiv:2603.08713] proposes **Macro Block Scaling (MBS)** as a two-level scheme for MXFP4: a coarse macro-scale is applied before the standard 32-element MX block quantization, allocating higher-precision scaling at a larger granularity to better preserve outliers.
+**Problem.** A single UE8M0 scale shared by each 32-element MX block is a coarse granularity: when a block contains an outlier, the shared scale is dominated by that element and the remaining values lose precision, so outlier-induced saturation is only partially mitigated by standard MX block scaling.
 
-Our configuration applies MBS with 128×128 blocks on weights and 1×128 blocks on activations. Within each macro-block, the scale is derived so that the block maximum maps to the largest E2M1 representable magnitude 6.0:
+**Solution.** [arXiv:2603.08713] proposes **Macro Block Scaling (MBS)** as a two-level scheme for MXFP4: a coarse macro-scale is applied before the standard 32-element MX block quantization, allocating higher-precision scaling at a larger granularity to better preserve outliers. Our configuration applies MBS with 128×128 blocks on weights and 1×128 blocks on activations. Within each macro-block, the scale is derived so that the block maximum maps to the largest E2M1 representable magnitude 6.0:
 
 $$
 s_{\mathrm{macro}} = \frac{6}{\max_{i \in \mathrm{block}} |x_i|}.
@@ -208,7 +210,9 @@ The macro-scale is encoded as a shared mantissa: only the upper 8 mantissa bits 
 
 ### 3.8 Low-Rank Outlier Compensation
 
-Following the outlier-compensation paradigm, ALTO can decompose a linear layer as
+**Problem.** FP4 saturation clips the largest-magnitude components of a layer's computation, discarding information carried by a few outlier-dominated directions that a single low-precision GEMM cannot represent.
+
+**Solution.** Following the outlier-compensation paradigm, ALTO can decompose a linear layer into a full MXFP4 GEMM plus a low-rank branch that captures the lost outlier energy:
 
 $$
 \mathbf{O} = \mathbf{X}\mathbf{W}^{\top} + \bigl((\mathbf{X}\mathbf{V}) \odot \boldsymbol{\sigma}\bigr)\mathbf{U}^{\top},
@@ -363,7 +367,7 @@ We state the principal limitations of the present work explicitly.
 
 ## 6. Conclusion
 
-We have described an ALTO recipe for training GPT-OSS-20B under MXFP4 on the MLPerf Small MoE benchmark. **2D block quantization, RHT, and SR** are adopted from [arXiv:2509.25149] and form a strong baseline; at GBS=16 and 16,128 steps, this stack reaches validation loss 3.3418 versus 3.3283 for BF16 (+0.014). **Weight de-oscillation**, adapted from OsciReset in TetraJet-v2 [arXiv:2510.27527], closes half of the remaining gap—final loss **3.3350** (+0.007 vs. BF16)—with only modest additional optimizer-state memory and no extra GEMMs.
+We have described an ALTO recipe for training GPT-OSS-20B under MXFP4 on the MLPerf Small MoE benchmark. **2D block quantization, RHT, and SR** are adopted from [arXiv:2509.25149] and form a strong baseline; at GBS=16 and 16,128 steps, this stack reaches validation loss 3.3418 versus 3.3283 for BF16 (+0.014). **Weight de-oscillation**, adapted from OsciReset in TetraJet-v2 [arXiv:2510.27527], closes half of the remaining gap—final loss **3.3350** (+0.007 vs. BF16)—with only modest additional optimizer-state memory and no extra GEMMs. It also sharply reduces the steps-to-target overhead: reaching the 3.34 quality target costs only **+5.0%** more steps than BF16 at GBS=16 (down from **+20.0%** for plain MXFP4) and **+12.5%** at GBS=64 (down from **+37.5%**).
 
 Our ablations reinforce a clear pattern: techniques that raise synthetic operator SNR (**MBS**, **static clipping**) do not improve validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful at scale. **Low-rank compensation** is rank-sensitive: $r=32$ is neutral to slightly harmful at GBS=16, but $r=128$ improves validation loss by 0.017 at GBS=64—a meaningful gain, though still behind **de-oscillation** ($\Delta = -0.052$) in both accuracy and compute efficiency. At GBS=64, the FP4 deficit widens but de-oscillation again recovers most of the loss gap, supporting its use as the late-training stabilizer in the recommended recipe: **1d2d + RHT + SR + de-oscillation**.
 

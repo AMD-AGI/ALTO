@@ -68,7 +68,6 @@ def gpt_oss_20b() -> Trainer.Config:
     config.validator.freq = 10
     config.validator.steps = 10
     config.activation_checkpoint.mode = "none"
-    config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 
@@ -96,9 +95,10 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.dataloader.dataset = "megatron"
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 8
+    config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
-    config.checkpoint.enable = False
+    config.checkpoint.enable = True
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2
     config.validator.enable = True
@@ -107,7 +107,6 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.validator.freq = 768
     config.validator.steps = 64
     config.activation_checkpoint.mode = "none"
-    config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 

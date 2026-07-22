@@ -10,6 +10,26 @@ from alto.kernels.mxfp8.mxfp8_quantization import (
     FORMAT_TO_TARGET_MAX,
     FORMAT_TO_MBITS,
 )
+from alto.kernels.mxfp8.mxfp8_grouped_gemm.autotune import ALIGN_SIZE_M
+
+# Re-exported so test call-sites can ``from .utils import calc_snr, calc_cossim``
+# (mirrors mxfp4/nvfp4 utils); the single source of truth lives in
+# ``alto.kernels.fp4.testing_utils``.
+from alto.kernels.fp4.testing_utils import calc_snr, calc_cossim  # noqa: F401
+
+
+def make_indices(num_groups, num_experts, device):
+    """Contiguous routing: every ALIGN_SIZE_M-token group shares one expert.
+
+    Matches the mxfp4/nvfp4 convention (random per-group expert id). Calls to
+    ``prepare_data`` reset the global seed, so the ``randint`` draws that follow
+    them are deterministic across runs without an explicit seed here.
+    """
+    indices = torch.zeros(num_groups * ALIGN_SIZE_M, dtype=torch.int32, device=device)
+    for g in range(num_groups):
+        e = torch.randint(0, num_experts, (1,), device=device, dtype=torch.int32).item()
+        indices[g * ALIGN_SIZE_M:(g + 1) * ALIGN_SIZE_M] = e
+    return indices
 
 
 def prepare_data(tensor_shape, data_type, pattern="random"):

@@ -60,6 +60,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_outer_scale: bool,
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
+        scale_format: str = "e4m3",
     ):
         weight = unwrap_weight_wrapper(weight)
         # Align weight dtype with activation so saved QDQ tensors share a
@@ -77,11 +78,13 @@ class NVFP4LinearFunction(torch.autograd.Function):
             x_2d, axis=-1,
             is_2d_block=use_2dblock_x,
             use_outer_scale=use_outer_scale,
+            scale_format=scale_format,
         )
         w_dq = _qdq(
             weight, axis=-1,
             is_2d_block=use_2dblock_w,
             use_outer_scale=use_outer_scale,
+            scale_format=scale_format,
         )
 
         y = x_dq @ w_dq.T
@@ -117,6 +120,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                     weight, axis=0,
                     is_2d_block=False,
                     use_outer_scale=use_outer_scale,
+                    scale_format=scale_format,
                     return_raw=True,
                 )
             else:
@@ -124,6 +128,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                     weight, axis=0,
                     is_2d_block=False,
                     use_outer_scale=use_outer_scale,
+                    scale_format=scale_format,
                 )
         else:
             # 2D block scaling is axis-invariant, so the fprop quantized view is
@@ -136,6 +141,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                     weight, axis=-1,
                     is_2d_block=use_2dblock_w,
                     use_outer_scale=use_outer_scale,
+                    scale_format=scale_format,
                     return_raw=True,
                 )
             w_dq_axis0 = w_dq
@@ -167,6 +173,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 x_for_axis0, axis=0,
                 is_2d_block=False,
                 use_outer_scale=use_outer_scale,
+                scale_format=scale_format,
             )
         else:
             x_dq_axis0 = x_dq
@@ -181,6 +188,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
         ctx.use_outer_scale = use_outer_scale
         ctx.hadamard_transform = hadamard_transform
         ctx.use_dge = use_dge
+        ctx.scale_format = scale_format
 
         return y.view(*original_shape[:-1], -1)
 
@@ -210,6 +218,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 is_2d_block=True,
                 use_outer_scale=ctx.use_outer_scale,
                 use_sr=ctx.use_sr_grad,
+                scale_format=ctx.scale_format,
             )
             grad_output_m_dq = grad_output_dq
         else:
@@ -218,6 +227,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 is_2d_block=False,
                 use_outer_scale=ctx.use_outer_scale,
                 use_sr=ctx.use_sr_grad,
+                scale_format=ctx.scale_format,
             )
             # Apply the same Hadamard rotation that was used on x in forward,
             # to grad_output before axis=0 QDQ. See the forward-side comment
@@ -231,6 +241,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
                 is_2d_block=False,
                 use_outer_scale=ctx.use_outer_scale,
                 use_sr=ctx.use_sr_grad,
+                scale_format=ctx.scale_format,
             )
 
         grad_inputs = grad_output_dq @ w_dq
@@ -259,7 +270,11 @@ class NVFP4LinearFunction(torch.autograd.Function):
         return (
             grad_inputs.view(*original_shape[:-1], w_dq.shape[-1]),
             grad_weights,
-            None, None, None, None, None, None,
+            # Match forward's positional arity: (x, weight, use_2dblock_x,
+            # use_2dblock_w, use_sr_grad, use_outer_scale, hadamard_transform,
+            # use_dge, scale_format).  9 inputs → 9 grad slots, with a None
+            # for every non-Tensor / non-grad-tracked input.
+            None, None, None, None, None, None, None,
         )
 
 
@@ -272,6 +287,7 @@ def _to_nvfp4_then_scaled_mm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    scale_format: str = "e4m3",
 ) -> torch.Tensor:
     """Build the optional Hadamard transform and apply ``NVFP4LinearFunction``.
 
@@ -294,4 +310,5 @@ def _to_nvfp4_then_scaled_mm(
         use_outer_scale,
         hadamard_transform,
         use_dge,
+        scale_format,
     )

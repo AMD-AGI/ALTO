@@ -92,6 +92,7 @@ def _nvfp4_grouped_wgrad(
     use_outer_scale: bool,
     use_2dblock_x: bool,
     output_dtype: torch.dtype,
+    scale_format: str = "e4m3",
 ) -> torch.Tensor:
     """Quantize ``grad_output`` and compute the grouped weight gradient.
 
@@ -103,11 +104,13 @@ def _nvfp4_grouped_wgrad(
         g_m_dq = _qdq(
             grad_output, axis=-1, is_2d_block=True,
             use_outer_scale=use_outer_scale, use_sr=use_sr_grad,
+            scale_format=scale_format,
         )
     else:
         g_m_dq = _qdq(
             grad_output, axis=0, is_2d_block=False,
             use_outer_scale=use_outer_scale, use_sr=use_sr_grad,
+            scale_format=scale_format,
         )
 
     if use_cdna4_grouped_backend():

@@ -4,9 +4,8 @@
 
 """Weight de-oscillation hook for FP4-aware AdamW.
 
-This module provides :class:`DeOscillationOptimizersContainer`, an
-:class:`OptimizersContainer` subclass that installs an optimizer
-``step_post_hook`` implementing the weight de-oscillation strategy.
+This module provides :class:`DeOscillationConfig` and :func:`enable_de_oscillation`,
+which install an optimizer ``step_post_hook`` implementing the weight de-oscillation strategy.
 
 Motivation
 ----------
@@ -59,7 +58,7 @@ forward / backward GEMMs see, with no axis inference duplicated here.
 
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -77,7 +76,7 @@ from alto.kernels.dispatch.tensor import (
 
 __all__ = [
     "DeOscillationConfig",
-    "DeOscillationOptimizersContainer",
+    "enable_de_oscillation",
 ]
 
 
@@ -133,8 +132,10 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
     grouped-MM expert weights (axis ``-2``) that share a config.
     """
     from alto.kernels.fp4 import (
+        convert_from_amdfp4,
         convert_from_mxfp4,
         convert_from_nvfp4,
+        convert_to_amdfp4,
         convert_to_mxfp4,
         convert_to_nvfp4,
     )
@@ -166,8 +167,17 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 dequantized = dequantized[:original_rows, :]
             return dequantized
 
-    elif cfg.precision == "nvfp4":
+    elif cfg.precision in ("nvfp4", "amdfp4"):
         use_outer_scale = cfg.two_level_scaling == "tensorwise"
+        # AMD-FP4 shares the NVFP4 micro-block layout (16-element blocks +
+        # FP32 outer scale); the only difference is the inner-scale grid,
+        # which is pinned by *which* convert ops we call (amdfp4 → UE5M3,
+        # nvfp4 → E4M3).  Everything else (padding, outer scale, axis) is
+        # identical, so the closure below is shared.
+        if cfg.precision == "amdfp4":
+            convert_to_fp4, convert_from_fp4 = convert_to_amdfp4, convert_from_amdfp4
+        else:
+            convert_to_fp4, convert_from_fp4 = convert_to_nvfp4, convert_from_nvfp4
 
         def qdq(w: torch.Tensor, axis: int) -> torch.Tensor:
             # hotfix for GPT-OSS 20B model
@@ -183,12 +193,12 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 else None
             )
 
-            data_lp, scales = convert_to_nvfp4(
+            data_lp, scales = convert_to_fp4(
                 w, axis=axis, is_2d_block=is_2d_block,
                 outer_scale=outer_scale,
                 update_outer_scale=use_outer_scale,
             )
-            dequantized = convert_from_nvfp4(
+            dequantized = convert_from_fp4(
                 data_lp,
                 scales,
                 output_dtype=w.dtype,
@@ -291,7 +301,7 @@ class _DeOscillationHook:
         if wrapper is None:
             return None
         cfg = wrapper.config
-        if cfg is None or cfg.precision not in ("mxfp4", "nvfp4"):
+        if cfg is None or cfg.precision not in ("mxfp4", "nvfp4", "amdfp4"):
             return None
         return wrapper
 
@@ -390,9 +400,7 @@ class _DeOscillationHook:
             # Snap into the wrapper's underlying storage in place; the
             # FP4 GEMM dispatch on the next forward will read this new
             # value.
-            raw.copy_(
-                torch.where(reset_mask, w_qdq.to(raw.dtype), raw)
-            )
+            raw[reset_mask] = w_qdq[reset_mask]
             # Refresh the snapshot so the next period does not see the
             # snap-to-bin-center as a large FP movement on its first
             # step.
@@ -427,7 +435,7 @@ class _DeOscillationHook:
 
 
 def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillationConfig) -> None:
-    if not config.enable:
+    if not config.enable or de_oscillation_enabled(optimizers):
         return
     hook = _DeOscillationHook(config)
     for opt in optimizers.optimizers:
@@ -436,6 +444,16 @@ def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillation
         "[de-osc] enabled "
         f"period={config.period} "
         f"ratio_threshold={config.ratio_threshold} "
-        f"log_freq={config.log_freq}; "
-        "scope=MXFP4/NVFP4 wrapped weights"
+        f"log_freq={config.log_freq}"
     )
+
+
+def de_oscillation_enabled(optimizers: OptimizersContainer):
+    """
+    Check if weight de-oscillation is enabled for any optimizer in the container.
+    """
+    for opt in optimizers.optimizers:
+        hooks = getattr(opt, "_optimizer_step_post_hooks", {})
+        if any(isinstance(h, _DeOscillationHook) for h in hooks.values()):
+            return True
+    return False

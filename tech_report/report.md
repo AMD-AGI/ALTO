@@ -22,7 +22,7 @@ This report describes ALTO's methodology for closing the accuracy gap between MX
 
 ### 2.1 Benchmark: MLPerf Small MoE
 
-We evaluate on the [MLPerf Small MoE** training benchmark](https://github.com/mlcommons/training/tree/master/small_llm_moe_pretraining/primus), which specifies pretraining of a sparse MoE LLM from scratch and measuring convergence to a fixed validation-loss target. Our target model is **GPT-OSS-20B**, an open-source 20-billion-parameter mixture-of-experts architecture released by OpenAI.
+We evaluate on the [MLPerf Small MoE training benchmark](https://github.com/mlcommons/training/tree/master/small_llm_moe_pretraining/primus), which specifies pretraining of a sparse MoE LLM from scratch and measuring convergence to a fixed validation-loss target. Our target model is **GPT-OSS-20B**, an open-source 20-billion-parameter mixture-of-experts architecture released by OpenAI.
 
 **Task and model.** The benchmark trains the GPT-OSS-20B MoE model at a sequence length of 8,192 tokens with expert parallelism degree 8. The reference configuration uses a micro batch size of 2, global batch size 16, base learning rate $8 \times 10^{-4}$ with a cosine-decay schedule and warmup, weight decay 0.1, and AdamW ($\beta_1=0.9$, $\beta_2=0.95$, $\epsilon=1\times 10^{-5}$), for up to 1,200,000 training iterations.
 

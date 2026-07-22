@@ -115,13 +115,11 @@ def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
     """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
     config = gpt_oss_20b_pretrain()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-outputs"
-    config.dataloader.dataset = "c4"
-    config.dataloader.dataset_path = None
-    config.validator.dataloader.dataset = "c4_validation"
-    config.validator.dataloader.dataset_path = None
-    config.checkpoint.initial_load_in_hf = True
-    config.checkpoint.initial_load_in_hf_quantized = True
-    config.checkpoint.interval = 100
+    config.dataloader.dataset = "megatron"
+    config.dataloader.dataset_path = "/shared_rccl/nfrumkin/data/c4-train.en_6_text_document.idx"
+    config.validator.dataloader.dataset = "megatron"
+    config.validator.dataloader.dataset_path = "/shared_rccl/nfrumkin/data/c4-validation-91205-samples.en_text_document.idx"
+    config.checkpoint.interval = 1000
     return config
 
 def gpt_oss_20b_lpt() -> Trainer.Config:

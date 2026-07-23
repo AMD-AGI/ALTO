@@ -26,10 +26,21 @@ Tests are organized in four layers:
 import pytest
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 
 from alto.modifiers.quantization import mx as _mxref
 from alto.modifiers.quantization.mx import mx9_fake_quantize, BLOCK_SIZE
-from alto.kernels.mx.mx9_quantization import convert_to_mx9, convert_from_mx9
+from alto.kernels.mx.mx9_quantization import (
+    PRIME_GROUP,
+    convert_to_mx9,
+    convert_from_mx9,
+)
+from alto.kernels.mx._mx_common import (
+    _floor_exp,
+    _round_half_even,
+    _calculate_mx_exp as _calculate_mx9_exp,
+)
 from alto.kernels.fp4.testing_utils import calc_snr
 
 pytestmark = pytest.mark.skipif(
@@ -161,6 +172,148 @@ def _mx9_clamp127_ref_via_mxpy(x: torch.Tensor, block_size: int = BLOCK_SIZE,
     return out.transpose(axis, -1)
 
 
+# --------------------------------------------------------------------------- #
+# Probe kernels for device helpers (Stage 1 / Stage 2)
+# --------------------------------------------------------------------------- #
+
+@triton.jit
+def _probe_floor_exp_kernel(x_ptr, o_ptr, N: tl.constexpr):
+    i = tl.arange(0, N)
+    tl.store(o_ptr + i, _floor_exp(tl.load(x_ptr + i)))
+
+
+@triton.jit
+def _probe_round_kernel(y_ptr, o_ptr, N: tl.constexpr):
+    i = tl.arange(0, N)
+    tl.store(o_ptr + i, _round_half_even(tl.load(y_ptr + i)))
+
+
+@triton.jit
+def _probe_calc_kernel(
+    x_ptr, se_ptr, me_ptr, pr_ptr,
+    BPP: tl.constexpr, BLOCK_SIZE: tl.constexpr, PRIME_GROUP: tl.constexpr,
+):
+    N_PAIRS: tl.constexpr = BLOCK_SIZE // PRIME_GROUP
+    rows = tl.arange(0, BPP)
+    cols = tl.arange(0, BLOCK_SIZE)
+    offs = rows[:, None] * BLOCK_SIZE + cols[None, :]
+    x = tl.load(x_ptr + offs)
+    shared_exp, max_exp, pair = _calculate_mx9_exp(x, BPP, BLOCK_SIZE, PRIME_GROUP)
+    tl.store(se_ptr + offs, shared_exp)
+    tl.store(me_ptr + rows, max_exp)
+    pcols = tl.arange(0, N_PAIRS)
+    tl.store(pr_ptr + rows[:, None] * N_PAIRS + pcols[None, :], pair)
+
+
+def _run_calc(xb, block_size=BLOCK_SIZE, prime_group=PRIME_GROUP):
+    n_blocks = xb.shape[0]
+    n_pairs = block_size // prime_group
+    se = torch.empty((n_blocks, block_size), dtype=torch.int32, device="cuda")
+    me = torch.empty((n_blocks,), dtype=torch.int32, device="cuda")
+    pr = torch.empty((n_blocks, n_pairs), dtype=torch.int32, device="cuda")
+    _probe_calc_kernel[(1,)](xb, se, me, pr, BPP=n_blocks,
+                             BLOCK_SIZE=block_size, PRIME_GROUP=prime_group)
+    return se, me, pr
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1: _floor_exp
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_floor_exp_matches_bit_extraction(dtype):
+    torch.manual_seed(6)
+    x = (torch.randn(64, dtype=dtype, device="cuda") * 37.0)
+    x = torch.where(x.abs() < 1e-3, torch.full_like(x, 1e-3), x)
+    out = torch.empty(64, dtype=torch.int32, device="cuda")
+    _probe_floor_exp_kernel[(1,)](x, out, N=64)
+    ref = _bit_exponent(x).to(torch.int32)
+    assert torch.equal(out, ref)
+
+
+def test_floor_exp_known_powers_of_two():
+    x = torch.tensor([1.0, 2.0, 3.9, 4.0, 0.5, 0.25, 130.0, -8.0],
+                     dtype=torch.float32, device="cuda")
+    out = torch.empty(8, dtype=torch.int32, device="cuda")
+    _probe_floor_exp_kernel[(1,)](x, out, N=8)
+    ref = torch.tensor([0, 1, 1, 2, -1, -2, 7, 3], dtype=torch.int32, device="cuda")
+    assert torch.equal(out, ref)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1: _round_half_even
+# --------------------------------------------------------------------------- #
+
+def test_round_half_even_ties_and_regular():
+    y = torch.tensor(
+        [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5, 4.5,
+         0.4, 0.6, -0.4, -0.6, 2.4, 2.6, -2.4, -2.6],
+        dtype=torch.float32, device="cuda",
+    )
+    out = torch.empty_like(y)
+    _probe_round_kernel[(1,)](y, out, N=y.numel())
+    ref = torch.round(y)
+    assert torch.equal(out, ref)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 2: _calculate_mx9_exp
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("n_blocks", [8, 16, 32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_calculate_exp_matches_torch(n_blocks, dtype):
+    torch.manual_seed(6)
+    xb = torch.randn(n_blocks, BLOCK_SIZE, dtype=dtype, device="cuda") * 5.0
+    se, me, pr = _run_calc(xb)
+
+    # Reference: recompute in pure PyTorch.
+    clean = torch.nan_to_num(xb, nan=0.0, posinf=0.0, neginf=0.0)
+    amax = clean.abs().amax(dim=1, keepdim=True)
+    rme = _bit_exponent(amax).reshape(n_blocks)
+    t_exp = _bit_exponent(clean)
+    demote = (rme[:, None] - t_exp) >= 1
+    n_pairs = BLOCK_SIZE // PRIME_GROUP
+    d = demote.reshape(n_blocks, n_pairs, PRIME_GROUP)
+    rpr = (d.sum(-1) == PRIME_GROUP).long()
+    pair_b = rpr.reshape(n_blocks, n_pairs, 1).expand(n_blocks, n_pairs, PRIME_GROUP).reshape(n_blocks, BLOCK_SIZE)
+    rse = rme[:, None] - pair_b
+
+    assert torch.equal(me.long(), rme), "max_exp mismatch"
+    assert torch.equal(se.long(), rse), "shared_exp mismatch"
+    assert torch.equal(pr.long(), rpr), "prime pair mismatch"
+
+
+def test_calculate_exp_constructed_prime_pattern():
+    """amax=8 (max_exp=3); first 8 elements at 8 (not demoted), last 8 at 1
+    (demoted). Pairs 0-3 -> prime=0; pairs 4-7 -> prime=1."""
+    xb = torch.empty(1, BLOCK_SIZE, dtype=torch.float32, device="cuda")
+    xb[0, :8] = 8.0
+    xb[0, 8:] = 1.0
+    se, me, pr = _run_calc(xb)
+    assert me[0].item() == 3
+    assert pr[0].tolist() == [0, 0, 0, 0, 1, 1, 1, 1]
+    assert se[0].tolist() == [3] * 8 + [2] * 8
+
+
+def test_calculate_exp_all_zero_block():
+    """All-zero block: amax=0 -> _floor_exp(0)=-127; nothing demoted."""
+    xb = torch.zeros(2, BLOCK_SIZE, dtype=torch.float32, device="cuda")
+    se, me, pr = _run_calc(xb)
+    assert torch.all(me == -127)
+    assert torch.all(pr == 0)
+    assert torch.all(se == -127)
+
+
+def test_calculate_exp_nan_inf_do_not_pollute():
+    """Inf/NaN sanitized out of exponent statistics: max_exp driven by finite values."""
+    xb = torch.full((1, BLOCK_SIZE), 3.0, dtype=torch.float32, device="cuda")
+    xb[0, 0] = float("inf")
+    xb[0, 1] = float("nan")
+    se, me, pr = _run_calc(xb)
+    assert me[0].item() == 1   # finite amax=3 -> max_exp=1
+
+
 def _rand(shape, dtype, seed=0):
     torch.manual_seed(seed)
     return torch.randn(*shape, dtype=dtype)
@@ -271,8 +424,8 @@ def test_intermediates_match_torch_reference(shape, dtype):
     rq, re, rp, _ = _torch_intermediates(x, block_size=BLOCK_SIZE)
     q = packed[:, _Q_OFFSET:].view(torch.int8)
     assert torch.equal(q, rq), f"q mismatch: {(q != rq).sum().item()} elements"
-    assert torch.equal(packed[:, 0], re), f"max_exp mismatch"
-    assert torch.equal(packed[:, _PRIME_OFFSET:_Q_OFFSET], rp), f"prime mismatch"
+    assert torch.equal(packed[:, 0], re), "max_exp mismatch"
+    assert torch.equal(packed[:, _PRIME_OFFSET:_Q_OFFSET], rp), "prime mismatch"
 
 
 def test_intermediates_constructed_demote():
@@ -386,6 +539,23 @@ def test_non_contiguous_input(dtype):
     ref_t = _mx9_clamp127_ref(x, block_size=BLOCK_SIZE).T.contiguous()
     assert torch.equal(out_t, ref_t), \
         f"non-contiguous max diff={(out_t.float()-ref_t.float()).abs().max().item()}"
+
+
+def test_non_contiguous_packed_input():
+    x = _rand((4, 64), torch.float32).cuda()
+    packed = convert_to_mx9(x)
+    storage = torch.empty(
+        (packed.shape[0], packed.shape[1] * 2),
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    packed_view = storage[:, ::2]
+    packed_view.copy_(packed)
+    assert not packed_view.is_contiguous()
+
+    expected = convert_from_mx9(packed, x.dtype, x.shape)
+    actual = convert_from_mx9(packed_view, x.dtype, x.shape)
+    assert torch.equal(actual, expected)
 
 
 def test_padding_non_divisible_last_dim():
@@ -574,6 +744,31 @@ def test_rejects_block_size_not_16():
         convert_to_mx9(x, block_size=32)   # even though multiple of 16, only 16 is supported
 
 
+@pytest.mark.parametrize("blocks_per_program", [0, 3, -1])
+def test_rejects_invalid_blocks_per_program(blocks_per_program):
+    x = _rand((4, 16), torch.float32).cuda()
+    packed = convert_to_mx9(x)
+    with pytest.raises(AssertionError, match="positive power of two"):
+        convert_to_mx9(x, blocks_per_program=blocks_per_program)
+    with pytest.raises(AssertionError, match="positive power of two"):
+        convert_from_mx9(
+            packed,
+            x.dtype,
+            x.shape,
+            blocks_per_program=blocks_per_program,
+        )
+
+
+def test_rejects_empty_quantization_axis():
+    x = torch.empty((2, 0), dtype=torch.float32, device="cuda")
+    with pytest.raises(AssertionError, match="non-empty quantization axis"):
+        convert_to_mx9(x)
+
+    packed = torch.empty((0, _N_PACKED_BYTES), dtype=torch.uint8, device="cuda")
+    with pytest.raises(AssertionError, match="non-empty quantization axis"):
+        convert_from_mx9(packed, torch.float32, x.shape)
+
+
 def test_rejects_unknown_out_dtype():
     x = _rand((4, 16), torch.float32).cuda()
     packed = convert_to_mx9(x)
@@ -586,3 +781,10 @@ def test_rejects_bad_packed_dtype():
     packed = convert_to_mx9(x).to(torch.int8)   # wrong dtype (should be uint8)
     with pytest.raises(AssertionError):
         convert_from_mx9(packed, torch.float32, x.shape)
+
+
+def test_rejects_out_shape_inconsistent_with_packed():
+    x = _rand((4, 64), torch.float32).cuda()
+    packed = convert_to_mx9(x)
+    with pytest.raises(AssertionError, match="inconsistent with packed tensor"):
+        convert_from_mx9(packed, torch.float32, (3, 64))

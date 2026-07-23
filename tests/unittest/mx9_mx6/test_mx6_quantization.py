@@ -16,7 +16,8 @@ sign bitmaps, the +/-15 clamp boundary, block independence).
 
 Coverage by stage
 -----------------
-  - Stage 1: ``_sanitize`` / ``_floor_exp`` / ``_round_half_even``
+  - Stage 1: ``_floor_exp`` / ``_round_half_even`` /
+             ``_pack_bits8`` / ``_unpack_bits8``
   - Stage 2: ``_calculate_mx6_exp`` (shared_exp / max_exp / prime pair bits)
   - Stage 3: ``_pack_mx6`` (Python-export-compatible encoding) and the pack->unpack
     round-trip vs the clamp-15 reference
@@ -33,15 +34,18 @@ import torch
 import triton
 import triton.language as tl
 
+from alto.kernels.mx._mx_common import (
+    _floor_exp,
+    _round_half_even,
+    _pack_bits8,
+    _unpack_bits8,
+    _calculate_mx_exp as _calculate_mx6_exp,
+)
 from alto.kernels.mx.mx6_quantization import (
     BLOCK_SIZE,
     PRIME_GROUP,
     QUANT_BIT,
     BLOCKS_PER_PROG_DEFAULT,
-    _sanitize,
-    _floor_exp,
-    _round_half_even,
-    _calculate_mx6_exp,
     _pack_mx6,
     _unpack_mx6,
     _convert_to_mx6_kernel,
@@ -97,12 +101,6 @@ def _torch_calc_ref(xb: torch.Tensor, block_size: int, prime_group: int):
 # Probe kernels (test-only harnesses that invoke the device helpers)
 # --------------------------------------------------------------------------- #
 @triton.jit
-def _probe_sanitize_kernel(x_ptr, o_ptr, N: tl.constexpr):
-    i = tl.arange(0, N)
-    tl.store(o_ptr + i, _sanitize(tl.load(x_ptr + i)))
-
-
-@triton.jit
 def _probe_floor_exp_kernel(x_ptr, o_ptr, N: tl.constexpr):
     i = tl.arange(0, N)
     tl.store(o_ptr + i, _floor_exp(tl.load(x_ptr + i)))
@@ -112,6 +110,29 @@ def _probe_floor_exp_kernel(x_ptr, o_ptr, N: tl.constexpr):
 def _probe_round_kernel(y_ptr, o_ptr, N: tl.constexpr):
     i = tl.arange(0, N)
     tl.store(o_ptr + i, _round_half_even(tl.load(y_ptr + i)))
+
+
+@triton.jit
+def _probe_bits8_kernel(
+    bits_ptr,
+    packed_ptr,
+    unpacked_ptr,
+    BPP: tl.constexpr,
+    N_BYTES: tl.constexpr,
+):
+    N_BITS: tl.constexpr = N_BYTES * 8
+    rows = tl.arange(0, BPP)
+    bit_cols = tl.arange(0, N_BITS)
+    bit_offs = rows[:, None] * N_BITS + bit_cols[None, :]
+    bits = tl.load(bits_ptr + bit_offs)
+
+    packed = _pack_bits8(bits, BPP, N_BYTES)
+    byte_cols = tl.arange(0, N_BYTES)
+    byte_offs = rows[:, None] * N_BYTES + byte_cols[None, :]
+    tl.store(packed_ptr + byte_offs, packed)
+
+    unpacked = _unpack_bits8(packed, BPP, N_BYTES)
+    tl.store(unpacked_ptr + bit_offs, unpacked)
 
 
 @triton.jit
@@ -129,20 +150,6 @@ def _probe_calc_kernel(
     tl.store(me_ptr + rows, max_exp)
     pcols = tl.arange(0, N_PAIRS)
     tl.store(pr_ptr + rows[:, None] * N_PAIRS + pcols[None, :], pair)
-
-
-# --------------------------------------------------------------------------- #
-# Stage 1: _sanitize
-# --------------------------------------------------------------------------- #
-def test_sanitize_replaces_nonfinite_with_zero():
-    x = torch.tensor(
-        [1.0, float("nan"), float("inf"), float("-inf"), -2.0, 0.0, 3.5, float("nan")],
-        dtype=torch.float32, device="cuda",
-    )
-    out = torch.empty_like(x)
-    _probe_sanitize_kernel[(1,)](x, out, N=x.numel())
-    ref = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-    assert torch.equal(out, ref)
 
 
 # --------------------------------------------------------------------------- #
@@ -183,6 +190,32 @@ def test_round_half_even_ties_and_regular():
     _probe_round_kernel[(1,)](y, out, N=y.numel())
     ref = torch.round(y)   # torch.round is round-half-to-even
     assert torch.equal(out, ref)
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1: _pack_bits8 / _unpack_bits8
+# --------------------------------------------------------------------------- #
+def test_bits8_pack_order_and_roundtrip():
+    bits = torch.tensor(
+        [
+            [0] * 8 + [1] * 8,
+            [1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    packed = torch.empty((2, 2), dtype=torch.uint8, device="cuda")
+    unpacked = torch.empty_like(bits)
+
+    _probe_bits8_kernel[(1,)](bits, packed, unpacked, BPP=2, N_BYTES=2)
+
+    expected_packed = torch.tensor(
+        [[0x00, 0xFF], [0x55, 0xAA]],
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    assert torch.equal(packed, expected_packed)
+    assert torch.equal(unpacked, bits)
 
 
 # --------------------------------------------------------------------------- #
@@ -498,6 +531,7 @@ def _launch_to(x2d, bpp=BLOCKS_PER_PROG_DEFAULT):
         x2d, packed, n_blocks, cols, blocks_per_row, sr, sc,
         BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
         PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
+        N_PACKED_BYTES=_N_PACKED_BYTES,
     )
     return packed, n_blocks
 
@@ -518,6 +552,7 @@ def _launch_to_ragged(x2d, bpp=BLOCKS_PER_PROG_DEFAULT):
         x2d, packed, n_blocks, cols, blocks_per_row, sr, sc,
         BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
         PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
+        N_PACKED_BYTES=_N_PACKED_BYTES,
     )
     return packed, n_blocks
 
@@ -531,6 +566,7 @@ def _launch_from(packed, n_blocks, out_dtype, bpp=BLOCKS_PER_PROG_DEFAULT):
         BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
         PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
         OUT_DTYPE=_TL_DTYPE[out_dtype],
+        N_PACKED_BYTES=_N_PACKED_BYTES,
     )
     return y
 
@@ -809,6 +845,23 @@ def test_host_non_contiguous_input(dtype):
         f"non-contiguous max diff={(out_t.float() - ref_t.float()).abs().max().item()}"
 
 
+def test_host_non_contiguous_packed_input():
+    x = _rand((4, 64), torch.float32).cuda()
+    packed = convert_to_mx6(x)
+    storage = torch.empty(
+        (packed.shape[0], packed.shape[1] * 2),
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    packed_view = storage[:, ::2]
+    packed_view.copy_(packed)
+    assert not packed_view.is_contiguous()
+
+    expected = convert_from_mx6(packed, x.dtype, x.shape)
+    actual = convert_from_mx6(packed_view, x.dtype, x.shape)
+    assert torch.equal(actual, expected)
+
+
 def test_host_padding_non_divisible_last_dim():
     x = _rand((3, 40), torch.float32).cuda()   # 40 not divisible by 16
     out = _host_roundtrip(x, block_size=BLOCK_SIZE)
@@ -851,6 +904,31 @@ def test_host_rejects_block_size_not_16():
         convert_to_mx6(x, block_size=24)   # not 16
     with pytest.raises(AssertionError):
         convert_to_mx6(x, block_size=32)   # even though multiple of 16, only 16 is supported
+
+
+@pytest.mark.parametrize("blocks_per_program", [0, 3, -1])
+def test_host_rejects_invalid_blocks_per_program(blocks_per_program):
+    x = _rand((4, 16), torch.float32).cuda()
+    packed = convert_to_mx6(x)
+    with pytest.raises(AssertionError, match="positive power of two"):
+        convert_to_mx6(x, blocks_per_program=blocks_per_program)
+    with pytest.raises(AssertionError, match="positive power of two"):
+        convert_from_mx6(
+            packed,
+            x.dtype,
+            x.shape,
+            blocks_per_program=blocks_per_program,
+        )
+
+
+def test_host_rejects_empty_quantization_axis():
+    x = torch.empty((2, 0), dtype=torch.float32, device="cuda")
+    with pytest.raises(AssertionError, match="non-empty quantization axis"):
+        convert_to_mx6(x)
+
+    packed = torch.empty((0, _N_PACKED_BYTES), dtype=torch.uint8, device="cuda")
+    with pytest.raises(AssertionError, match="non-empty quantization axis"):
+        convert_from_mx6(packed, torch.float32, x.shape)
 
 
 def test_host_rejects_unknown_out_dtype():
@@ -898,7 +976,6 @@ def test_divergence_vs_mxpy_31clamp_is_tiny(dtype):
     only where a demoted element rounds to +/-16; that fraction must be tiny."""
     x = _rand((32, 256), dtype).cuda()
     rows, cols = x.shape
-    n_blocks = rows * cols // BLOCK_SIZE
     packed, nb = _launch_to(x)
     y = _launch_from(packed, nb, dtype).reshape(rows, cols)
     mxpy = mx6_fake_quantize(x, block_size=BLOCK_SIZE)

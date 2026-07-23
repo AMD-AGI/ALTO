@@ -91,7 +91,7 @@ Here's DGE's smooth forward/backward surrogate—elegant on paper, but a net los
   <img src="./dgebwd.png" alt="DGE backward" width="30%" />
 </p>
 
-A recurring lesson: **better synthetic operator-level SNR did not translate into better end-to-end loss.** Techniques that shone in isolated kernel tests were neutral—or actively harmful—in full training. If you take one thing from our ablations, let it be this: validate at the *training* level, not just the operator level.
+A recurring lesson: **better synthetic operator-level SNR usually helps, but it doesn't always translate into better end-to-end loss.** Higher operator SNR is a reasonable thing to chase, yet in our runs several techniques that shone in isolated kernel tests turned out neutral—or actively harmful—in full training. If you take one thing from our ablations, let it be this: operator-level SNR is a useful but imperfect proxy, so validate at the *end-to-end training* level, not just the operator level.
 
 ## Caveats
 

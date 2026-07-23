@@ -150,10 +150,10 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 8
     config.training.local_batch_size = 1
     config.activation_checkpoint.mode = "none"
-    config.dataloader.dataset = "c4"
-    config.dataloader.dataset_path = None
-    config.validator.dataloader.dataset = "c4_validation"
-    config.validator.dataloader.dataset_path = None
+    config.dataloader.dataset = "megatron"
+    config.dataloader.dataset_path = "/hf_home_shared/data/c4-train.en_6_text_document.idx"
+    config.validator.dataloader.dataset = "megatron"
+    config.validator.dataloader.dataset_path = "/hf_home_shared/data/c4-validation-91205-samples.en_text_document.idx"
     config.checkpoint.enable = True                 # save checkpoints so we can resume later
     config.checkpoint.initial_load_path = None      # fresh run: do NOT load any checkpoint
     config.checkpoint.initial_load_in_hf = False

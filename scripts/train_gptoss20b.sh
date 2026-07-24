@@ -41,11 +41,12 @@ set -euo pipefail
 ### Machine-specific args
 NGPU="${NGPU:-8}"
 HF_HOME_DIR="${HF_HOME_DIR:-$HOME/.cache/huggingface}" # HF model location
-DATA_DIR="${DATA_DIR:-/shared_rccl}" # exposte data directory into container
+DATA_DIR="${DATA_DIR:-/shared_rccl}" # exposte data dir to container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
-ALTO_DIR="${ALTO_DIR:-$HOME/ALTO}" # The repository location for installing 3rdparty/torchtitan
+# *NOTE*: if you cloned multiple copies of this repo, make sure the path below is correct
+ALTO_DIR="${ALTO_DIR:-$HOME/ALTO}" # expose repo dir to container 
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/gpt_oss_20b-pretrain-bf16}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname based on time

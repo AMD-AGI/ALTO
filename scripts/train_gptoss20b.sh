@@ -61,7 +61,7 @@ CONTAINER="${CONTAINER:-alto_gpt_oss_bf16}" # container name (for user readabili
 IMAGE="${IMAGE:-wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch}"
 
 # -----------------------------------------------------------------------------
-# Setup
+# Docker Setup
 # -----------------------------------------------------------------------------
 
 mkdir -p \
@@ -125,8 +125,10 @@ for group in $DEVICE_GROUPS; do
     fi
 done
 
+# start docker contrainer
 docker run "${docker_args[@]}" "$IMAGE" sleep infinity
 
+# make sure docker is gracefully stopped quickly on exit
 cleanup() {
     status=$?
 
@@ -148,7 +150,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # -----------------------------------------------------------------------------
-# Model and dependencies
+# Load model and install additional docker dependencies
 # -----------------------------------------------------------------------------
 MODEL_DIR="${MODEL_DIR:-$HF_HOME_DIR/models/gpt-oss-20b}"
 echo "[model] Ensuring tokenizer is available at $MODEL_DIR ..."

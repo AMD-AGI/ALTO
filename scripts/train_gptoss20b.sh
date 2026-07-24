@@ -49,7 +49,7 @@ set -euo pipefail
 ### Machine-specific args
 NGPU="${NGPU:-8}"
 HF_HOME_DIR="${HF_HOME_DIR:-$HOME/.cache/huggingface}" # HF model location
-DATA_DIR="${DATA_DIR:-/shared_rccl}" # exposte data dir to container
+DATA_DIR="${DATA_DIR:-/shared_inference}" # exposte data dir to container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
@@ -63,7 +63,7 @@ LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname 
 MODULE="${MODULE:-gpt_oss}"
 CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
 TRAINING_STEPS="${TRAINING_STEPS:-15000}"
-CONTAINER="${CONTAINER:-alto_gpt_oss_bf16}" # container name (for user readability)
+CONTAINER="${CONTAINER:-alto_gpt_oss}" # container name (for user readability)
 
 
 # default Docker image from Han Wang

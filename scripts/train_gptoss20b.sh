@@ -7,11 +7,12 @@
 
 
 ######## Download the C4 dataset
+######## make sure to update config_registry.py with appropriate data location
 
-###  OPTION 1: 
+
+###  OPTION 1:
 # # Create desired download directory with the right permission 
 # cd /data/gpt_oss_20b
-
 # # Download training and validation data
 # bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) \
 #     -d data https://training.mlcommons-storage.org/metadata/llama-3-1-8b-preprocessed-c4-dataset.uri
@@ -31,8 +32,6 @@
 #     "
 # fi
  
- 
-
 set -euo pipefail
 
 # -----------------------------------------------------------------------------
@@ -42,6 +41,7 @@ set -euo pipefail
 ### Machine-specific args
 NGPU="${NGPU:-8}"
 HF_HOME_DIR="${HF_HOME_DIR:-$HOME/.cache/huggingface}" # HF model location
+DATA_DIR="${DATA_DIR:-/shared_rccl}" # exposte data directory into container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
@@ -63,8 +63,6 @@ IMAGE="${IMAGE:-wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7
 # -----------------------------------------------------------------------------
 # Setup
 # -----------------------------------------------------------------------------
-
-
 
 mkdir -p \
     "$HF_HOME_DIR" \
@@ -96,7 +94,7 @@ docker_args=(
     --env-file "$HF_ENV_FILE"
     -v "$HOME:$HOME"
     -v "$ALTO_DIR:/alto"
-    -v "$MODEL_DIR:$MODEL_DIR"
+    -v "$DATA_DIR:$DATA_DIR"
     -v "$HF_HOME_DIR:/hf_home"
     -v "$CHECKPOINT_DIR:$CHECKPOINT_DIR"
     -v /etc/passwd:/etc/passwd:ro
@@ -107,7 +105,6 @@ docker_args=(
     -e HF_DATASETS_CACHE=/hf_home/datasets
     -e TRITON_CACHE_DIR=/tmp/triton_cache
     -e TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache
-    
 )
 
 # Hardware resources are added only when they exist.
@@ -127,7 +124,6 @@ for group in $DEVICE_GROUPS; do
         docker_args+=(--group-add "$gid")
     fi
 done
-
 
 docker run "${docker_args[@]}" "$IMAGE" sleep infinity
 

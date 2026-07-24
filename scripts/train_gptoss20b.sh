@@ -31,6 +31,14 @@
 #         \"
 #     "
 # fi
+
+####### Viewing Loss Curves
+# tensorboard events are saved in the checkpointing directory, one can
+# view these by using the following command:
+# tensorboard --logdir $CHECKPOINT_DIR --host 127.0.0.1 --port 6006
+#
+# If running on remote machine, you will want to forward the port to the local machine:
+# ssh -L 6006:localhost:6006 nfrumkin@useocpslog-002
  
 set -euo pipefail
 
@@ -46,7 +54,7 @@ HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
 # *NOTE*: if you cloned multiple copies of this repo, make sure the path below is correct
-ALTO_DIR="${ALTO_DIR:-$HOME/ALTO}" # expose repo dir to container 
+ALTO_DIR="${ALTO_DIR:-$HOME/lpt_branch/ALTO}" # expose repo dir to container 
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/gpt_oss_20b-pretrain-bf16}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname based on time
@@ -199,8 +207,6 @@ docker exec \
         --training.steps "$TRAINING_STEPS" \
         --comm.init_timeout_seconds 1800 \
         --hf_assets_path "$MODEL_DIR" \
-        --checkpoint.interval 100 \
-        --checkpoint.keep_latest_k 2 \
         --dump_folder "$CHECKPOINT_DIR" \
         --profiling.enable_profiling \
         --profiling.profile_freq 1000 \

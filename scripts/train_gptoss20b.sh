@@ -63,7 +63,7 @@ LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname 
 MODULE="${MODULE:-gpt_oss}"
 CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
 TRAINING_STEPS="${TRAINING_STEPS:-15000}"
-CONTAINER="${CONTAINER:-alto_gpt_oss}" # container name (for user readability)
+CONTAINER="${CONTAINER:-alto}" # container name (for user readability)
 
 
 # default Docker image from Han Wang

@@ -128,10 +128,24 @@ done
 docker run "${docker_args[@]}" "$IMAGE" sleep infinity
 
 cleanup() {
+    status=$?
+
+    # Prevent cleanup from being triggered recursively.
+    trap - EXIT INT TERM
+
+    echo
     echo "[train] Stopping container $CONTAINER ..."
-    docker stop "$CONTAINER" >/dev/null 2>&1 || true
+
+    docker stop --time 3 "$CONTAINER" >/dev/null 2>&1 ||
+        docker kill "$CONTAINER" >/dev/null 2>&1 ||
+        true
+
+    exit "$status"
 }
+
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # -----------------------------------------------------------------------------
 # Model and dependencies

@@ -5,18 +5,18 @@
 #   NGPU=4 CONFIG=gpt_oss_debugmodel TRAINING_STEPS=20 \
 #       bash ~/ALTO/train_gptoss.sh
 
+######## STEP 0: Install ALTO repository and update ALTO_DIR below
+# git clone --recurse-submodules https://github.com/AMD-AGI/ALTO.git
 
-######## Download the C4 dataset
+
+######## STEP 1: Download the C4 dataset
 ######## make sure to update config_registry.py with appropriate data location
-
-
 ###  OPTION 1:
 # # Create desired download directory with the right permission 
 # cd /data/gpt_oss_20b
 # # Download training and validation data
 # bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) \
 #     -d data https://training.mlcommons-storage.org/metadata/llama-3-1-8b-preprocessed-c4-dataset.uri
-
 ### OPTION 2: 
 # C4_CACHE="$HF_HOME_SHARED/datasets/allenai___c4"
 # if [ -d "$C4_CACHE" ] && [ -n "$(ls -A "$C4_CACHE" 2>/dev/null)" ]; then
@@ -45,12 +45,12 @@ DATA_DIR="${DATA_DIR:-/shared_rccl}" # exposte data directory into container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
-ALTO_DIR="${ALTO_DIR:-$HOME/ALTO}" # The repository location
+ALTO_DIR="${ALTO_DIR:-$HOME/ALTO}" # The repository location for installing 3rdparty/torchtitan
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/gpt_oss_20b-pretrain-bf16}"
-
-### Other modifiable args
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname based on time
+
+### Other modifiable args
 MODULE="${MODULE:-gpt_oss}"
 CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
 TRAINING_STEPS="${TRAINING_STEPS:-15000}"

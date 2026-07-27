@@ -70,13 +70,13 @@ def gpt_oss_20b() -> Trainer.Config:
 def gpt_oss_20b_pretrain() -> Trainer.Config:
     config = gpt_oss_20b_orig()
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-lr4e-4-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-lr8e-4-outputs"
     config.profiler.enable_profiling = False
     config.training.steps = 1200000
     config.training.local_batch_size = 1
-    config.training.global_batch_size = 16
+    config.training.global_batch_size = 32
     config.training.seq_len = 8192
-    config.optimizer.param_groups[0].optimizer_kwargs["lr"] = 4e-4
+    config.optimizer.param_groups[0].optimizer_kwargs["lr"] = 8e-4
     config.optimizer.param_groups[0].optimizer_kwargs["betas"] = (0.9, 0.95)
     config.optimizer.param_groups[0].optimizer_kwargs["eps"] = 1e-5
     config.lr_scheduler.min_lr_factor = 0.1
@@ -85,18 +85,19 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
+    config.metrics.enable_wandb = True
     config.dataloader.dataset = "megatron"
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 8
     config.parallelism.tensor_parallel_degree = 1
-    config.checkpoint.enable = True
+    config.checkpoint.enable = False
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2
     config.validator.enable = True
     config.validator.dataloader.dataset = "megatron"
     config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
-    config.validator.freq = 768
-    config.validator.steps = 64
+    config.validator.freq = 384
+    config.validator.steps = 32
     config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
@@ -104,7 +105,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-refactor-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-mxfp4gemm_1d2d-hadamard-sr-lr8e-4-refactor-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)

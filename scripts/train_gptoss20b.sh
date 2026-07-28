@@ -55,13 +55,13 @@ HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 ### Run-specific args
 # *NOTE*: if you cloned multiple copies of this repo, make sure the path below is correct
 ALTO_DIR="${ALTO_DIR:-$HOME/lpt_branch/ALTO}" # expose repo dir to container 
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/gpt_oss_20b-pretrain-bf16}"
+CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/$CONFIG_$RUN_ID}"
 LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname based on time
 
 ### Other modifiable args
 MODULE="${MODULE:-gpt_oss}"
-CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
 TRAINING_STEPS="${TRAINING_STEPS:-15000}"
 CONTAINER="${CONTAINER:-$CONFIG}" # container name (for user readability)
 
@@ -114,6 +114,7 @@ docker_args=(
     -e HF_DATASETS_CACHE=/hf_home/datasets
     -e TRITON_CACHE_DIR=/tmp/triton_cache
     -e TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache
+    -e PYTHONNOUSERSITE=1 
 )
 
 # Hardware resources are added only when they exist.

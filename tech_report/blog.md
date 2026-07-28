@@ -62,27 +62,23 @@ The benefit shows up in the late-training regime, exactly where oscillation accu
 
 ![Validation loss with GBS=16](./vallossgbs16.png)
 
-At the larger global batch size 64, FP4 is more fragile—but de-oscillation recovers most of the widened deficit:
-
-![Validation loss with GBS=64](./vallossgbs64.png)
-
 The story is clearest when you measure **how fast** each recipe reaches the MLPerf target (validation loss ≤ 3.34). De-oscillation slashes the extra steps FP4 needs relative to BF16:
 
-| Recipe | Extra steps to hit 3.34 (GBS=16) | (GBS=64) |
-|--------|----------------------------------|----------|
-| MXFP4 + RHT + SR | +20.0% | +37.5% |
-| **+ de-oscillation** | **+5.0%** | **+12.5%** |
+| Recipe | Extra steps to hit 3.34 (GBS=16) |
+|--------|----------------------------------|
+| MXFP4 + RHT + SR | +20.0% |
+| **+ de-oscillation** | **+5.0%** |
 
-In short: de-oscillation brings FP4 convergence speed to within a *single checkpoint* of BF16 at both batch sizes.
+In short: de-oscillation brings FP4 convergence speed to within a *single checkpoint* of BF16.
 
 ## What didn't work (the honest part)
 
 We evaluated several other techniques end-to-end—and most didn't pay off at 20B scale:
 
-- **Differential Gradient Estimation (DGE)** — replaces the straight-through estimator with a smooth surrogate for the quantizer's gradient. Marginally better operator SNR, but **severely harmful** end-to-end (+0.20 loss at GBS=16, +0.28 at GBS=64).
+- **Differential Gradient Estimation (DGE)** — replaces the straight-through estimator with a smooth surrogate for the quantizer's gradient. Marginally better operator SNR, but **severely harmful** end-to-end (+0.20 loss at GBS=16).
 - **Dynamic outlier clipping** — large regression (+0.19 loss).
 - **Static clipping** and **Macro-Block Scaling (MBS)** — neutral, despite MBS posting the *best* operator-level SNR numbers (+1.2 dB forward).
-- **Low-rank outlier compensation** — rank-sensitive: neutral at $r=32$, but a real gain at $r=128$ for GBS=64 (−0.017 loss). Still behind de-oscillation, and it adds per-step GEMMs.
+- **Low-rank outlier compensation** — neutral to slightly harmful at $r=32$ (GBS=16), and it adds per-step GEMMs. Still behind de-oscillation.
 
 Here's DGE's smooth forward/backward surrogate—elegant on paper, but a net loss in practice:
 

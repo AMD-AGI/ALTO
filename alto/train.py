@@ -84,6 +84,11 @@ class Trainer(ForgeTrainer):
     def __init__(self, config: TitanTrainer.Config):
         super().__init__(config)
 
+        # The Forge engine builds the checkpointer with dataloader=None
+        self.checkpointer.states["dataloader"] = self.dataloader
+
+        self.ntokens_seen = 0
+
         self.training_mode = True
         self.enable_data_cache = False
 
@@ -108,6 +113,22 @@ class Trainer(ForgeTrainer):
             else:
                 logger.info("data replay buffer disabled")
                 self.enable_data_cache = False
+
+    def state_dict(self) -> dict[str, Any]:
+        sd = super().state_dict()
+        sd["ntokens_seen"] = self.ntokens_seen
+        return sd
+
+    def load_state_dict(self, state_dict: dict[str, Any]):
+        super().load_state_dict(state_dict)
+        self.ntokens_seen = state_dict.get("ntokens_seen", 0)
+
+    def batch_generator(
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        for input_dict, labels in super().batch_generator(data_iterable):
+            self.ntokens_seen += labels.numel()
+            yield input_dict, labels
 
     def cache_input(self, microbatches: list[tuple[dict[str, torch.Tensor], torch.Tensor]]):
         if self.enable_data_cache:

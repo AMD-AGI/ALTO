@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run ALTO GPT-OSS 20B BF16 training on the current node.
+# Run ALTO GPT-OSS 20B training on the current node.
 #
 # Example:
 #   NGPU=4 CONFIG=gpt_oss_debugmodel TRAINING_STEPS=20 \
@@ -50,7 +50,6 @@ set -euo pipefail
 NGPU="${NGPU:-8}"
 HF_HOME_DIR="${HF_HOME_DIR:-$HOME/.cache/huggingface}" # HF model location
 DATA_DIR="${DATA_DIR:-/shared_inference}" # exposte data dir to container
-DATA_DIR="${DATA_DIR:-/shared_inference}" # exposte data dir to container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
@@ -79,7 +78,7 @@ mkdir -p \
     "$CHECKPOINT_DIR" \
     "$(dirname "$LOG_FILE")"
 
-echo "=== ALTO GPT-OSS 20B BF16 baseline ==="
+echo "=== ALTO GPT-OSS 20B ==="
 echo "Node:           $(hostname)"
 echo "Image:          $IMAGE"
 echo "Config:         $CONFIG"

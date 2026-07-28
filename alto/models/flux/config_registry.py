@@ -34,6 +34,8 @@ __all__ = [
     "flux_schnell_lpt_mse_4_6_shifted",
     "flux_schnell_lpt_mse_4_6_strict",
     "flux_schnell_lpt_precision_schedule",
+    "flux_schnell_lpt_distill_off_policy",
+    "flux_schnell_lpt_distill_on_policy",
     "flux_schnell_mxfp8",
     "flux_schnell_mlperf_mxfp8",
     "flux_schnell_nvfp4",
@@ -44,6 +46,7 @@ FLUX_LPT_RECIPE = str(Path(__file__).with_name("configs") / "lpt_recipe.yaml")
 FLUX_LPT_MSE_4_6_SHIFTED_RECIPE = str(Path(__file__).with_name("configs") / "lpt_mse_4_6_shifted_recipe.yaml")
 FLUX_LPT_MSE_4_6_STRICT_RECIPE = str(Path(__file__).with_name("configs") / "lpt_mse_4_6_strict_recipe.yaml")
 FLUX_LPT_PRECISION_SCHEDULE_RECIPE = str(Path(__file__).with_name("configs") / "lpt_precision_schedule_recipe.yaml")
+FLUX_DISTILL_LPT_RECIPE = str(Path(__file__).with_name("configs") / "distill_lpt_recipe.yaml")
 FLUX_MXFP8_RECIPE = str(Path(__file__).with_name("configs") / "mxfp8_recipe.yaml")
 FLUX_NVFP4_RECIPE = str(Path(__file__).with_name("configs") / "nvfp4_recipe.yaml")
 
@@ -72,6 +75,43 @@ def _with_lpt_mse_4_6_strict(config: FluxTrainer.Config) -> FluxTrainer.Config:
 
 def _with_lpt_precision_schedule(config: FluxTrainer.Config) -> FluxTrainer.Config:
     return _with_recipe(config, FLUX_LPT_PRECISION_SCHEDULE_RECIPE)
+
+
+def _with_lpt_distillation(config: FluxTrainer.Config, mode: str) -> FluxTrainer.Config:
+    config = _with_recipe(config, FLUX_DISTILL_LPT_RECIPE)
+    config.distillation.enable = True
+    config.distillation.mode = mode
+    config.distillation.num_rollout_steps = 4
+
+    config.optimizer.name = "AdamW"
+    config.optimizer.lr = 2.5e-5
+    config.optimizer.beta1 = 0.9
+    config.optimizer.beta2 = 0.95
+    config.optimizer.eps = 1e-8
+    config.optimizer.weight_decay = 0.1
+    config.lr_scheduler.warmup_steps = 1000
+    config.lr_scheduler.decay_ratio = 0.0
+    config.training.max_norm = 1.0
+    config.training.local_batch_size = 32
+    config.training.steps = 10_000
+    config.dataloader.classifier_free_guidance_prob = 0.1
+    config.validator.enable = True
+    config.validator.freq = 5000
+    # MLPerf COCO validation is a finite, fixed 29,696-sample dataset.
+    # Consume it to exhaustion so changing the local batch size does not
+    # silently shorten validation.
+    config.validator.steps = -1
+    config.validator.save_img_count = 0
+    config.validator.validation_timeout_seconds = 900
+    config.validator.dataloader.dataset = "mlperf-coco-validation"
+    config.validator.dataloader.dataset_path = "/dataset/coco"
+    config.validator.dataloader.mlperf_manifest_path = "/dataset/val2014_30k.tsv"
+    config.validator.dataloader.classifier_free_guidance_prob = 0.0
+    config.validation.enable_classifier_free_guidance = False
+    config.validation.denoising_steps = 4
+    config.debug.seed = 10556
+
+    return config
 
 
 def _with_mxfp8(config: FluxTrainer.Config) -> FluxTrainer.Config:
@@ -191,6 +231,17 @@ def flux_schnell_lpt_precision_schedule() -> FluxTrainer.Config:
     config.validator.dataloader.classifier_free_guidance_prob = 0.0
     config.validation.enable_classifier_free_guidance = False
     config.validation.denoising_steps = 4
+    return config
+
+
+def flux_schnell_lpt_distill_off_policy() -> FluxTrainer.Config:
+    config = _with_lpt_distillation(flux_schnell(), "off_policy")
+    return config
+
+
+def flux_schnell_lpt_distill_on_policy() -> FluxTrainer.Config:
+    config = flux_schnell_lpt_distill_off_policy()
+    config.distillation.mode = "on_policy"
     return config
 
 

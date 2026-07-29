@@ -35,7 +35,7 @@ training_stage:
         #   end_step: 1001
         - precision: mxfp4
           start_step: 1
-          end_step: 24001
-        - precision: mxfp8
-          start_step: 24001
+          end_step: 52224
+        - precision: bf16
+          start_step: 52224
 

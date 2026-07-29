@@ -39,6 +39,7 @@ __all__ = [
     "flux_schnell_mxfp8",
     "flux_schnell_mlperf_mxfp8",
     "flux_schnell_nvfp4",
+    "flux_schnell_lpt_mse_4_6_shifted_schedule_mlperf",
 ]
 
 
@@ -265,6 +266,33 @@ def flux_schnell_mlperf_mxfp8() -> FluxTrainer.Config:
     config.validation.denoising_steps = 4
     return config
 
+def flux_schnell_lpt_mse_4_6_shifted_schedule_mlperf() -> FluxTrainer.Config:
+    config =  _with_lpt_precision_schedule(flux_schnell())
+    # Match NVIDIA MLPerf FLUX sample counts with 4 GPUs and local batch size 32.
+    config.optimizer.name = "AdamW"
+    config.optimizer.lr = 2.5e-4
+    config.optimizer.beta1 = 0.9
+    config.optimizer.beta2 = 0.95
+    config.optimizer.eps = 1e-8
+    config.optimizer.weight_decay = 0.1
+    config.lr_scheduler.warmup_steps = 8704
+    config.lr_scheduler.decay_ratio = 0.0
+    config.training.max_norm = 1.0
+    config.training.local_batch_size = 32
+    config.training.steps = 69_632
+    config.dataloader.classifier_free_guidance_prob = 0.1
+    config.validator.enable = True
+    config.validator.freq = 34_816
+    config.validator.steps = 232
+    config.validator.save_img_count = 0
+    config.validator.dataloader.dataset = "mlperf-coco-validation"
+    config.validator.dataloader.dataset_path = "/dataset/coco"
+    config.validator.dataloader.mlperf_manifest_path = "/dataset/val2014_30k.tsv"
+    config.validator.dataloader.classifier_free_guidance_prob = 0.0
+    config.validation.enable_classifier_free_guidance = False
+    config.validation.denoising_steps = 4
+    config.debug.seed = 10556
+    return config
 
 def flux_schnell_nvfp4() -> FluxTrainer.Config:
     return _with_nvfp4(flux_schnell())

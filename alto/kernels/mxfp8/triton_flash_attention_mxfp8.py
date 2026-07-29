@@ -913,6 +913,10 @@ def attention_mxfp8_forward_triton_impl(
 
     batch, nheads_q, nheads_k, head_size_qk, head_size_v, seqlen_q, seqlen_k = get_shape_from_layout(
         q, k, v, layout, cu_seqlens_q, cu_seqlens_k, max_seqlens_q, max_seqlens_k)
+    assert not causal or seqlen_q == seqlen_k, (
+        f"causal forward requires seqlen_q == seqlen_k, got {seqlen_q} vs {seqlen_k}: the "
+        "kernel uses bottom-right causal masking while PyTorch SDPA/reference tests use top-left "
+        "masking for non-square shapes.")
     o_shape = (*q.shape[:-1], head_size_v)
     o = torch.empty(
         o_shape,
@@ -1498,7 +1502,7 @@ def _bwd_kernel_dkdv(
             USE_ASM,
         )
         q_offset += stride_qh
-        do_offset += stride_qh
+        do_offset += stride_doh
         q_scale_base += stride_qsh
         l_offset += stride_ldh
         d_offset += stride_ldh

@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: MIT
 """Forward numerical tests for the MXFP8 (e4m3) flash attention kernel.
 
-Mirrors ``tests/unittest/mxfp4/test_mxfp_attention.py``. The MXFP8 kernel is
-forward-only (backward is not implemented), so only the forward output is
-validated against a bf16 SDPA reference via SNR / cosine-similarity.
+Mirrors ``tests/unittest/mxfp4/test_mxfp_attention.py`` for the forward
+kernel-vs-bf16 SDPA check. Backward and kernel-vs-golden reference coverage live
+in ``test_mxfp8_attention_reference.py``.
 """
 
 import pytest
@@ -61,12 +61,16 @@ test_cases = [
     AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=128, num_head_kv=128, head_dim_qk=192, head_dim_v=128),
     AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=48, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
     AttnConfig(seqlen_q=2048, seqlen_kv=2048, num_head_q=64, num_head_kv=8, head_dim_qk=128, head_dim_v=128),
+    # GQA crossed with head_dim_qk != head_dim_v. The cases above cover those two
+    # axes only in isolation, which leaves the dO head-stride advance in the
+    # backward dkdv group loop untested (it produced NaN dK/dV).
+    AttnConfig(seqlen_q=1024, seqlen_kv=1024, num_head_q=32, num_head_kv=8, head_dim_qk=192, head_dim_v=128),
 ]
 
 
 @pytest.mark.parametrize("batch", [4])
 @pytest.mark.parametrize("config", test_cases)
-@pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("causal", [True, False])
 def test_attention(batch, config, causal):
     device = "cuda"
     dtype = torch.bfloat16

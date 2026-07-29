@@ -1965,6 +1965,8 @@ def attention_mxfp8_backward_triton_impl(
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        num_warps=4,
+        num_stages=1,
     )
 
     wrap_triton(_bwd_kernel_dkdv)[(batch * nheads_k, num_block_n)](
@@ -2030,6 +2032,8 @@ def attention_mxfp8_backward_triton_impl(
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        num_warps=4,
+        num_stages=1,
     )
 
     return dq, dk, dv

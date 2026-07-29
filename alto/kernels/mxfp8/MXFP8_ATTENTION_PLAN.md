@@ -521,6 +521,57 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 - 若未来要支持非方阵 causal（cross-attention / prefix），需先在 kernel 与参照之间统一 top-left 或 bottom-right 约定，**再把 `lo`/`hi` 补上 `col_offset`**（正确形式见本节决策记录，届时才是真修复），最后才放开该断言。三件事顺序不能颠倒。
 - §7 第 6 项 dispatch 路由 smoke 未跑。
 
+### 10.1nonies 截至 2026-07-29（对照 blockwise_fp8 复审 backward；修掉 port 丢失的 `num_stages`，实测 1.15~1.51x）
+
+backward 是从 `blockwise_fp8/triton_flash_attention_fp8_block.py` port 来的（**不是 mxfp4——mxfp4 没有 backward**），故以它为基准做了第二轮逐行对照。结论：**无正确性 bug**，但发现一处实测性能损失。
+
+**修掉：port 时丢失了 `num_stages=1`（唯一实质缺陷）**
+
+上游把这个启动参数藏在一个**只有一个空 config 的 `@triton.autotune`** 里（`get_autotune_bwd_configs`，1156~1166 行；挂在 `_bwd_kernel_dkdv` 1169 行、`_bwd_kernel_dq` 1524 行）：
+
+```python
+triton.Config({}, num_stages=1, num_warps=4)
+```
+
+它不调任何 BLOCK 尺寸，唯一作用就是钉住 `num_stages=1`。port 时这个装饰器被当作"可选的调优基础设施"删掉了，于是 mxfp8 的 backward 静默继承 Triton 默认值——实测（Triton 3.6.0）默认为 `num_warps=4, num_stages=2`，`num_warps` 恰好撞对，`num_stages` 翻倍。
+
+`num_stages=2` 给内层循环加了两级软流水，多出的预取缓冲挤占寄存器；head_dim=192（padded 256）时 fp32 累加器与 scale tile 最多，退化最严重：
+
+| 形状（batch 4, causal, gfx950） | num_stages=2（继承默认） | num_stages=1（对齐上游） | 提速 |
+|---|---|---|---|
+| s1024, hq32/hkv8, d128 | 1.741 ms | 1.505 ms | **1.16x** |
+| s2048, hq32/hkv8, d128 | 6.201 ms | 5.411 ms | **1.15x** |
+| s2048, hq16/hkv16, d192 | 7.015 ms | 4.630 ms | **1.51x** |
+
+（`triton.testing.do_bench`，warmup 50 / rep 200，跑两遍复现，偏差 < 0.3%。同时试了 `num_warps=8`：2.084 / 7.538 / 9.091 ms，明显更差 ⇒ 上游的 4 是对的。）
+
+修法是给两个 launch 各加显式 `num_warps=4, num_stages=1`，**不照搬那个空 autotune**——参数只有一个取值就不该披着 autotune 的皮，那正是它被丢掉的原因。改后 41 passed。
+
+**确认比上游更好的四处设计（不动）**
+
+- **`tl.dot_scaled` 消掉了一整套 scale 记账。** 上游是"普通 `tl.dot` + 事后乘标量 descale"，于是 `p_scale` / `log_p_scale` / `acc_descale` 要在 forward inner、dkdv、dq 全程穿（softmax 后 `p *= p_scale`、epilogue `acc *= acc_descale`、backward 重算 p 补 `+ log_p_scale * RCP_LN2`、最后 `dq *= sm_scale / p_scale` 除回去）。换成硬件指令后这些**全部消失**——不是简化，是特殊情况不存在了。
+- **砍掉上游传了但没读的 kernel 参数**：上游给 dkdv 传 `Out`/`DO`/`DQ`、给 dq 传 `Out`/`DK`/`DV`。
+- **把上游的静默失效变成当场报错**：上游 forward 支持 dropout 但 backward 无 dropout 逻辑且不检查（开 dropout 训练即静默错梯度）；alibi 同理（只进 DEBUG 打印，从不进 kernel）。mxfp8 在 autograd backward 三行 assert 挡住（2128~2130 行）。
+- **无 fallback**：上游留 `use_fp8` 开关让同一套 kernel 兼跑 bf16，代价是每个 kernel 里 `if USE_FP8` 分叉；mxfp8 只有 MX 一条路，符合 §1 定的"仅 CDNA4 无 fallback"。
+
+**一处真 trade-off（未测，线索）**：dO 量化位置。上游在 preprocess 里量化一次、写出 `DO_FP8` + `do_scale`，两个 backward kernel 直接读。mxfp8 改为循环内现场量化，但 dkdv 内层**每次迭代量化 dO 两次**（1295 行按 head_dim 分组供 dp、1305 行转置后按 seqlen 分组供 dv），因为两个 dot 的归约轴不同、需要两套 1D scale 布局。若 dO 改用 2D-block scale 量化一次即可同时喂两个 dot ⇒ 直接落在 §10.1octies 债表里 `_MX_2D = tl.constexpr(False)` 那条上，值得一并测。
+
+**本轮新增债（并入 §10.1octies 债表一起清）**
+
+- `USE_SR` 在两处调用点（forward 363 行、`_mx_quant` 内部 1072 行）硬编码 `False`：随机取整整条链路通着但永不启用，与 `_MX_2D=False` 同类。
+- `is_varlen` / thd 分支已被 `layout == "bhsd"` 断言证明**不可达**（forward 908/953-959/1015 行；backward driver 一路把 `cu_seqlens` 传进 kernel）。这是上一轮加断言的直接后果——按"不写兼容/回退代码"的标准该删，要留就得把 varlen 真正做完。
+- forward `register_fake`（2154 行起）仍保留 thd 的 LSE shape 分支，而真实 op 已 assert 拒绝非 bhsd。仅在 torch.compile trace 非 bhsd 时不一致（那种情况本也会 assert），化妆品级。
+- `AUTOTUNE` / `PERF` 模块常量无引用（与 `get_padded_headsize` 一样，都是随上游一起抄来的死物，上游也是死的）。
+
+**四个已验证排除的虚警（记录在此，避免重复排查）**
+
+| 初查疑点 | 排除依据 |
+|---|---|
+| 上游 dkdv 的 exp2 分支对 `l_i` 双乘 `RCP_LN2` | 误读。1480 行是 `exp2(qk - l_i[:,None] + log_p_scale * RCP_LN2)`，`* RCP_LN2` 作用在 `log_p_scale` 上，`l_i` 只乘一次。两边都对 |
+| 上游 autograd backward 返回 18 个梯度但 forward 只有 16 个输入 | 实测最小 `autograd.Function`：PyTorch **容忍**尾部多余的 `None`。mxfp8 这边是 15 对 15 精确匹配 |
+| mxfp8 未 assert `o` / `softmax_lse` 连续（上游有） | `get_strides_from_layout` 与 `softmax_lse.stride()` 均直读张量真实 stride，非连续也读得对；`delta = empty_like(softmax_lse)` 继承同布局。无正确性风险 |
+| mxfp8 缺 head_dim 整除检查（上游 assert `>=32` 且 `%2==0`） | mxfp8 需要的是更强的 `%32==0`，已由上游 `convert_to_mxfp8` 的 `torch._check(shape[-1] % block_size == 0)` 保证（2D 模式另检 `shape[-2]`）。上游保证的不在下游重复检查。这也解释了为何 layout 那条必须自己加：`convert_to_mxfp8` 检的是 `shape[-2] % 32`，bshd 下那是 nheads，32 头刚好整除，拦不住 |
+
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA、**A1 stage-2 全量化参照 vs SDPA** 均于 MI250 验 6/6（A1：dQ/dK≈23dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985）；dispatch 已接 `mxfp8_e4m3`。**2026-07-29 CDNA4 真机验收通过（§10.1octies）：全套 41 passed，backward kernel vs A1 参照 53~63 dB·cossim≈1.0、端到端 vs SDPA≈23dB，`_load_scale_sq` 这个最大盲区解除，§7 验收标准 1~5 达成**；同时补 3 处护栏断言（`layout=="bhsd"` ×2；causal backward 要求方阵），把「不报错但结果是垃圾」变成当场报错。backward causal 循环边界与掩码不一致一事**经分析判定不修**（两断言已使其不可达，非正确性问题，详见 §10.1octies 决策记录）。
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA、**A1 stage-2 全量化参照 vs SDPA** 均于 MI250 验 6/6（A1：dQ/dK≈23dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985）；dispatch 已接 `mxfp8_e4m3`。**2026-07-29 CDNA4 真机验收通过（§10.1octies）：全套 41 passed，backward kernel vs A1 参照 53~63 dB·cossim≈1.0、端到端 vs SDPA≈23dB，`_load_scale_sq` 这个最大盲区解除，§7 验收标准 1~5 达成**；同时补 3 处护栏断言（`layout=="bhsd"` ×2；causal backward 要求方阵），把「不报错但结果是垃圾」变成当场报错。backward causal 循环边界与掩码不一致一事**经分析判定不修**（两断言已使其不可达，非正确性问题，详见 §10.1octies 决策记录）。**2026-07-29 二轮对照 blockwise_fp8（backward 的真正上游）复审（§10.1nonies）：无正确性 bug，修掉 port 时丢失的 `num_stages=1`（上游藏在单 config 空 autotune 里），实测 backward 提速 1.15~1.51x（d192 最显著）。**

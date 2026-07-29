@@ -238,7 +238,9 @@ def triton_attention_mxfp8(
    - 门槛：cos-sim > 0.99 + SNR 硬断言（验收标准 3）。
 3. **backward 校验**：完整 `autograd` 反向 vs bf16 SDPA autograd，比 dQ/dK/dV 的 cos-sim / SNR（验收标准 4）。
 
-参数网格：`batch=4` × mxfp4 的 `test_cases`（causal=True）× 首层额外跑 causal=False。
+参数网格：`batch=4` × mxfp4 的 `test_cases` × `causal ∈ {True, False}` 覆盖 forward、
+public autograd、kernel-vs-golden forward/backward；另设 `non_causal_cases` 覆盖
+`seqlen_q != seqlen_k`（只在 `causal=False` 下合法）。
 
 ---
 
@@ -501,7 +503,7 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 | 断言 | 位置 | 原因 |
 |---|---|---|
 | `layout == "bhsd"` | forward op + backward op 各一处 | `convert_to_mxfp8(is_2d_block=True)` 按数据张量 `shape[-2] × shape[-1]` 分 32×32 块，只有 bhsd 时 `shape[-2]` 才是 seqlen。`bshd`/`thd` 下它按 **nheads** 分组（nheads 恰为 32 倍数时连 `torch._check` 都拦不住），而 kernel 的 scale 指针数学假定按 seqlen 分组 → **静默读错 scale**。§2 契约里 `layout` 的三选一由此**收窄为只支持 bhsd**（生产 `dispatch/attention.py` 本就只传 bhsd） |
-| `not causal or seqlen_q == seqlen_k` | backward op | §10.1ter 记录的「潜伏坑」落地：kernel 掩码 bottom-right、PyTorch 参照与 `F.sdpa` 掩码 top-left，两者只在方阵等价。V1 生产只跑 self-attention，故**不统一约定**（那是解决不存在的问题），改为断言拒绝。正向的 bottom-right 自身自洽、纯推理下 `sq != sk` 可用，**不拦 forward** |
+| `not causal or seqlen_q == seqlen_k` | **forward op + backward op 各一处** | §10.1ter 记录的「潜伏坑」落地：kernel 掩码 bottom-right、PyTorch 参照与 `F.sdpa` 掩码 top-left，两者只在方阵等价。V1 生产只跑 self-attention，故**不统一约定**（那是解决不存在的问题），改为断言拒绝。<br>*（本节初稿曾写「正向自身自洽、纯推理下 `sq != sk` 可用，不拦 forward」，随后改为**两侧都拦**：一个 op 允许、另一个禁止同一种形状，调用者只能靠踩坑才知道边界在哪。forward 侧断言配 `test_causal_forward_rejects_non_square_shape` 回归。）* |
 
 断言有效性单独验过：`causal=True, sq=64/sk=128` 走 backward → 按预期抛 AssertionError；`causal=False` 同形状 → 正常通过（非 causal 无对齐问题，不该拦）；`layout="bshd"` 走 forward → 按预期抛 AssertionError。
 
@@ -519,11 +521,11 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 
 - 上述 review 债清理（与本次断言分开提交）。`lo`/`hi` 的 `col_offset` 与 `BLOCK_M == BLOCK_N` 两条同源，建议合并评估。
 - 若未来要支持非方阵 causal（cross-attention / prefix），需先在 kernel 与参照之间统一 top-left 或 bottom-right 约定，**再把 `lo`/`hi` 补上 `col_offset`**（正确形式见本节决策记录，届时才是真修复），最后才放开该断言。三件事顺序不能颠倒。
-- §7 第 6 项 dispatch 路由 smoke 未跑。
+- ~~§7 第 6 项 dispatch 路由 smoke 未跑~~ → 已于 §10.1nonies 补跑通过。
 
-### 10.1nonies 截至 2026-07-29（对照 blockwise_fp8 复审 backward；修掉 port 丢失的 `num_stages`，实测 1.15~1.51x）
+### 10.1nonies 截至 2026-07-29（对照 blockwise_fp8 复审 backward；**修掉 dkdv 组循环的 dO head stride 真 bug**；修掉 port 丢失的 `num_stages`，实测 1.15~1.51x；补齐 §7 第 6 项）
 
-backward 是从 `blockwise_fp8/triton_flash_attention_fp8_block.py` port 来的（**不是 mxfp4——mxfp4 没有 backward**），故以它为基准做了第二轮逐行对照。结论：**无正确性 bug**，但发现一处实测性能损失。
+backward 是从 `blockwise_fp8/triton_flash_attention_fp8_block.py` port 来的（**不是 mxfp4——mxfp4 没有 backward**），故以它为基准做了第二轮逐行对照。结论：**一处正确性 bug（GQA × 非对称 head_dim 下 dK/dV 为 nan 乃至进程崩溃，随上游一起继承）** + 一处实测性能损失。
 
 **修掉：port 时丢失了 `num_stages=1`（唯一实质缺陷）**
 
@@ -545,7 +547,7 @@ triton.Config({}, num_stages=1, num_warps=4)
 
 （`triton.testing.do_bench`，warmup 50 / rep 200，跑两遍复现，偏差 < 0.3%。同时试了 `num_warps=8`：2.084 / 7.538 / 9.091 ms，明显更差 ⇒ 上游的 4 是对的。）
 
-修法是给两个 launch 各加显式 `num_warps=4, num_stages=1`，**不照搬那个空 autotune**——参数只有一个取值就不该披着 autotune 的皮，那正是它被丢掉的原因。改后 41 passed。
+修法是给两个 launch 各加显式 `num_warps=4, num_stages=1`，**不照搬那个空 autotune**——参数只有一个取值就不该披着 autotune 的皮，那正是它被丢掉的原因。改后全套通过（当时 41 个用例，测试矩阵扩到 75 见下）。
 
 **确认比上游更好的四处设计（不动）**
 
@@ -555,6 +557,53 @@ triton.Config({}, num_stages=1, num_warps=4)
 - **无 fallback**：上游留 `use_fp8` 开关让同一套 kernel 兼跑 bf16，代价是每个 kernel 里 `if USE_FP8` 分叉；mxfp8 只有 MX 一条路，符合 §1 定的"仅 CDNA4 无 fallback"。
 
 **一处真 trade-off（未测，线索）**：dO 量化位置。上游在 preprocess 里量化一次、写出 `DO_FP8` + `do_scale`，两个 backward kernel 直接读。mxfp8 改为循环内现场量化，但 dkdv 内层**每次迭代量化 dO 两次**（1295 行按 head_dim 分组供 dp、1305 行转置后按 seqlen 分组供 dv），因为两个 dot 的归约轴不同、需要两套 1D scale 布局。若 dO 改用 2D-block scale 量化一次即可同时喂两个 dot ⇒ 直接落在 §10.1octies 债表里 `_MX_2D = tl.constexpr(False)` 那条上，值得一并测。
+
+**补齐 §7 验收标准第 6 项：dispatch 路由 smoke（此前唯一未验项）**
+
+经真实 dispatch 路径 `LPScaledDotProductAttentionWrapper(TrainingOpConfig(precision="mxfp8_e4m3"))` 跑 forward + backward（b2 / hq32 / hkv8 / s1024 / d128 / bf16）：路由确实落到 `triton_attention_mxfp8`；输出与 dQ/dK/dV 全部有限且非零；**dK/dV 形状为 kv-head 形状 `(2, 8, 1024, 128)` 而 dQ 为 `(2, 32, …)`，GQA 的 head 归约方向正确**；`is_causal=False` 同样跑通。⇒ §7 验收标准 **1~6 全部达成**。
+
+顺带确认 dispatch 层与本次两处断言天然兼容：`attention.py` 第 68 行硬传 `layout="bhsd"`，第 63~64 行的 `max_seqlens_q/k` 取自真实形状，self-attention 下必然相等。
+
+**修掉一个真 bug（本次 review 唯一的正确性缺陷）：dkdv 组循环用错了 dO 的 head stride**
+
+`_bwd_kernel_dkdv` 的 GQA 组循环里，推进到下一个 query head 时把 dO 的指针按 **q 的** head stride 前进：
+
+```python
+q_offset += stride_qh
+do_offset += stride_qh   # ← 应为 stride_doh
+```
+
+`stride_doh` 本来就传进了 kernel（1345 行）、初始化 `do_offset` 时也用对了（1419 行），只有这一步用错。q 的最后一维是 `head_dim_qk`、dO 的是 `head_dim_v`，所以 bhsd 连续布局下 `stride_qh = seqlen * head_dim_qk`、`stride_doh = seqlen * head_dim_v`，**两者仅在 `head_dim_qk == head_dim_v` 时相等**。
+
+触发条件是两个条件**同时**成立：`GROUP_SIZE > 1`（GQA）**且** `head_dim_qk != head_dim_v`。原 `test_cases` 七组恰好把这两个轴**各自覆盖但从未交叉**（config2/3/6/7 是 GQA 但 128/128；config4/5 是 192/128 但 `num_head_q == num_head_kv`），所以 41 passed 完全盖不住它。
+
+实测（`head_dim_qk=192, head_dim_v=128`，backward kernel vs A1 参照）：
+
+| 形状 | 修前 dQ | 修前 dK / dV | 修后 dK / dV |
+|---|---|---|---|
+| hq8/hkv2（GROUP_SIZE=4） | 60.50 dB ✅ | **nan / nan** | 60.44 / 62.84 dB |
+| hq8/hkv4（GROUP_SIZE=2） | 61.39 dB ✅ | **nan / nan** | 61.44 / 62.44 dB |
+| hq16/hkv2（GROUP_SIZE=8） | 57.57 dB ✅ | **nan / nan** | 57.72 / 62.42 dB |
+
+dQ 全程正常——`_bwd_kernel_dq` 每个 query head 一个 program，没有这个组循环。GROUP_SIZE 与 seqlen 再大一些（seqlen 1024 / GROUP_SIZE 4）时越界读得更远，直接是 **HIP 内存访问错误、进程 abort**，不只是 nan。
+
+**测试矩阵的两个单值轴一并补掉（同类隐患，不只是这一个 bug）**
+
+查覆盖时发现分层是**反过来的**：三个纯 PyTorch 参照测试都跑 `causal=[True, False]`，而**每一个真正启动 kernel 的测试都被钉在 `[True]`**——不可能有移植 bug 的那层测两个值，会有移植 bug 的那层只测一个。`blockwise_fp8` 的两个 kernel 测试都是 `[True, False]`；mxfp8 的测试骨架抄自 mxfp4（doc 原话 "mirrors the mxfp4 attention test"），把严格性一起抄丢了。（另查：mxfp4 测试里那句被注释掉的 `[True, False]` 属于整个 `test_attention_fp8_with_sparse_do` 函数被注掉，**不是**有人发现 causal=False 挂掉才关的。）
+
+四处 `[True]` → `[True, False]`（`test_kernel_matches_reference` / `test_backward_kernel_matches_reference` / `test_public_autograd_matches_sdpa` / `test_attention`）。非 causal 走的是不同代码：`lo = 0` 与 `hi = num_block_n * BLOCK_N` 替换掉两个 causal 边界公式，掩码跳过，forward 的分块切分与「整块被掩→写 0 提前退出」也绕开。实测全过。
+
+**非方形形状补上 kernel 级覆盖**：`causal` 断言现在 forward/backward 两侧都拦，所以 `seqlen_q != seqlen_k` **只在非 causal 下合法**——而它此前只有纯 PyTorch 参照测试覆盖（`reference_cases` 里的 `sq128/sk256`），kernel 侧为零。新增 `non_causal_cases`（`sq256/sk512` 与 `sq512/sk256 + d192/128`）+ 两个测试；把两个 kernel 测试的主体抽成 `_check_forward_kernel_vs_reference` / `_check_backward_kernel_vs_reference` 复用，**没有在原测试里加 `if causal and not square: skip` 这类条件分支**（那是往正常路径塞特殊情况）。实测非方形 × GQA × 非对称 head_dim 三重交叉 56~61 dB、cossim≈1.0，即这条路本来就是好的，只是没人测过。
+
+用例数 41 → **75**（`test_kernel_matches_reference` 16、`test_backward_kernel_matches_reference` 16、`test_attention` 16、三个参照测试各 6、`public_autograd` 4、两个非方形各 2、断言回归 1），全套 **11 秒**。
+
+**测试矩阵补上 GQA × 非对称 head_dim 交叉点**：`test_cases` 新增 `num_head_q=32, num_head_kv=8, head_dim_qk=192, head_dim_v=128`。已验证这个配置在把修复撤回后确实会崩（不是静默通过）⇒ 是有效的回归防护。修复对原有七组配置**数值零影响**（`head_dim_qk == head_dim_v` 时两个 stride 本就相同，实测 SNR 逐位一致）。
+
+**上游 `blockwise_fp8` 第 1378 行是一字不差的同一行**，其 `test_attention.py` 的 10 组用例也有完全相同的覆盖盲区（GQA 组全是 128/128，192/128 的两组全是 `num_head_q == num_head_kv`）⇒ 那份代码在 GQA + 非对称 head_dim 下同样会崩，且未被断言拦住。
+
+**同类缺陷全仓排查（结论：无第二例）**
+
+既然 `num_stages` 是"必需参数藏在看起来可选的装饰器里"而丢失，扫了 `alto/kernels` 全部 20 个含 `@triton.jit` 的文件。循环密集型（attention / grouped GEMM）全部有显式 launch 配置：mxfp4 attention forward（392~393 行 `num_stages=1, num_warps=4`，无 backward）、blockwise attention fwd+bwd、三个 grouped_gemm 各有独立 `autotune.py`（6/20/28 configs）。其余无配置的文件都是单趟、访存受限的量化/elementwise kernel，`num_stages` 对它们无意义。**本缺陷仅此一处。**
 
 **本轮新增债（并入 §10.1octies 债表一起清）**
 
@@ -574,4 +623,4 @@ triton.Config({}, num_stages=1, num_warps=4)
 
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA、**A1 stage-2 全量化参照 vs SDPA** 均于 MI250 验 6/6（A1：dQ/dK≈23dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985）；dispatch 已接 `mxfp8_e4m3`。**2026-07-29 CDNA4 真机验收通过（§10.1octies）：全套 41 passed，backward kernel vs A1 参照 53~63 dB·cossim≈1.0、端到端 vs SDPA≈23dB，`_load_scale_sq` 这个最大盲区解除，§7 验收标准 1~5 达成**；同时补 3 处护栏断言（`layout=="bhsd"` ×2；causal backward 要求方阵），把「不报错但结果是垃圾」变成当场报错。backward causal 循环边界与掩码不一致一事**经分析判定不修**（两断言已使其不可达，非正确性问题，详见 §10.1octies 决策记录）。**2026-07-29 二轮对照 blockwise_fp8（backward 的真正上游）复审（§10.1nonies）：无正确性 bug，修掉 port 时丢失的 `num_stages=1`（上游藏在单 config 空 autotune 里），实测 backward 提速 1.15~1.51x（d192 最显著）。**
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA、**A1 stage-2 全量化参照 vs SDPA** 均于 MI250 验 6/6（A1：dQ/dK≈23dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985）；dispatch 已接 `mxfp8_e4m3`。**2026-07-29 CDNA4 真机验收通过（§10.1octies）：全套 41 passed，backward kernel vs A1 参照 53~63 dB·cossim≈1.0、端到端 vs SDPA≈23dB，`_load_scale_sq` 这个最大盲区解除，§7 验收标准 1~5 达成**；同时补 3 处护栏断言（`layout=="bhsd"` ×2；causal backward 要求方阵），把「不报错但结果是垃圾」变成当场报错。backward causal 循环边界与掩码不一致一事**经分析判定不修**（两断言已使其不可达，非正确性问题，详见 §10.1octies 决策记录）。**2026-07-29 二轮对照 blockwise_fp8（backward 的真正上游）复审（§10.1nonies）：修掉 `_bwd_kernel_dkdv` 组循环误用 `stride_qh` 推进 dO 指针的真 bug（GQA × `head_dim_qk != head_dim_v` 下 dK/dV 为 nan 甚至进程 abort，测试矩阵两轴从未交叉故长期未暴露，已补交叉配置）；修掉 port 时丢失的 `num_stages=1`（上游藏在单 config 空 autotune 里），实测 backward 提速 1.15~1.51x（d192 最显著）；同类缺陷全仓排查无第二例；**补掉测试矩阵的两个单值轴（kernel 侧 causal 一直只测 True；非方形此前只有纯 PyTorch 参照覆盖），用例数 41 → 75、全套 11 秒**；补跑 dispatch 路由 smoke ⇒ **§7 验收标准 1~6 全部达成**。**

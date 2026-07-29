@@ -93,21 +93,21 @@ def test_reference_matches_bf16_sdpa(config, causal):
 # Layer 2 — kernel vs golden reference (requires CDNA4 native tl.dot_scaled)
 # ---------------------------------------------------------------------------
 
-@cuda_only
-@pytest.mark.parametrize("config", test_cases)
-@pytest.mark.parametrize("causal", [True])
-def test_kernel_matches_reference(config, causal):
-    """Kernel vs golden reference — isolates Triton port bugs from quant error.
+# Both ops assert seqlen_q == seqlen_k when causal, so non-square shapes are only
+# reachable without causal masking. They stay out of the shared `test_cases` grid
+# (which must remain valid for both causal values) and get their own coverage.
+non_causal_cases = [
+    AttnConfig(seqlen_q=256, seqlen_kv=512, num_head_q=8, num_head_kv=2, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=512, seqlen_kv=256, num_head_q=8, num_head_kv=2, head_dim_qk=192, head_dim_v=128),
+]
 
-    Both sides apply the same mxfp8 quantization, so a large gap here points at a
-    Triton port bug (masking / online-softmax / LSE / strides) rather than
-    quantization error.
-    """
+
+def _check_forward_kernel_vs_reference(config, causal, batch=4):
     from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
 
     device = "cuda"
     dtype = torch.bfloat16
-    q, k, v = _make_qkv_bhsd(4, config, device, dtype)
+    q, k, v = _make_qkv_bhsd(batch, config, device, dtype)
     sm_scale = config.head_dim_qk**(-0.5)
 
     o_kernel = triton_attention_mxfp8(
@@ -137,6 +137,54 @@ def test_kernel_matches_reference(config, causal):
     # Threshold placeholder — calibrate on the first CDNA4 run.
     assert sim > 0.99, f"kernel vs golden cosine-sim too low: {sim}"
     assert snr > 30, f"kernel vs golden SNR too low: {snr}"
+
+
+@cuda_only
+@pytest.mark.parametrize("config", test_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_kernel_matches_reference(config, causal):
+    """Kernel vs golden reference — isolates Triton port bugs from quant error.
+
+    Both sides apply the same mxfp8 quantization, so a large gap here points at a
+    Triton port bug (masking / online-softmax / LSE / strides) rather than
+    quantization error.
+    """
+    _check_forward_kernel_vs_reference(config, causal)
+
+
+@cuda_only
+@pytest.mark.parametrize("config", non_causal_cases)
+def test_kernel_matches_reference_non_square(config):
+    """Forward kernel on seqlen_q != seqlen_k, the only shape family causal rejects."""
+    _check_forward_kernel_vs_reference(config, causal=False, batch=2)
+
+
+@cuda_only
+def test_causal_forward_rejects_non_square_shape():
+    """Non-square causal masking is intentionally blocked until its semantics are decided."""
+    from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
+
+    config = AttnConfig(seqlen_q=128, seqlen_kv=256, num_head_q=4, num_head_kv=4, head_dim_qk=128, head_dim_v=128)
+    q, k, v = _make_qkv_bhsd(1, config, "cuda", torch.bfloat16)
+
+    with pytest.raises(AssertionError, match="causal forward requires seqlen_q == seqlen_k"):
+        triton_attention_mxfp8(
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            bias=None,
+            alibi_slopes=None,
+            sm_scale=config.head_dim_qk**(-0.5),
+            dropout_p=0.0,
+            cu_seqlens_q=0,
+            cu_seqlens_k=0,
+            max_seqlens_q=config.seqlen_q,
+            max_seqlens_k=config.seqlen_kv,
+            causal=True,
+            return_scores=False,
+            use_exp2=True,
+            layout="bhsd",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +294,7 @@ public_autograd_cases = [
 
 @cuda_only
 @pytest.mark.parametrize("config", public_autograd_cases)
-@pytest.mark.parametrize("causal", [True])
+@pytest.mark.parametrize("causal", [True, False])
 def test_public_autograd_matches_sdpa(config, causal):
     """Public ``triton_attention_mxfp8`` forward/backward must wire gradients correctly.
 
@@ -320,17 +368,13 @@ def test_public_autograd_matches_sdpa(config, causal):
 #   Stage-2 reference (same full quantization both sides -> gap = port bugs).
 # ---------------------------------------------------------------------------
 
-@cuda_only
-@pytest.mark.parametrize("config", test_cases)
-@pytest.mark.parametrize("causal", [True])
-def test_backward_kernel_matches_reference(config, causal):
-    """A1 backward kernel vs Stage-2 golden reference — isolates port bugs. CDNA4-only."""
+def _check_backward_kernel_vs_reference(config, causal, batch=4):
     from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
 
     device = "cuda"
     dtype = torch.bfloat16
-    q, k, v = _make_qkv_bhsd(4, config, device, dtype)
-    do = _make_do_bhsd(4, config, device, dtype)
+    q, k, v = _make_qkv_bhsd(batch, config, device, dtype)
+    do = _make_do_bhsd(batch, config, device, dtype)
     sm_scale = config.head_dim_qk**(-0.5)
 
     o_ref, lse_ref = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal)
@@ -374,3 +418,18 @@ def test_backward_kernel_matches_reference(config, causal):
         snr = calc_snr(ref, got)
         assert sim > 0.99, f"{name} kernel-vs-golden cosine-sim too low: {sim}"
         assert snr > 25, f"{name} kernel-vs-golden SNR too low: {snr}"
+
+
+@cuda_only
+@pytest.mark.parametrize("config", test_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_backward_kernel_matches_reference(config, causal):
+    """A1 backward kernel vs Stage-2 golden reference — isolates port bugs. CDNA4-only."""
+    _check_backward_kernel_vs_reference(config, causal)
+
+
+@cuda_only
+@pytest.mark.parametrize("config", non_causal_cases)
+def test_backward_kernel_matches_reference_non_square(config):
+    """Backward kernel on seqlen_q != seqlen_k, the only shape family causal rejects."""
+    _check_backward_kernel_vs_reference(config, causal=False, batch=2)

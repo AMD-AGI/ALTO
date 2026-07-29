@@ -97,7 +97,7 @@ mxfp4 attention 里与量化正交、原样保留的 FA v2 forward 骨架：caus
 - **V scale**：PV reduction 维是 seqlen_k，V scale 沿 seqlen_k：`[..., head_dim_v, seqlen_k/32]`
 - **P scale**：kernel 内动态生成，沿 `BLOCK_N`（seqlen_k）方向
 
-**约束**：head_dim 与 seqlen_k 必须被 `QUANT_BLOCK_SIZE=32` 整除。head_dim ∈ {128,192}、seqlen ∈ {1024,2048} 均满足。head_dim<64 因 `tl.dot_scaled` 限制不支持（mxfp4 亦然）。
+**约束**：head_dim 与 seqlen_k 必须被 `QUANT_BLOCK_SIZE=32` 整除。head_dim ∈ {128,192}、seqlen ∈ {1024,2048} 均满足。head_dim<64 因 `tl.dot_scaled` 限制不支持（mxfp4 亦然）。**layout 只支持 `bhsd`**：2D-block scale 按数据张量 `shape[-2] × shape[-1]` 分块，只有 bhsd 时 `shape[-2]` 才是 seqlen；已加入口断言，见 §10.1octies。
 
 ### 用户 API（对齐 mxfp4，加一个格式开关，去掉 fallback 开关）
 
@@ -117,7 +117,7 @@ def triton_attention_mxfp8(
     causal: bool,
     return_scores: bool,
     use_exp2: bool,
-    layout: str,                    # "bshd" / "bhsd" / "thd"
+    layout: str,                    # 仅支持 "bhsd"（入口断言，见 §2 约束 / §10.1octies）
     *,
     fwd_format: str = "e4m3",       # Q/K/V/P 格式，V1 固定 e4m3；e5m2 预留
     bwd_grad_format: str = "e4m3",  # dO/dP/dS 格式，V1 固定 e4m3；e5m2 预留给未来
@@ -459,6 +459,68 @@ forward 存：`q, k, v, o, softmax_lse, q_scale, k_scale, v_scale, alibi, bias`�
 - **CDNA4 验收**：A1 kernel vs A1 参照（隔离移植 bug）+ vs bf16 SDPA autograd（端到端量化误差）；`_load_scale_sq`（seqlen 轴广播）全仓无先例，最大盲区。
 - padded head_dim（如 192）的 scale mask 仅基础兜底，CDNA4 bring-up 时重点盯。
 
+### 10.1octies 截至 2026-07-29（CDNA4 真机验收通过；补 3 处护栏断言；causal 循环边界经分析判定**不修**）
+
+**环境：** gfx950（CDNA4）真机，`is_cdna4()=True`。Docker `exciting_kepler`（镜像 `wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch`，`/home/yuesun/repos → /workspace`），共享集群上以 `HIP_VISIBLE_DEVICES=7` 单卡运行，其余 7 卡全程未占用。
+
+**§10.1septies 的头号盲区已解除。** A1 backward kernel 的 `tl.dot_scaled` + 2D-scale 指针广播（含全仓无先例的 `_load_scale_sq` seqlen 轴 re-index）在真机跑通，且与 A1 参照吻合：
+
+| 检查 | 结果 |
+|---|---|
+| `test_backward_kernel_matches_reference`（A1 kernel vs A1 参照，全 `test_cases` 7 组） | ✅ **7 passed**，dQ/dK SNR 53~60 dB、dV 59~63 dB，cossim ≈ 1.0 |
+| `test_public_autograd_matches_sdpa`（公开 autograd 端到端 vs bf16 SDPA） | ✅ **2 passed**，dQ/dK≈23.3 dB·cossim≈0.9976、dV≈26 dB·cossim≈0.9988 |
+| `test_kernel_matches_reference`（forward Layer 2，§10.1sexies 在 gfx90a 上 7 failed） | ✅ **7 passed** |
+| 全量 `test_mxfp8_attention_reference.py` + `test_mxfp8_attention.py` | ✅ **41 passed** |
+
+- kernel vs 参照 53~63 dB ⇒ **移植与 scale 广播无 bug**；端到端 23 dB 与 §10.1septies 参照预测的 23 dB 一致 ⇒ **误差全部来自 mxfp8 量化本身，不是 kernel 实现**。
+- **padded head_dim=192 已随 7 组网格覆盖**（config3/config4），§10.1septies「padded head 的 scale mask 仅基础兜底」在 backward 侧首次拿到真机信号；GQA（`num_head_kv` = 8/2 < q）同样覆盖。
+- 据此 **§7 验收标准第 1~5 项均已在 CDNA4 达成**；第 6 项（dispatch 路由 smoke）不在本次运行范围。
+
+**backward causal 循环边界与自身掩码不一致：经分析判定不修（决策记录）**
+
+两个 backward kernel 的**掩码**按 bottom-right 对齐（`col_offset = N_CTX_Q - N_CTX_K`），但决定**循环范围**的两处把 `col_offset` 丢了，等价于硬编码了 `col_offset == 0`（即方阵）：
+
+| 位置 | 现状（未改） | 非方阵下的后果 |
+|---|---|---|
+| `_bwd_kernel_dkdv` 的 `lo` | `(start_n*BLOCK_N - BLOCK_M + 1) // BLOCK_M * BLOCK_M` | `seqlen_k − seqlen_q > BLOCK_M` 时跳过必须计算的 query 块 → dK/dV 漏贡献 |
+| `_bwd_kernel_dq` 的 `hi` | `BLOCK_M // BLOCK_N * (start_m+1) * BLOCK_N` | `seqlen_k > seqlen_q` 时只要差 1 就漏 key 列 → dQ 漏贡献 |
+
+一度改成了带 `col_offset` 的正确形式，**最终回退，只保留下面的断言**。理由按硬度排：
+
+1. **这条路不可达，所以它不是 bug。** 两个断言合起来把 `col_offset != 0` 完全堵死：`causal → seqlen_q == seqlen_k` 拦住定长；`layout == "bhsd"` 顺带杀掉 varlen（thd）——这点很关键，varlen 下每条序列实际长度不同，光断言 max_seqlen 是拦不住的。而 `col_offset == 0` 时新旧公式只差一块全掩块，输出必然逐位一致（已实测：撤回改动前后 21 个 SNR 数字一致到小数点后四位；因为 `p = exp(-inf) = 0`，量化成 e4m3 仍是 0，加进 fp32 累加器是精确的 0）。
+2. **它从来没有「独立可达」过。** 非方阵 + causal 这条路本来就因为 kernel（bottom-right）与参照/`F.sdpa`（top-left）的约定不一致而算不对，边界错只是被一个更大的破坏盖住。修边界并不能让这条路可用，必须先统一约定。
+3. **「负 `lo` 越界读内存」这个理由是假的，已实测推翻。** Triton 的整数 `//` 对负数**向零截断**（不是 Python 的下取整），实测 `BLOCK_M=BLOCK_N=64` 时原式在 `start_n=0..3` 给出 `[0, 0, 64, 128]`，floor 语义才会给 `[-64, 0, 64, 128]`。所以原式**不会**产生负 `lo`、不会越界；`tl.maximum(..., 0)` 是新公式自己引入的需求，不是旧代码的隐患。
+4. **唯一真实代价：方阵下每个 key block 多跑一个全掩 query block。** Triton 循环内无法提前退出，那块的 4 次 dot 实打实算完再被掩成 0。原式 `lo = max(0, (start_n−1)·64)`，正确式 `lo = start_n·64`，故 `start_n ≥ 1` 的每个 program 各多一次迭代：多出比例 `2(N−1) / (N(N+1))`，N = seqlen/64。seqlen 1024 → dkdv 内层迭代 **+11.0%**；2048 → **+5.9%**；4096 → **+3.0%**（迭代次数，非墙钟时间；dkdv 约占 backward 一半，实际再打对折）。序列越长越不值钱。
+
+结论：这是一次**性能与可读性**改动，不是正确性修复；按 fix 提交会误导 reviewer 去找线上不存在的 bug。留待与下方 review 债一起独立评估（那批债里已有「`lo`/`hi` 隐含要求 `BLOCK_M == BLOCK_N`」一条，同源同处，应一并处理）。
+
+**同源代码 `blockwise_fp8/triton_flash_attention_fp8_block.py` 有一字不差的两行**（1297、1665 行；mxfp8 backward 是从它 port 来的，**mxfp4 没有 backward，不是这段的来源**）。那份**没有** `seqlen_q == seqlen_k` 断言，autograd Function 的 `max_seqlens_q/k` 完全自由，但同样不可达：唯一生产入口 `blockwise_fa.py` 第 219 行 `assert query_states.shape[1] == key_states.shape[1]` 后把同一个 `seqlen` 传给 q 和 k；其 `test_attention.py` 的 10 组用例 `seqlen_q` 全等于 `seqlen_kv`。⇒ 同为潜伏、未暴露，本次不动。
+
+**新增 3 处护栏断言（把「不报错但结果是垃圾」变成当场报错）**
+
+| 断言 | 位置 | 原因 |
+|---|---|---|
+| `layout == "bhsd"` | forward op + backward op 各一处 | `convert_to_mxfp8(is_2d_block=True)` 按数据张量 `shape[-2] × shape[-1]` 分 32×32 块，只有 bhsd 时 `shape[-2]` 才是 seqlen。`bshd`/`thd` 下它按 **nheads** 分组（nheads 恰为 32 倍数时连 `torch._check` 都拦不住），而 kernel 的 scale 指针数学假定按 seqlen 分组 → **静默读错 scale**。§2 契约里 `layout` 的三选一由此**收窄为只支持 bhsd**（生产 `dispatch/attention.py` 本就只传 bhsd） |
+| `not causal or seqlen_q == seqlen_k` | backward op | §10.1ter 记录的「潜伏坑」落地：kernel 掩码 bottom-right、PyTorch 参照与 `F.sdpa` 掩码 top-left，两者只在方阵等价。V1 生产只跑 self-attention，故**不统一约定**（那是解决不存在的问题），改为断言拒绝。正向的 bottom-right 自身自洽、纯推理下 `sq != sk` 可用，**不拦 forward** |
+
+断言有效性单独验过：`causal=True, sq=64/sk=128` 走 backward → 按预期抛 AssertionError；`causal=False` 同形状 → 正常通过（非 causal 无对齐问题，不该拦）；`layout="bshd"` 走 forward → 按预期抛 AssertionError。
+
+**Code review 遗留债（已确认，本次未动，建议独立提交）**
+
+- `_MX_2D = tl.constexpr(False)`：名字叫 2D、值是 False，12 处调用全传它 ⇒ `_mx_quant` 的 `IS_2D_BLOCK` 永远走 1D 分支，而其 docstring 花两行解释了这个文件里不存在的 True 行为。参数只有一个取值就不该是参数。
+- `get_padded_headsize`（模块顶部）与 `get_padded_head_dim` 完全重复，前者无调用点。
+- scale 越界填充值不统一：forward `other=1`，backward `_load_scale_hd`/`_load_scale_sq` `other=127`。两者都不影响结果（对应数据已被掩成 0），但应统一为一个命名常量（E8M0 中性值是 127）。
+- `E4M3_TARGET_MAX_POW2` / `E4M3_MBITS` / `E4M3_FORMAT_ID` 手抄了 `mxfp8_quantization.FORMAT_TO_*` 的值，应直接 import。
+- backward docstring 大量引用外部文档编号（`plan §9.5`、`AB decision A1`、`dot a~g`），脱离本 plan 无法解读；建议改为按被算对象命名（qk / dp / dv / dk / dq）。
+- 两个 inner kernel 把运行时值标注成 `N_CTX_Q: tl.constexpr` / `N_CTX_K: tl.constexpr`（varlen 下由 `cu_seqlens` 运行时读出），类型标注不实。
+- `lo` / `hi` 隐含要求 `BLOCK_M == BLOCK_N`（若 `BLOCK_N=128`，`BLOCK_M//BLOCK_N` 变 0，原式直接给出 `hi=0` → dQ 全 0 且不报错）；当前两者硬编码 64，无断言保护。
+
+**仍待办：**
+
+- 上述 review 债清理（与本次断言分开提交）。`lo`/`hi` 的 `col_offset` 与 `BLOCK_M == BLOCK_N` 两条同源，建议合并评估。
+- 若未来要支持非方阵 causal（cross-attention / prefix），需先在 kernel 与参照之间统一 top-left 或 bottom-right 约定，**再把 `lo`/`hi` 补上 `col_offset`**（正确形式见本节决策记录，届时才是真修复），最后才放开该断言。三件事顺序不能颠倒。
+- §7 第 6 项 dispatch 路由 smoke 未跑。
+
 ### 10.2 一句话总结
 
-**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA、**A1 stage-2 全量化参照 vs SDPA** 均于 MI250 验 6/6（A1：dQ/dK≈23dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985）；dispatch 已接 `mxfp8_e4m3`。**A1 kernel 的 `tl.dot_scaled` + 2D-scale 广播在 MI250 编不了，kernel 正确性完全待 CDNA4（kernel vs A1 参照已写好待跑）**（`_load_scale_sq` 为最大盲区）。
+**forward 机械改写 mxfp4**（删 head_dim packing、`e2m1→e4m3`、`_pack_fp4→_quantize_fp8`）；**backward 机械 port blockwise_fp8 backward**（三 kernel 结构白拿，非从零）——阶段1 骨架用高精度 bf16 `tl.dot` 接通并于 MI250 验通移植正确性；**阶段2 量化源经 option A → A1 翻案（2026-07-16）：现为 backward 直接复用 forward 存的 e4m3 q/k/v + 2D-block scale（`_load_scale_hd`/`_load_scale_sq` 指针广播，零重量化），只有 dO/P/dS 现场 1D 量化；A 与其参照已删，B 不做**。全 e4m3（含 backward，已定）、**仅 CDNA4 无 fallback**。forward Layer 1 已于 MI250 验 6/6；backward stage-1 参照 vs SDPA、**A1 stage-2 全量化参照 vs SDPA** 均于 MI250 验 6/6（A1：dQ/dK≈23dB·cossim≈0.9976、dV≈25-26dB·cossim≈0.9985）；dispatch 已接 `mxfp8_e4m3`。**2026-07-29 CDNA4 真机验收通过（§10.1octies）：全套 41 passed，backward kernel vs A1 参照 53~63 dB·cossim≈1.0、端到端 vs SDPA≈23dB，`_load_scale_sq` 这个最大盲区解除，§7 验收标准 1~5 达成**；同时补 3 处护栏断言（`layout=="bhsd"` ×2；causal backward 要求方阵），把「不报错但结果是垃圾」变成当场报错。backward causal 循环边界与掩码不一致一事**经分析判定不修**（两断言已使其不可达，非正确性问题，详见 §10.1octies 决策记录）。

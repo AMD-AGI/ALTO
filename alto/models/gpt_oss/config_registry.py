@@ -22,8 +22,8 @@ __all__ = [
     "gpt_oss_20b_lpt_midmax",
     "gpt_oss_20b_lpt_lowrank",
     "gpt_oss_20b_lpt_deosc",
-    "gpt_oss_lpt_madam",
-    "gpt_oss_lpt_madam_stable",
+    "gpt_oss_20b_lpt_madam",
+    "gpt_oss_20b_lpt_madam_stable",
 ]
 
 

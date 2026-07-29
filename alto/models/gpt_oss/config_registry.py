@@ -171,7 +171,7 @@ def gpt_oss_20b_lpt_madam_stable() -> Trainer.Config:
     * ``de_step_cap`` tightened from 0.5 to 0.2 (max per-step magnitude change
       ~2**0.2 ~= 1.15x instead of ~1.41x).
     """
-    config = gpt_oss_lpt_madam()
+    config = gpt_oss_20b_lpt_madam()
     config.optimizer.lr_e = 3e-5
     config.optimizer.de_step_cap = 0.2
     return config

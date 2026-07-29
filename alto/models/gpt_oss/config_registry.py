@@ -139,7 +139,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     return config
 
 
-def gpt_oss_lpt_madam() -> Trainer.Config:
+def gpt_oss_20b_lpt_madam() -> Trainer.Config:
     """Debug-model smoke test for the custom ``m_adam`` optimizer.
 
     ``lr`` maps to m_adam's additive (AdamW) branch ``lr_m`` and is driven
@@ -159,7 +159,7 @@ def gpt_oss_lpt_madam() -> Trainer.Config:
     return config
 
 
-def gpt_oss_lpt_madam_stable() -> Trainer.Config:
+def gpt_oss_20b_lpt_madam_stable() -> Trainer.Config:
     """``gpt_oss_lpt_madam`` with a damped exponent branch.
 
     Same baseline-matched additive branch as ``gpt_oss_lpt_madam``, but the

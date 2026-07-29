@@ -899,6 +899,10 @@ def attention_mxfp8_forward_triton_impl(
     assert q_scale.is_contiguous()
     assert k_scale.is_contiguous()
     assert v_scale.is_contiguous()
+    assert layout == "bhsd", (
+        f"MXFP8 attention requires layout='bhsd', got {layout!r}: the 2D-block scale groups the "
+        "data tensor's last two dims, which are (seqlen, head_dim) only for bhsd. Any other "
+        "layout groups across heads and the scale pointer math below reads the wrong scale.")
 
     # check if varlen
     is_varlen = layout == "thd"
@@ -1833,8 +1837,17 @@ def attention_mxfp8_backward_triton_impl(
     if not do.is_contiguous():
         do = do.contiguous()
 
+    assert layout == "bhsd", (
+        f"MXFP8 attention requires layout='bhsd', got {layout!r}: the 2D-block scale groups the "
+        "data tensor's last two dims, which are (seqlen, head_dim) only for bhsd. Any other "
+        "layout groups across heads and the scale pointer math below reads the wrong scale.")
+
     batch, nheads_q, nheads_k, head_size_qk, head_size_v, max_seqlen_q, max_seqlen_k = get_shape_from_layout(
         q, k, v, layout, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    assert not causal or max_seqlen_q == max_seqlen_k, (
+        f"causal backward requires seqlen_q == seqlen_k, got {max_seqlen_q} vs {max_seqlen_k}: the "
+        "kernel masks bottom-right aligned while the PyTorch references and F.sdpa mask top-left, "
+        "and the two conventions only agree on square shapes.")
     stride_qz, stride_qh, stride_qm, stride_qk = get_strides_from_layout(q, layout)
     stride_kz, stride_kh, stride_kn, stride_kk = get_strides_from_layout(k, layout)
     stride_vz, stride_vh, stride_vn, stride_vk = get_strides_from_layout(v, layout)

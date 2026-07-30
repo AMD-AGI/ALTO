@@ -53,15 +53,13 @@ RUN mkdir -p /var/lib/jenkins && \
 
 ENV PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950"
 
-# bnxt_re RDMA provider copied from the host's Broadcom OFED install instead of
-# building rdma-core from source. The host ships the working ABI-matched provider
-# at /usr/local/lib/x86_64-linux-gnu/libbnxt_re-rdmav34.so; the inbox apt provider
-# has the wrong kernel uABI. Recreate the symlinks, ld.so.conf entry, and the
-# libibverbs .driver registration so libibverbs can dlopen it.
-# Overwrite apt's upstream bnxt_re provider (ABI 1 only) with Broadcom's
-# out-of-tree build (supports kernel uABI 8) directly into libibverbs' provider dir.
-COPY alto/docker/bnxt_re/libmlx5-rdmav57.so /lib/x86_64-linux-gnu/libibverbs/libmlx5-rdmav57.so
-RUN ldconfig
+# RDMA providers (the libibverbs plugins, e.g. libmlx5 / libbnxt_re) are ABI-tied
+# to each host's rdma-core and kernel, which vary across our machines, so they are
+# deliberately NOT baked into the image. rdma_tests/start_container.sh mounts the
+# host's libibverbs userspace (library + provider modules + /etc/libibverbs.d)
+# read-only at runtime, so the in-container RDMA stack always matches the host it
+# runs on. The ibverbs-providers/libibverbs-dev apt packages above remain as a
+# self-contained fallback for same-ABI hosts (USE_HOST_RDMA=0).
 
 RUN FSDP_PARAM=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'distributed/fsdp/_fully_shard/_fsdp_param.py'))") && \
     sed -i 's/self.sharded_param = nn.Parameter(self.to_sharded_dtensor(sharded_param))/self.sharded_param = nn.Parameter(self.to_sharded_dtensor(sharded_param), requires_grad=param.requires_grad)/' "$FSDP_PARAM" && \

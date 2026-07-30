@@ -13,9 +13,9 @@ torchrun \
 torchrun \
   --nnodes=2 --nproc-per-node=8 --node-rank=0 \
   --master-addr=10.224.1.148 --master-port=29500 \
-  test_rdma_allreduce.py
+  rdma_tests/test_rdma_allreduce.py
 
 torchrun \
   --nnodes=2 --nproc-per-node=8 --node-rank=1 \
   --master-addr=10.224.1.148 --master-port=29500 \
-  test_rdma_allreduce.py
+  rdma_tests/test_rdma_allreduce.py

@@ -18,6 +18,10 @@ A custom legend/column name can be given per file with "path=label" syntax, e.g.
     python3 plot_training_stats.py run_a.out=baseline run_b.out="lr 3e-4"
 Files given without "=label" fall back to their basename.
 
+A single run may span several .out files (e.g. a resumed job). List them
+comma-separated on the CLI; they are parsed in order and drawn as one curve:
+    python3 plot_training_stats.py part1.out,part2.out=baseline
+
 TOML config format (see runs.example.toml):
     output = "val_loss.png"                 # optional, overridden by -o
     title  = "Validation loss vs. step"     # optional
@@ -29,6 +33,12 @@ TOML config format (see runs.example.toml):
     [[runs]]
     file = "slurm-207504.out"
     name = "lr 3e-4"
+
+    # a run split across multiple files: pass a list to "file" (or "files").
+    # files are concatenated in the given order into a single curve/column.
+    [[runs]]
+    file = ["slurm-208455.out", "slurm-208634.out"]
+    name = "midmax"
 """
 import argparse
 import os
@@ -81,11 +91,29 @@ def parse(path):
     return tr_steps, tr_losses, grad_norms, val_steps, val_losses
 
 
+def parse_many(paths):
+    """Parse several log files and concatenate them (in order) as one run.
+
+    Same return shape as parse(); use this when a single logical run is split
+    across multiple .out files (e.g. a resumed job).
+    """
+    tr_steps, tr_losses, grad_norms, val_steps, val_losses = [], [], [], [], []
+    for p in paths:
+        a, b, c, d, e = parse(p)
+        tr_steps.extend(a)
+        tr_losses.extend(b)
+        grad_norms.extend(c)
+        val_steps.extend(d)
+        val_losses.extend(e)
+    return tr_steps, tr_losses, grad_norms, val_steps, val_losses
+
+
 def runs_from_config(path):
     """Return (runs, output, title) from a .toml config.
 
-    runs is a list of (file, label) tuples. Paths are resolved relative to the
-    config file's directory so a config can be run from anywhere.
+    runs is a list of (files, label) tuples where files is a list of one or
+    more paths (a run may span several .out files). Paths are resolved relative
+    to the config file's directory so a config can be run from anywhere.
     """
     if tomllib is None:
         sys.exit("reading a .toml config needs Python 3.11+ or the 'tomli' package (pip install tomli)")
@@ -95,13 +123,16 @@ def runs_from_config(path):
     base = os.path.dirname(os.path.abspath(path))
     runs = []
     for i, r in enumerate(cfg.get("runs", [])):
-        if "file" not in r:
+        # accept "file" (str or list) or "files" (list); a run may span files
+        raw = r.get("files", r.get("file"))
+        if raw is None:
             sys.exit(f"{path}: runs[{i}] is missing required 'file' key")
-        fpath = r["file"]
-        if not os.path.isabs(fpath):
-            fpath = os.path.join(base, fpath)
-        label = r.get("name") or os.path.basename(r["file"])
-        runs.append((fpath, label))
+        file_list = raw if isinstance(raw, list) else [raw]
+        if not file_list:
+            sys.exit(f"{path}: runs[{i}] has an empty file list")
+        paths = [f if os.path.isabs(f) else os.path.join(base, f) for f in file_list]
+        label = r.get("name") or os.path.basename(file_list[0])
+        runs.append((paths, label))
     return runs, cfg.get("output"), cfg.get("title")
 
 
@@ -124,12 +155,16 @@ def main():
             ap.error("no runs given: pass logfiles positionally or use -c/--config")
         runs = []
         for entry in args.logfiles:
-            # allow "path=custom legend label"; only split on the first "="
+            # allow "path[,path2,...]=custom legend label"; split label on the
+            # first "=", then split the path part on "," for multi-file runs
             if "=" in entry:
                 path, label = entry.split("=", 1)
             else:
-                path, label = entry, os.path.basename(entry)
-            runs.append((path, label))
+                path, label = entry, None
+            paths = path.split(",")
+            if label is None:
+                label = os.path.basename(paths[0])
+            runs.append((paths, label))
 
     out = args.output or cfg_out or "val_loss.png"
     suptitle = args.title or cfg_title or "GPT-OSS 20b"
@@ -150,10 +185,13 @@ def main():
     colors = {}                 # label -> line color
     total_val = 0               # validation datapoints (table)
 
-    for path, label in runs:
-        if not os.path.exists(path):
+    for paths, label in runs:
+        existing = [p for p in paths if os.path.exists(p)]
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            print(f"warning: file(s) not found: {', '.join(missing)}", file=sys.stderr)
+        if not existing:
             # keep a placeholder so the run still shows in the legend + table
-            print(f"warning: file not found, showing empty entry: {path}", file=sys.stderr)
             (line,) = ax.plot([], [], linewidth=1.2, label=f"{label} (missing)")
             ax_grad.plot([], [], linewidth=1.2, color=line.get_color())
             labels.append(label)
@@ -161,7 +199,7 @@ def main():
             colors[label] = line.get_color()
             continue
 
-        tr_steps, tr_losses, grad_norms, val_steps, val_losses = parse(path)
+        tr_steps, tr_losses, grad_norms, val_steps, val_losses = parse_many(existing)
 
         # curves plot TRAINING loss (no per-point marker — too dense)
         (line,) = ax.plot(tr_steps, tr_losses, linewidth=1.2, label=label)
@@ -241,7 +279,9 @@ def main():
     fig.suptitle(suptitle, fontsize=16, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.96))  # leave room for the suptitle
     fig.savefig(out, dpi=150)
-    print(f"Wrote {out} ({total_val} validation datapoints in table across {len(runs)} file(s))")
+    n_files = sum(len(paths) for paths, _ in runs)
+    print(f"Wrote {out} ({total_val} validation datapoints in table across "
+          f"{len(runs)} run(s), {n_files} file(s))")
 
 
 if __name__ == "__main__":

@@ -16,9 +16,14 @@ file = "../slurm-207639.out"
 name = "lpt_recipe"
 
 [[runs]]
-file = "../slurm-208076.out"
+file = "../slurm-208070.out"
+name = "deoscillation"
+
+[[runs]]
+file = ["../slurm-208455.out","../slurm-208634.out"]
 name = "midmax"
 
 [[runs]]
-file = "../slurm-208070.out"
-name = "deoscillation"
+file = ["../slurm-208293.out"]
+name = "madam"
+

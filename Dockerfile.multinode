@@ -1,0 +1,68 @@
+FROM rocm/pytorch:latest
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Port 80 to archive.ubuntu.com/security.ubuntu.com is blocked in this build
+# environment, but 443 works. Rewrite every apt source (including the deb822
+# /etc/apt/sources.list.d/ubuntu.sources used on noble) from http:// to https://.
+RUN find /etc/apt -type f \
+        \( -name '*.list' -o -name '*.sources' \) \
+        -exec sed -i 's|http://|https://|g' {} + \
+    && apt-get \
+        -o Acquire::ForceIPv4=true \
+        -o Acquire::Retries=5 \
+        -o Acquire::https::Timeout=30 \
+        update \
+    && apt-get install -y \
+    git-lfs \
+    pkg-config \
+    clang \
+    libclang-dev \
+    libunwind-dev \
+    libnl-3-dev \
+    libnl-route-3-dev \
+    libibverbs-dev \
+    ibverbs-providers \
+    cmake \
+    && update-pciids \
+    # && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir huggingface_hub "datasets>=3.6.0" \
+    transformers tabulate wandb fsspec tyro "tokenizers>=0.15.0" safetensors \
+    tensorboard pre-commit yapf pybind11 meson-python torchdata pytablewriter \
+    "antlr4-python3-runtime==4.11.0" sympy math_verify more_itertools peft \
+    accelerate pillow "numpy<2" opencv-python-headless scipy \
+    numba huggingface-hub[cli,hf_transfer] "packaging>=24.2" \
+    "setuptools>=77.0.3,<80.0.0" "setuptools-scm>=8" \
+    protobuf-protoc-bin fmt 
+
+RUN mkdir -p /var/lib/jenkins && \
+    cd /var/lib/jenkins && \
+    git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness && \
+    cd lm-evaluation-harness && \
+    pip install -e .
+
+ENV PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950"
+
+# bnxt_re RDMA provider copied from the host's Broadcom OFED install instead of
+# building rdma-core from source. The host ships the working ABI-matched provider
+# at /usr/local/lib/x86_64-linux-gnu/libbnxt_re-rdmav34.so; the inbox apt provider
+# has the wrong kernel uABI. Recreate the symlinks, ld.so.conf entry, and the
+# libibverbs .driver registration so libibverbs can dlopen it.
+# Overwrite apt's upstream bnxt_re provider (ABI 1 only) with Broadcom's
+# out-of-tree build (supports kernel uABI 8) directly into libibverbs' provider dir.
+COPY alto/docker/bnxt_re/libmlx5-rdmav57.so /lib/x86_64-linux-gnu/libibverbs/libmlx5-rdmav57.so
+RUN ldconfig
+
+RUN FSDP_PARAM=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'distributed/fsdp/_fully_shard/_fsdp_param.py'))") && \
+    sed -i 's/self.sharded_param = nn.Parameter(self.to_sharded_dtensor(sharded_param))/self.sharded_param = nn.Parameter(self.to_sharded_dtensor(sharded_param), requires_grad=param.requires_grad)/' "$FSDP_PARAM" && \
+    sed -i 's/        self.sharded_param.requires_grad_(param.requires_grad)//' "$FSDP_PARAM"
+
+# Install torchtitan and ALTO training deps at build time (as root) to avoid
+# /opt/venv permission errors when the container runs as a non-root user.
+COPY . /tmp/torchtitan_src
+RUN pip install --no-cache-dir aim torchao \
+    compressed_tensors easydict loguru \
+    poetry-core "poetry-dynamic-versioning>=1.0.0,<2.0.0" && \
+    pip install --no-cache-dir --no-build-isolation --no-deps /tmp/torchtitan_src && \
+    rm -rf /tmp/torchtitan_src

@@ -1,0 +1,17 @@
+# Build context for alto/Dockerfile.multinode is this directory (ALTO/).
+# Keep large / irrelevant paths out of the context sent to the Docker daemon.
+# gptoss_chkpt alone is ~9.6TB and must never be tarred into the build context.
+.git
+gptoss_chkpt/
+logs/
+comm_traces/
+plotting/
+examples/
+tests/
+slurm-*.out
+*.out
+error*.txt
+sendit.toml
+wait_and_run.sh
+**/__pycache__/
+**/*.pyc

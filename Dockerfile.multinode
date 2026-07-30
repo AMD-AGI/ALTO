@@ -5,6 +5,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Port 80 to archive.ubuntu.com/security.ubuntu.com is blocked in this build
 # environment, but 443 works. Rewrite every apt source (including the deb822
 # /etc/apt/sources.list.d/ubuntu.sources used on noble) from http:// to https://.
+
+# Packages
+# ibverbs-utils for debug via to `rdma link show`
+# iproute2 debug ip addresses such as RDMA ips
+# perftest RDMA debug
+
 RUN find /etc/apt -type f \
         \( -name '*.list' -o -name '*.sources' \) \
         -exec sed -i 's|http://|https://|g' {} + \
@@ -22,6 +28,9 @@ RUN find /etc/apt -type f \
     libnl-3-dev \
     libnl-route-3-dev \
     libibverbs-dev \
+    ibverbs-utils \
+    iproute2 \
+    perftest \
     ibverbs-providers \
     cmake \
     && update-pciids \

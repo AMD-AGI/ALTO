@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Plot step vs. validation loss from one or more slurm .out logs.
+"""Plot training/validation loss and grad norm from slurm .out logs and/or
+TensorBoard event files.
 
-Parses lines like:
-    ... validate step: 768  loss:  4.9572  memory: ...
-(ANSI color codes are stripped before matching.)
+Two source kinds are supported and may be freely mixed within a single plot
+(and even within a single run):
+
+  * slurm .out logs -- parsed by regex from lines like:
+        ... validate step: 768  loss:  4.9572  memory: ...
+    (ANSI color codes are stripped before matching.)
+
+  * TensorBoard sources -- either an event file (events.out.tfevents.*) or a
+    directory containing them (e.g. a run's tb/ dir, whose timestamped subdirs
+    from resumes are read in order). Scalar tags read:
+        loss_metrics/global_avg_loss  -> training loss
+        grad_norm                     -> gradient norm
+        validation_metrics/loss       -> validation loss
 
 Alongside the plot, a table on the right lists each method's loss at every
 step (union of all steps across files; blank where a method has no datapoint).
@@ -39,6 +50,12 @@ TOML config format (see runs.example.toml):
     [[runs]]
     file = ["slurm-208455.out", "slurm-208634.out"]
     name = "midmax"
+
+    # a TensorBoard run: point "file" at the tb dir (or a single event file).
+    # .out logs and tb sources may be mixed in the same list and across runs.
+    [[runs]]
+    file = "gpt_oss_20b-pretrain-bf16/tb"
+    name = "bf16 (tb)"
 """
 import argparse
 import os
@@ -68,6 +85,78 @@ VAL = re.compile(r"validate step:\s*(\d+)\s+loss:\s*([\d.]+)")
 TRAIN = re.compile(r"(?<!validate )step:\s*(\d+)\s+loss:\s*([\d.]+)(?:\s+grad_norm:\s*([\d.]+))?")
 
 
+# TensorBoard scalar tags: training loss, grad norm, validation loss.
+# Matched exactly, then by suffix, so a loose name (e.g. "global_avg_loss")
+# still finds the full tag "loss_metrics/global_avg_loss".
+TB_TRAIN_TAG = "loss_metrics/global_avg_loss"
+TB_GRAD_TAG = "grad_norm"
+TB_VAL_TAG = "validation_metrics/loss"
+
+
+def is_tb(path):
+    """True if path looks like a TensorBoard source (event file or dir of them)."""
+    if os.path.isdir(path):
+        return True
+    return os.path.basename(path).startswith("events.out.tfevents")
+
+
+def _tb_event_files(path):
+    """Return event files for a TB source, sorted so resumes concatenate in order.
+
+    A path may be a single event file, or a directory holding one or more of
+    them (e.g. a run's tb/ dir with a timestamped subdir per resume).
+    """
+    if os.path.isdir(path):
+        import glob
+        return sorted(glob.glob(os.path.join(path, "**", "events.out.tfevents.*"),
+                                recursive=True))
+    return [path]
+
+
+def _tb_scalars(ea, tag):
+    """Return [(step, value), ...] for tag, matching exactly or by suffix.
+
+    Returns [] if no tag matches (e.g. an event file with no validation data).
+    """
+    tags = ea.Tags().get("scalars", [])
+    if tag not in tags:
+        matches = [t for t in tags if t.endswith("/" + tag) or t == tag]
+        if not matches:
+            return []
+        tag = matches[0]
+    return [(e.step, e.value) for e in ea.Scalars(tag)]
+
+
+def parse_tb(path):
+    """Parse TensorBoard scalars; same return shape as parse().
+
+    Reads global_avg_loss (training loss), grad_norm, and
+    validation_metrics/loss (validation loss). grad_norms is aligned with
+    train_steps (None where a step has no grad_norm). Multiple event files
+    under a directory are read in order and concatenated as one run.
+    """
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    except ModuleNotFoundError:
+        sys.exit("reading TensorBoard logs needs the 'tensorboard' package "
+                 "(pip install tensorboard)")
+
+    tr_steps, tr_losses, grad_norms, val_steps, val_losses = [], [], [], [], []
+    for ef in _tb_event_files(path):
+        # size_guidance scalars=0 disables TB's default downsampling to 1000 pts
+        ea = EventAccumulator(ef, size_guidance={"scalars": 0})
+        ea.Reload()
+        grad = dict(_tb_scalars(ea, TB_GRAD_TAG))
+        for step, loss in _tb_scalars(ea, TB_TRAIN_TAG):
+            tr_steps.append(step)
+            tr_losses.append(loss)
+            grad_norms.append(grad.get(step))
+        for step, loss in _tb_scalars(ea, TB_VAL_TAG):
+            val_steps.append(step)
+            val_losses.append(loss)
+    return tr_steps, tr_losses, grad_norms, val_steps, val_losses
+
+
 def parse(path):
     """Return (train_steps, train_losses, grad_norms, val_steps, val_losses).
 
@@ -92,14 +181,15 @@ def parse(path):
 
 
 def parse_many(paths):
-    """Parse several log files and concatenate them (in order) as one run.
+    """Parse several sources and concatenate them (in order) as one run.
 
     Same return shape as parse(); use this when a single logical run is split
-    across multiple .out files (e.g. a resumed job).
+    across multiple sources (e.g. a resumed job). Each source may be a slurm
+    .out log or a TensorBoard event file/dir; the two may be freely mixed.
     """
     tr_steps, tr_losses, grad_norms, val_steps, val_losses = [], [], [], [], []
     for p in paths:
-        a, b, c, d, e = parse(p)
+        a, b, c, d, e = parse_tb(p) if is_tb(p) else parse(p)
         tr_steps.extend(a)
         tr_losses.extend(b)
         grad_norms.extend(c)
@@ -109,7 +199,7 @@ def parse_many(paths):
 
 
 def runs_from_config(path):
-    """Return (runs, output, title) from a .toml config.
+    """Return (runs, output, title, details) from a .toml config.
 
     runs is a list of (files, label) tuples where files is a list of one or
     more paths (a run may span several .out files). Paths are resolved relative
@@ -133,23 +223,26 @@ def runs_from_config(path):
         paths = [f if os.path.isabs(f) else os.path.join(base, f) for f in file_list]
         label = r.get("name") or os.path.basename(file_list[0])
         runs.append((paths, label))
-    return runs, cfg.get("output"), cfg.get("title")
+    return runs, cfg.get("output"), cfg.get("title"), cfg.get("details")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("logfiles", nargs="*",
-                    help='one or more slurm .out logs; use "path=label" to set a custom legend name')
+                    help='one or more slurm .out logs or TensorBoard sources '
+                         '(event file or tb/ dir); use "path=label" to set a '
+                         'custom legend name')
     ap.add_argument("-c", "--config", help="TOML config file describing runs (see runs.example.toml)")
     ap.add_argument("-o", "--output", help="output image path (default: val_loss.png)")
     ap.add_argument("-t", "--title", help="plot title")
+    ap.add_argument("-d", "--details", help="extra info shown in a small text box (top-right)")
     args = ap.parse_args()
 
-    cfg_out = cfg_title = None
+    cfg_out = cfg_title = cfg_details = None
     if args.config:
         if args.logfiles:
             sys.exit("provide runs either positionally or via -c/--config, not both")
-        runs, cfg_out, cfg_title = runs_from_config(args.config)
+        runs, cfg_out, cfg_title, cfg_details = runs_from_config(args.config)
     else:
         if not args.logfiles:
             ap.error("no runs given: pass logfiles positionally or use -c/--config")
@@ -168,17 +261,25 @@ def main():
 
     out = args.output or cfg_out or "val_loss.png"
     suptitle = args.title or cfg_title or "GPT-OSS 20b"
+    details = args.details or cfg_details
 
-    # figure: stacked training-loss (top) and grad-norm (bottom) plots on the
-    # left, table spanning both rows on the right
-    fig, axd = plt.subplot_mosaic(
-        [["loss", "table"],
-         ["grad", "table"]],
-        figsize=(15, 9),
-        width_ratios=[3, 1.4],
-        height_ratios=[2, 1],
-    )
-    ax, ax_grad, ax_tbl = axd["loss"], axd["grad"], axd["table"]
+    # figure: stacked training-loss (top), grad-norm (middle), and
+    # validation-loss (bottom) plots on the left, table on the right. When
+    # `details` is given, a small text box takes a thin strip at the top of
+    # the right column (beside training loss, above the table + its title);
+    # the table keeps most of the column height so it stays uncramped.
+    fig = plt.figure(figsize=(15, 11))
+    gs = fig.add_gridspec(3, 2, width_ratios=[3, 1.4], height_ratios=[2, 1, 1])
+    ax = fig.add_subplot(gs[0, 0])
+    ax_grad = fig.add_subplot(gs[1, 0])
+    ax_val = fig.add_subplot(gs[2, 0])
+    ax_det = None
+    if details:
+        gs_r = gs[:, 1].subgridspec(2, 1, height_ratios=[1, 5])
+        ax_det = fig.add_subplot(gs_r[0])
+        ax_tbl = fig.add_subplot(gs_r[1])
+    else:
+        ax_tbl = fig.add_subplot(gs[:, 1])
 
     labels = []                 # column labels, in input order
     loss_by_step = {}           # label -> {val_step: val_loss}  (table data)
@@ -194,6 +295,7 @@ def main():
             # keep a placeholder so the run still shows in the legend + table
             (line,) = ax.plot([], [], linewidth=1.2, label=f"{label} (missing)")
             ax_grad.plot([], [], linewidth=1.2, color=line.get_color())
+            ax_val.plot([], [], linewidth=1.2, color=line.get_color())
             labels.append(label)
             loss_by_step[label] = {}
             colors[label] = line.get_color()
@@ -209,6 +311,11 @@ def main():
         gsteps = [s for s, g in zip(tr_steps, grad_norms) if g is not None]
         gvals = [g for g in grad_norms if g is not None]
         ax_grad.plot(gsteps, gvals, linewidth=1.2, color=color, label=label)
+
+        # validation-loss curve below the grad-norm plot, matching color
+        # (markers here since validation points are sparse)
+        ax_val.plot(val_steps, val_losses, linewidth=1.2, marker="o",
+                    markersize=3, color=color, label=label)
 
         labels.append(label)
         loss_by_step[label] = dict(zip(val_steps, val_losses))
@@ -229,6 +336,22 @@ def main():
     ax_grad.set_title("Gradient Norm", fontweight="bold")
     ax_grad.grid(True, alpha=0.3)
     ax_grad.sharex(ax)
+
+    ax_val.set_xlabel("step")
+    ax_val.set_ylabel("validation loss")
+    ax_val.set_title("Validation Loss", fontweight="bold")
+    ax_val.grid(True, alpha=0.3)
+    ax_val.sharex(ax)
+
+    # --- optional details text box (top-right, above the table) ---
+    if ax_det is not None:
+        ax_det.axis("off")
+        ax_det.text(
+            0.5, 0.98, textwrap.fill(details, width=34),
+            transform=ax_det.transAxes, ha="center", va="top",
+            fontsize=8, color="white",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="none", edgecolor="gray"),
+        )
 
     # --- table of VALIDATION losses per step for each method ---
     all_steps = sorted({s for d in loss_by_step.values() for s in d})
@@ -279,9 +402,14 @@ def main():
     fig.suptitle(suptitle, fontsize=16, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.96))  # leave room for the suptitle
     fig.savefig(out, dpi=150)
+    # also emit vector PDF + SVG alongside the raster output
+    base = os.path.splitext(out)[0]
+    pdf_out, svg_out = base + ".pdf", base + ".svg"
+    fig.savefig(pdf_out)
+    fig.savefig(svg_out)
     n_files = sum(len(paths) for paths, _ in runs)
-    print(f"Wrote {out} ({total_val} validation datapoints in table across "
-          f"{len(runs)} run(s), {n_files} file(s))")
+    print(f"Wrote {out}, {pdf_out} and {svg_out} ({total_val} validation "
+          f"datapoints in table across {len(runs)} run(s), {n_files} file(s))")
 
 
 if __name__ == "__main__":

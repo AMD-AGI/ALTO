@@ -24,6 +24,7 @@ __all__ = [
     "gpt_oss_20b_lpt_deosc",
     "gpt_oss_20b_lpt_madam",
     "gpt_oss_20b_lpt_madam_stable",
+    "gpt_oss_20b_mxfp4_base"
 ]
 
 
@@ -81,17 +82,17 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
     config.dump_folder = "gpt_oss_20b-mi300-pretrain-subset-lr4e-4-outputs"
     config.profiling.enable_profiling = False
-    config.training.steps = 1200000
+    config.training.steps = 1200000 # set by mlperf
     config.training.local_batch_size = 1
-    config.training.global_batch_size = 16
-    config.training.seq_len = 8192
-    config.optimizer.lr = 4e-4
-    config.optimizer.weight_decay = 0.1
-    config.optimizer.beta1 = 0.9
-    config.optimizer.beta2 = 0.95
-    config.optimizer.eps = 1e-5
-    config.lr_scheduler.min_lr_factor = 0.1
-    config.lr_scheduler.warmup_steps = 128
+    config.training.global_batch_size = 16 # can be edited for mlperf submission
+    config.training.seq_len = 8192 # set by mlperf
+    config.optimizer.lr = 4e-4 # can be edited for mlperf
+    config.optimizer.weight_decay = 0.1 # set by mlperf
+    config.optimizer.beta1 = 0.9 # set by mlperf
+    config.optimizer.beta2 = 0.95 # set by mlperf
+    config.optimizer.eps = 1e-5 # set by mlperf
+    config.lr_scheduler.min_lr_factor = 0.1 # set by mlperf
+    config.lr_scheduler.warmup_steps = 128 # can be edited for mlperf submission
     config.lr_scheduler.decay_ratio = 1 - 128 / config.training.steps
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
@@ -192,6 +193,15 @@ def gpt_oss_20b_lpt_midmax() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-midmax-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_midmax.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_mxfp4_base() -> Trainer.Config:
+    """baseline MXFP4 quantization."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-mxfp4-base"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp4_base.yaml",),
     ],)
     return config
 

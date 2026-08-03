@@ -18,6 +18,10 @@ MX6 runs the same block algorithm as MX9 and differs only in element width
 (``QUANT_BIT`` = 5, so integers clamp to +/-15) and this byte packing; the shared
 math lives in ``_mx_common`` and follows the MX6/MX9 fake-quant port in
 ``alto/modifiers/quantization/mx.py``.
+
+block_size is fixed at 16 so 8 pairs pack into exactly one prime byte. Packed
+integers cannot represent NaN, so the sign / mantissa bytes are undefined for
+blocks containing NaN.
 """
 
 import torch
@@ -25,19 +29,23 @@ import triton
 import triton.language as tl
 
 from ._mx_common import (
+    _block_coords,
     _calculate_mx_exp,
     _quantize_clamped,
     _pack_bits8,
     _unpack_bits8,
     _dequantize_decoded_q,
-    _convert_to_mx_host,
-    _convert_from_mx_host,
+    convert_to_mx,
+    convert_from_mx,
 )
 
 BLOCK_SIZE = 16
 QUANT_BIT = 5
 PRIME_GROUP = 2
 BLOCKS_PER_PROG_DEFAULT = 64
+
+# [max_exp(1B) | prime | sign bitmap | mantissa nibbles] = 6 bits/element.
+N_PACKED_BYTES = 1 + (BLOCK_SIZE // PRIME_GROUP) // 8 + BLOCK_SIZE // 8 + BLOCK_SIZE // 2
 
 
 @triton.jit
@@ -122,13 +130,14 @@ def _convert_to_mx6_kernel(
     n_blocks,
     last,
     blocks_per_row,
-    stride_row,
-    stride_col,
+    stride_in_row,
+    stride_in_col,
+    stride_out_blk,
+    stride_out_byte,
     BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_PROG: tl.constexpr,
     PRIME_GROUP: tl.constexpr,
     QUANT_BIT: tl.constexpr,
-    N_PACKED_BYTES: tl.constexpr,
 ):
 
     tl.static_assert(BLOCK_SIZE % PRIME_GROUP == 0, "BLOCK_SIZE must be divisible by PRIME_GROUP")
@@ -142,23 +151,13 @@ def _convert_to_mx6_kernel(
     SIGN_OFFSET: tl.constexpr = PRIME_OFFSET + N_PRIME_BYTES
     MANTISSA_OFFSET: tl.constexpr = SIGN_OFFSET + N_SIGN_BYTES
 
-    # The row size the host allocated must match the segments written below,
-    # otherwise a layout change on one side silently writes past the row.
-    tl.static_assert(N_PACKED_BYTES == MANTISSA_OFFSET + N_MANTISSA_BYTES,
-                     "N_PACKED_BYTES does not match the MX6 segment layout")
-
     pid = tl.program_id(0)
     blk = pid * BLOCKS_PER_PROG + tl.arange(0, BLOCKS_PER_PROG)
     blk_mask = blk < n_blocks
 
-    row = blk // blocks_per_row
-    brow = blk % blocks_per_row
-    col = tl.arange(0, BLOCK_SIZE)
-    col_g = brow[:, None] * BLOCK_SIZE + col[None, :]
-
-    in_range = col_g < last
-    load_mask = blk_mask[:, None] & in_range
-    in_offs = row[:, None] * stride_row + col_g * stride_col
+    row, col_g = _block_coords(blk, blocks_per_row, BLOCK_SIZE)
+    load_mask = blk_mask[:, None] & (col_g < last)
+    in_offs = row[:, None] * stride_in_row + col_g * stride_in_col
     x = tl.load(x_ptr + in_offs, mask=load_mask, other=0.0)
 
     shared_exp, max_exp, pair = _calculate_mx_exp(x, BLOCKS_PER_PROG, BLOCK_SIZE, PRIME_GROUP)
@@ -174,18 +173,18 @@ def _convert_to_mx6_kernel(
 
     # E8M0 bias: store the true exponent + 127.
     e_store = (max_exp + 127).to(tl.uint8)
-    tl.store(packed_ptr + blk * N_PACKED_BYTES, e_store, mask=blk_mask)
+    tl.store(packed_ptr + blk * stride_out_blk, e_store, mask=blk_mask)
 
     pcol = tl.arange(0, N_PRIME_BYTES)
-    offs_p = blk[:, None] * N_PACKED_BYTES + (PRIME_OFFSET + pcol[None, :])
+    offs_p = blk[:, None] * stride_out_blk + (PRIME_OFFSET + pcol[None, :]) * stride_out_byte
     tl.store(packed_ptr + offs_p, prime, mask=blk_mask[:, None])
 
     signcol = tl.arange(0, N_SIGN_BYTES)
-    sign_offs = blk[:, None] * N_PACKED_BYTES + (SIGN_OFFSET + signcol[None, :])
+    sign_offs = blk[:, None] * stride_out_blk + (SIGN_OFFSET + signcol[None, :]) * stride_out_byte
     tl.store(packed_ptr + sign_offs, sign_bytes, mask=blk_mask[:, None])
 
     mantcol = tl.arange(0, N_MANTISSA_BYTES)
-    mant_offs = blk[:, None] * N_PACKED_BYTES + (MANTISSA_OFFSET + mantcol[None, :])
+    mant_offs = blk[:, None] * stride_out_blk + (MANTISSA_OFFSET + mantcol[None, :]) * stride_out_byte
     tl.store(packed_ptr + mant_offs, mantissa_bytes, mask=blk_mask[:, None])
 
 
@@ -194,14 +193,17 @@ def _convert_from_mx6_kernel(
     packed_ptr,
     y_ptr,
     n_blocks,
-    stride_blk,
-    stride_col,
+    last,
+    blocks_per_row,
+    stride_in_blk,
+    stride_in_byte,
+    stride_out_row,
+    stride_out_col,
     BLOCK_SIZE: tl.constexpr,
     BLOCKS_PER_PROG: tl.constexpr,
     PRIME_GROUP: tl.constexpr,
     QUANT_BIT: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
-    N_PACKED_BYTES: tl.constexpr,
 ):
 
     tl.static_assert(BLOCK_SIZE % PRIME_GROUP == 0, "BLOCK_SIZE must be divisible by PRIME_GROUP")
@@ -214,29 +216,26 @@ def _convert_from_mx6_kernel(
     PRIME_OFFSET: tl.constexpr = 1
     SIGN_OFFSET: tl.constexpr = PRIME_OFFSET + N_PRIME_BYTES
     MANTISSA_OFFSET: tl.constexpr = SIGN_OFFSET + N_SIGN_BYTES
-    tl.static_assert(N_PACKED_BYTES == MANTISSA_OFFSET + N_MANTISSA_BYTES,
-                     "N_PACKED_BYTES does not match the MX6 segment layout")
 
     pid = tl.program_id(0)
     blk = pid * BLOCKS_PER_PROG + tl.arange(0, BLOCKS_PER_PROG)
-    col = tl.arange(0, BLOCK_SIZE)
     blk_mask = blk < n_blocks
     mask = blk_mask[:, None]
 
     # Undo the E8M0 bias to recover the true exponent.
-    max_exp_u = tl.load(packed_ptr + blk * stride_blk, mask=blk_mask, other=0)
+    max_exp_u = tl.load(packed_ptr + blk * stride_in_blk, mask=blk_mask, other=0)
     max_exp = max_exp_u.to(tl.int32) - 127
 
     pcol = tl.arange(0, N_PRIME_BYTES)
-    offs_p = blk[:, None] * stride_blk + (PRIME_OFFSET + pcol[None, :]) * stride_col
+    offs_p = blk[:, None] * stride_in_blk + (PRIME_OFFSET + pcol[None, :]) * stride_in_byte
     prime = tl.load(packed_ptr + offs_p, mask=mask, other=0)
 
     signcol = tl.arange(0, N_SIGN_BYTES)
-    sign_offs = blk[:, None] * stride_blk + (SIGN_OFFSET + signcol[None, :]) * stride_col
+    sign_offs = blk[:, None] * stride_in_blk + (SIGN_OFFSET + signcol[None, :]) * stride_in_byte
     sign_bytes = tl.load(packed_ptr + sign_offs, mask=mask, other=0)
 
     mantcol = tl.arange(0, N_MANTISSA_BYTES)
-    mant_offs = blk[:, None] * stride_blk + (MANTISSA_OFFSET + mantcol[None, :]) * stride_col
+    mant_offs = blk[:, None] * stride_in_blk + (MANTISSA_OFFSET + mantcol[None, :]) * stride_in_byte
     mantissa_bytes = tl.load(packed_ptr + mant_offs, mask=mask, other=0)
 
     y = _unpack_mx6(
@@ -250,70 +249,25 @@ def _convert_from_mx6_kernel(
         PRIME_GROUP,
         QUANT_BIT,
     )
-    out_offs = blk[:, None] * BLOCK_SIZE + col[None, :]
-    tl.store(y_ptr + out_offs, y, mask=mask)
+
+    row, col_g = _block_coords(blk, blocks_per_row, BLOCK_SIZE)
+    out_offs = row[:, None] * stride_out_row + col_g * stride_out_col
+    tl.store(y_ptr + out_offs, y, mask=mask & (col_g < last))
 
 
-# Host wrappers
+# MX6 entry points
 
 
-def _mx6_packed_bytes(block_size: int) -> int:
-    """Return bytes per MX6 packed block."""
-    n_prime_bytes = (block_size // PRIME_GROUP) // 8
-    n_sign_bytes = block_size // 8
-    n_mantissa_bytes = block_size // 2
-    return 1 + n_prime_bytes + n_sign_bytes + n_mantissa_bytes
-
-
-def convert_to_mx6(
-    data_hp: torch.Tensor,
-    block_size: int = BLOCK_SIZE,
-    axis: int = -1,
-    blocks_per_program: int = BLOCKS_PER_PROG_DEFAULT,
-) -> torch.Tensor:
-    """High-precision tensor -> packed MX6 ``[n_blocks, n_packed_bytes]`` uint8.
-
-    Blocks are formed along ``axis``, which is transposed to the last dim
-    internally. The original shape / axis are not stored, so the caller must pass
-    them back to convert_from_mx6.
-    """
-    return _convert_to_mx_host(
-        data_hp,
-        kernel=_convert_to_mx6_kernel,
-        n_packed_bytes=_mx6_packed_bytes(block_size),
-        fmt="mx6_quantization",
-        block_size=block_size,
-        prime_group=PRIME_GROUP,
-        quant_bit=QUANT_BIT,
-        axis=axis,
-        blocks_per_program=blocks_per_program,
-    )
+def convert_to_mx6(data_hp: torch.Tensor, axis: int = -1) -> torch.Tensor:
+    """High-precision tensor -> packed MX6 ``[n_blocks, 12]`` uint8 tensor."""
+    return convert_to_mx(data_hp, "mx6", axis=axis)
 
 
 def convert_from_mx6(
     packed: torch.Tensor,
     out_dtype: torch.dtype,
     out_shape,
-    block_size: int = BLOCK_SIZE,
     axis: int = -1,
-    blocks_per_program: int = BLOCKS_PER_PROG_DEFAULT,
 ) -> torch.Tensor:
-    """Packed MX6 tensor -> reconstructed high-precision tensor.
-
-    ``out_shape`` and ``axis`` must exactly match the original convert_to_mx6
-    call. They are not stored in ``packed``; a mismatch may silently reorder
-    values when it happens to produce the same block count.
-    """
-    return _convert_from_mx_host(
-        packed,
-        kernel=_convert_from_mx6_kernel,
-        n_packed_bytes=_mx6_packed_bytes(block_size),
-        fmt="mx6_quantization",
-        out_dtype=out_dtype,
-        out_shape=out_shape,
-        block_size=block_size,
-        prime_group=PRIME_GROUP,
-        quant_bit=QUANT_BIT,
-        axis=axis,
-        blocks_per_program=blocks_per_program,
-    )
+    """Packed MX6 ``[n_blocks, 12]`` uint8 tensor -> reconstructed high-precision tensor."""
+    return convert_from_mx(packed, "mx6", out_dtype, out_shape, axis=axis)

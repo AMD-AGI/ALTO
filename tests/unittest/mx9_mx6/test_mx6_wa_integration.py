@@ -9,8 +9,8 @@ first full ALTO wiring layer:
 recipe yaml -> QuantizationModifier -> Linear quantization_scheme ->
 post_step dynamic-weight skip -> wrapped Linear forward -> MX6 W+A QDQ.
 
-MX6 W+A QDQ dispatches to the REAL packed Triton kernel (``convert_to_mx6`` /
-``convert_from_mx6``), not the ``mx6_fake_quantize`` emulation -- see
+MX6 W+A QDQ dispatches to the REAL packed Triton kernel (``convert_to_mx`` /
+``convert_from_mx``), not the ``mx6_fake_quantize`` emulation -- see
 ``alto/models/patcher.py`` (mirrors mx9's method, commit ``95b1114``). This
 test therefore requires CUDA and counts calls on both functions to prove the
 real kernel path fires and the emulation does not.
@@ -156,7 +156,7 @@ def test_mx6_wa_recipe_toy_linear_lifecycle(monkeypatch):
     # the mx6_fake_quantize emulation. Count calls on BOTH to prove which path
     # actually fires: emulation must stay untouched, the real kernel must be
     # hit exactly twice (weight + input activation).
-    import alto.kernels.mx.mx6_quantization as mx6_kernel_mod
+    import alto.kernels.mx as mx_kernels
 
     fake_calls = []
     original_mx6_fake = quantize_mod.mx6_fake_quantize
@@ -168,13 +168,13 @@ def test_mx6_wa_recipe_toy_linear_lifecycle(monkeypatch):
     monkeypatch.setattr(quantize_mod, "mx6_fake_quantize", counted_mx6_fake)
 
     packed_calls = []
-    original_convert_to_mx6 = mx6_kernel_mod.convert_to_mx6
+    original_convert_to_mx = mx_kernels.convert_to_mx
 
-    def counted_convert_to_mx6(input_tensor, *args, **kwargs):
+    def counted_convert_to_mx(input_tensor, *args, **kwargs):
         packed_calls.append(tuple(input_tensor.shape))
-        return original_convert_to_mx6(input_tensor, *args, **kwargs)
+        return original_convert_to_mx(input_tensor, *args, **kwargs)
 
-    monkeypatch.setattr(mx6_kernel_mod, "convert_to_mx6", counted_convert_to_mx6)
+    monkeypatch.setattr(mx_kernels, "convert_to_mx", counted_convert_to_mx)
 
     x = torch.randn(2, 16).cuda()
     modifier.pre_step([model])

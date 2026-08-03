@@ -7,11 +7,11 @@ Acceptance criterion: unpack(pack(x)) == mx9_clamp127_ref(x) bit-exact.
 clamp127_ref is the clamp-127 variant of mx9_fake_quantize (demoted +/-128
 truncated to +/-127), serving as the true reference for the pack path.
 
-``convert_to_mx9``/``convert_from_mx9`` exchange a SINGLE packed uint8 tensor
-(byte layout ``[max_exp(1B) | prime(1B) | q(16B)]`` per block; ``q`` is int8
-values bit-reinterpreted as uint8), not a three-tensor tuple -- mirroring
-``mx6_quantization.py``. Most tests below go through the ``_roundtrip`` helper
-and never see the packed layout directly; only the tests that inspect
+``convert_to_mx9``/``convert_from_mx9`` exchange one packed uint8 tensor, byte
+layout ``[max_exp(1B) | prime(1B) | q(16B)]`` per block, where ``q`` is int8
+values bit-reinterpreted as uint8. Most tests below go through the
+``_roundtrip`` helper and never see the packed layout directly; only the tests
+that inspect
 individual components (storage-format / intermediates / prime-bitmap /
 blocks-per-program / invalid-dtype tests) slice into ``packed`` explicitly.
 
@@ -31,11 +31,9 @@ import triton.language as tl
 
 from alto.modifiers.quantization import mx as _mxref
 from alto.modifiers.quantization.mx import mx9_fake_quantize, BLOCK_SIZE
-from alto.kernels.mx.mx9_quantization import (
-    PRIME_GROUP,
-    convert_to_mx9,
-    convert_from_mx9,
-)
+import alto.kernels.mx.mx9_quantization as _mx9_mod
+from alto.kernels.mx import convert_to_mx, convert_from_mx
+from alto.kernels.mx.mx9_quantization import PRIME_GROUP, convert_to_mx9, convert_from_mx9
 from alto.kernels.mx._mx_common import (
     _floor_exp,
     _round_half_even,
@@ -46,6 +44,18 @@ from alto.kernels.fp4.testing_utils import calc_snr
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA/HIP device"
 )
+
+
+def _assert_biased_max_exp_range(x, max_exp):
+    """Biased E8M0 must stay <= 254, and >= 1 only for blocks whose amax is
+    normal: amax == 0 (and subnormal amax generally) extracts exponent -127,
+    which biases to 0. ``x`` must contain at least one block of each kind."""
+    amax = x.reshape(-1, BLOCK_SIZE).abs().amax(dim=1)
+    normal = amax >= torch.finfo(x.dtype).tiny
+    assert normal.any() and not normal.all(), "needs both normal and zero-amax blocks"
+    assert max_exp[normal].min().item() >= 1
+    assert max_exp[~normal].max().item() == 0
+    assert max_exp.max().item() <= 254
 
 # Packed byte layout (single tensor): [max_exp(1B) | prime(N_PRIME_BYTES) | q(BLOCK_SIZE)].
 _N_PRIME_BYTES = (BLOCK_SIZE // 2) // 8          # 1
@@ -333,10 +343,9 @@ def _rand_with_outliers(shape, dtype, seed=0, p=0.005, spike=100.0):
     return x
 
 
-def _roundtrip(x, block_size=BLOCK_SIZE, axis=-1):
-    packed = convert_to_mx9(x, block_size=block_size, axis=axis)
-    return convert_from_mx9(packed, x.dtype, x.shape,
-                            block_size=block_size, axis=axis)
+def _roundtrip(x, axis=-1):
+    packed = convert_to_mx9(x, axis=axis)
+    return convert_from_mx9(packed, x.dtype, x.shape, axis=axis)
 
 
 # --------------------------------------------------------------------------- #
@@ -345,25 +354,22 @@ def _roundtrip(x, block_size=BLOCK_SIZE, axis=-1):
 
 def test_output_dtypes_and_shapes():
     x = _rand((4, 64), torch.float32).cuda()
-    packed = convert_to_mx9(x, block_size=16)
+    packed = convert_to_mx9(x)
     n_blocks = (4 * 64) // 16
     assert packed.dtype == torch.uint8
     assert packed.shape == (n_blocks, _N_PACKED_BYTES)   # 1 + 1 + 16 = 18
 
 
 def test_max_exp_biased_range():
-    # E8M0 stores true exponent + 127; finite fp32 true exponent in [-126, 127],
-    # biased to [1, 254]; should never be 0 or 255.
     x = _rand((16, 64), torch.float32).cuda()
-    packed = convert_to_mx9(x, block_size=16)
-    max_exp = packed[:, 0]
-    assert max_exp.min().item() >= 1
-    assert max_exp.max().item() <= 254
+    x[0, :] = 0.0
+    packed = convert_to_mx9(x)
+    _assert_biased_max_exp_range(x, packed[:, 0])
 
 
 def test_q_within_int8_range():
     x = _rand((8, 128), torch.float32).cuda()
-    packed = convert_to_mx9(x, block_size=16)
+    packed = convert_to_mx9(x)
     q = packed[:, _Q_OFFSET:].view(torch.int8)   # bit-reinterpret uint8 -> int8
     assert q.min().item() >= -127
     assert q.max().item() <= 127
@@ -373,13 +379,12 @@ def test_q_within_int8_range():
 # Layer 1b: Per-component intermediate value verification
 #   (absorbed from _mx9_intermediate_check.py scaffold)
 #   Round-trip only verifies "combined result is correct" which can mask
-#   individual component errors; here we compare convert_to_mx9's q / max_exp /
+#   individual component errors; here we compare the packed q / max_exp /
 #   prime individually against torch-recomputed intermediates.
 # --------------------------------------------------------------------------- #
 
 def _torch_intermediates(x, block_size=BLOCK_SIZE, quant_bit=8):
-    """Pure PyTorch recomputation of the three-part tuple (q_int8, max_exp_u8,
-    prime_u8, pair)."""
+    """Pure PyTorch recomputation of (q_int8, max_exp_u8, prime_u8, pair)."""
     last = x.shape[-1]
     x2d = x.contiguous().reshape(-1, last)
     pad = (block_size - last % block_size) % block_size
@@ -420,7 +425,7 @@ def _torch_intermediates(x, block_size=BLOCK_SIZE, quant_bit=8):
 def test_intermediates_match_torch_reference(shape, dtype):
     """Each component (q, max_exp, prime) matches torch recomputation bit-exact."""
     x = _rand(shape, dtype).cuda()
-    packed = convert_to_mx9(x, block_size=BLOCK_SIZE)
+    packed = convert_to_mx9(x)
     rq, re, rp, _ = _torch_intermediates(x, block_size=BLOCK_SIZE)
     q = packed[:, _Q_OFFSET:].view(torch.int8)
     assert torch.equal(q, rq), f"q mismatch: {(q != rq).sum().item()} elements"
@@ -451,11 +456,10 @@ def test_intermediates_constructed_demote():
 
 @pytest.mark.parametrize("shape", [(4, 64), (8, 16), (2, 3, 32), (3, 40), (1, 4096), (128, 4095)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("block_size", [16])
-def test_roundtrip_matches_clamp127_ref(shape, dtype, block_size):
+def test_roundtrip_matches_clamp127_ref(shape, dtype):
     x = _rand(shape, dtype).cuda()
-    ref = _mx9_clamp127_ref(x, block_size=block_size)
-    out = _roundtrip(x, block_size=block_size)
+    ref = _mx9_clamp127_ref(x, block_size=BLOCK_SIZE)
+    out = _roundtrip(x)
     assert out.shape == x.shape
     assert out.dtype == dtype
     assert torch.equal(out, ref), \
@@ -465,7 +469,7 @@ def test_roundtrip_matches_clamp127_ref(shape, dtype, block_size):
 @pytest.mark.parametrize("axis", [0, 1, -1])
 def test_roundtrip_axis(axis):
     x = _rand((32, 64), torch.float32).cuda()
-    out = _roundtrip(x, block_size=16, axis=axis)
+    out = _roundtrip(x, axis=axis)
     assert out.shape == x.shape
     assert out.dtype == x.dtype
     ref = _mx9_clamp127_ref(x.transpose(axis, -1).contiguous(),
@@ -475,14 +479,14 @@ def test_roundtrip_axis(axis):
 
 
 @pytest.mark.parametrize("blocks_per_program", [1, 16, 64, 256])
-def test_blocks_per_program_does_not_change_numerics(blocks_per_program):
+def test_blocks_per_program_does_not_change_numerics(monkeypatch, blocks_per_program):
+    """blocks_per_program is a kernel tuning constant, not a public parameter, so
+    it is varied here by patching the module constant the dispatch reads."""
     x = _rand((32, 512), torch.float32).cuda()
-    ref = _roundtrip(x, block_size=BLOCK_SIZE)
-    packed = convert_to_mx9(x, block_size=BLOCK_SIZE,
-                            blocks_per_program=blocks_per_program)
-    out = convert_from_mx9(packed, x.dtype, x.shape,
-                           block_size=BLOCK_SIZE,
-                           blocks_per_program=blocks_per_program)
+    ref = _roundtrip(x)
+    monkeypatch.setattr(_mx9_mod, "BLOCKS_PER_PROG_DEFAULT", blocks_per_program)
+    packed = convert_to_mx9(x)
+    out = convert_from_mx9(packed, x.dtype, x.shape)
     assert torch.equal(out, ref)
 
 
@@ -560,7 +564,7 @@ def test_non_contiguous_packed_input():
 
 def test_padding_non_divisible_last_dim():
     x = _rand((3, 40), torch.float32).cuda()   # 40 not divisible by 16
-    out = _roundtrip(x, block_size=16)
+    out = _roundtrip(x)
     ref = _mx9_clamp127_ref(x, block_size=16)
     assert out.shape == x.shape
     assert torch.equal(out, ref)
@@ -598,7 +602,7 @@ def test_prime_bitmap_round_trips():
     x = torch.zeros((1, BLOCK_SIZE), dtype=torch.float32).cuda()
     x[0, :8]  = 1.0    # t_exp=0, max_exp=3, diff 3 -> demotable
     x[0, 8:]  = 8.0    # t_exp=3, max_exp=3, diff 0 -> not demotable, amax
-    packed = convert_to_mx9(x, block_size=BLOCK_SIZE)
+    packed = convert_to_mx9(x)
     # pairs 0-3 (idx 0-7) all demote -> bits 0-3 = 1; pairs 4-7 not demote -> bits 4-7 = 0
     assert packed[0, _PRIME_OFFSET].item() == 0x0F, f"got {hex(packed[0, _PRIME_OFFSET].item())}"
     out = convert_from_mx9(packed, x.dtype, x.shape)
@@ -736,27 +740,10 @@ def test_rejects_float16():
         convert_to_mx9(x)
 
 
-def test_rejects_block_size_not_16():
-    x = _rand((4, 64), torch.float32).cuda()
-    with pytest.raises(AssertionError):
-        convert_to_mx9(x, block_size=24)   # not 16
-    with pytest.raises(AssertionError):
-        convert_to_mx9(x, block_size=32)   # even though multiple of 16, only 16 is supported
-
-
-@pytest.mark.parametrize("blocks_per_program", [0, 3, -1])
-def test_rejects_invalid_blocks_per_program(blocks_per_program):
+def test_rejects_unknown_target_dtype():
     x = _rand((4, 16), torch.float32).cuda()
-    packed = convert_to_mx9(x)
-    with pytest.raises(AssertionError, match="positive power of two"):
-        convert_to_mx9(x, blocks_per_program=blocks_per_program)
-    with pytest.raises(AssertionError, match="positive power of two"):
-        convert_from_mx9(
-            packed,
-            x.dtype,
-            x.shape,
-            blocks_per_program=blocks_per_program,
-        )
+    with pytest.raises(ValueError, match="target_dtype"):
+        convert_to_mx(x, "mx8")
 
 
 def test_rejects_empty_quantization_axis():
@@ -788,3 +775,12 @@ def test_rejects_out_shape_inconsistent_with_packed():
     packed = convert_to_mx9(x)
     with pytest.raises(AssertionError, match="inconsistent with packed tensor"):
         convert_from_mx9(packed, torch.float32, (3, 64))
+
+
+def test_rejects_mx6_packed_tensor():
+    """target_dtype must match the one that produced the packed bytes; the row
+    width is the one mismatch that can be caught."""
+    x = _rand((4, 64), torch.float32).cuda()
+    packed = convert_to_mx9(x)
+    with pytest.raises(AssertionError, match=r"mx6 packed tensor must be"):
+        convert_from_mx(packed, "mx6", x.dtype, x.shape)

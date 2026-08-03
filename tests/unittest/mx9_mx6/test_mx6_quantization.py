@@ -24,9 +24,10 @@ Coverage by stage
   - Stage 4: ``_convert_to_mx6_kernel`` / ``_convert_from_mx6_kernel`` (storage
     format, single packed tensor layout, E8M0 bias, blocks-per-program invariance,
     end-to-end round-trip)
-  - Stage 5: ``convert_to_mx6`` / ``convert_from_mx6`` host wrappers (axis
-    transpose, padding-aware shape restore, non-contiguous input, invalid-input
-    rejection), mirroring the MX9 host test suite.
+  - Stage 5: ``convert_to_mx6`` / ``convert_from_mx6`` and the shared
+    ``convert_to_mx`` / ``convert_from_mx`` behind them (axis transpose,
+    padding-aware shape restore, non-contiguous input, invalid-input rejection),
+    mirroring the MX9 host test suite.
 """
 
 import pytest
@@ -41,6 +42,8 @@ from alto.kernels.mx._mx_common import (
     _unpack_bits8,
     _calculate_mx_exp as _calculate_mx6_exp,
 )
+import alto.kernels.mx.mx6_quantization as _mx6_mod
+from alto.kernels.mx import convert_to_mx, convert_from_mx
 from alto.kernels.mx.mx6_quantization import (
     BLOCK_SIZE,
     PRIME_GROUP,
@@ -59,6 +62,18 @@ from alto.modifiers.quantization.mx import mx6_fake_quantize
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA/HIP device"
 )
+
+
+def _assert_biased_max_exp_range(x, max_exp):
+    """Biased E8M0 must stay <= 254, and >= 1 only for blocks whose amax is
+    normal: amax == 0 (and subnormal amax generally) extracts exponent -127,
+    which biases to 0. ``x`` must contain at least one block of each kind."""
+    amax = x.reshape(-1, BLOCK_SIZE).abs().amax(dim=1)
+    normal = amax >= torch.finfo(x.dtype).tiny
+    assert normal.any() and not normal.all(), "needs both normal and zero-amax blocks"
+    assert max_exp[normal].min().item() >= 1
+    assert max_exp[~normal].max().item() == 0
+    assert max_exp.max().item() <= 254
 
 
 # --------------------------------------------------------------------------- #
@@ -526,12 +541,12 @@ def _launch_to(x2d, bpp=BLOCKS_PER_PROG_DEFAULT):
     n_blocks = rows * blocks_per_row
     packed = torch.empty((n_blocks, _N_PACKED_BYTES), dtype=torch.uint8, device="cuda")
     sr, sc = x2d.stride()
+    spb, spc = packed.stride()
     grid = (triton.cdiv(n_blocks, bpp),)
     _convert_to_mx6_kernel[grid](
-        x2d, packed, n_blocks, cols, blocks_per_row, sr, sc,
+        x2d, packed, n_blocks, cols, blocks_per_row, sr, sc, spb, spc,
         BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
         PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
-        N_PACKED_BYTES=_N_PACKED_BYTES,
     )
     return packed, n_blocks
 
@@ -541,32 +556,34 @@ def _launch_to_ragged(x2d, bpp=BLOCKS_PER_PROG_DEFAULT):
     ``BLOCK_SIZE``. Drives the in-kernel ragged-tail path: ``blocks_per_row`` is
     ``cdiv`` and ``last`` = the unpadded column count, so columns >= last are
     masked to 0 by ``_convert_to_mx6_kernel`` (equivalent to the host-side
-    zero-padding the Stage 5 wrapper will do explicitly)."""
+    zero-padding ``convert_to_mx6`` does explicitly)."""
     rows, cols = x2d.shape
     blocks_per_row = triton.cdiv(cols, BLOCK_SIZE)
     n_blocks = rows * blocks_per_row
     packed = torch.empty((n_blocks, _N_PACKED_BYTES), dtype=torch.uint8, device="cuda")
     sr, sc = x2d.stride()
+    spb, spc = packed.stride()
     grid = (triton.cdiv(n_blocks, bpp),)
     _convert_to_mx6_kernel[grid](
-        x2d, packed, n_blocks, cols, blocks_per_row, sr, sc,
+        x2d, packed, n_blocks, cols, blocks_per_row, sr, sc, spb, spc,
         BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
         PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
-        N_PACKED_BYTES=_N_PACKED_BYTES,
     )
     return packed, n_blocks
 
 
 def _launch_from(packed, n_blocks, out_dtype, bpp=BLOCKS_PER_PROG_DEFAULT):
+    """Dequant into ``[n_blocks, BLOCK_SIZE]``, i.e. one block per destination
+    row, which is the degenerate case of the kernel's row/column addressing."""
     y = torch.empty((n_blocks, BLOCK_SIZE), dtype=out_dtype, device="cuda")
     spb, spc = packed.stride()
+    syr, syc = y.stride()
     grid = (triton.cdiv(n_blocks, bpp),)
     _convert_from_mx6_kernel[grid](
-        packed, y, n_blocks, spb, spc,
+        packed, y, n_blocks, BLOCK_SIZE, 1, spb, spc, syr, syc,
         BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
         PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
         OUT_DTYPE=_TL_DTYPE[out_dtype],
-        N_PACKED_BYTES=_N_PACKED_BYTES,
     )
     return y
 
@@ -580,9 +597,9 @@ def test_kernel_output_dtypes_and_shapes():
 
 def test_kernel_max_exp_biased_range():
     x = _rand((16, 64), torch.float32).cuda()
+    x[0, :] = 0.0
     packed, _ = _launch_to(x)
-    assert packed[:, 0].min().item() >= 1
-    assert packed[:, 0].max().item() <= 254
+    _assert_biased_max_exp_range(x, packed[:, 0])
 
 
 def test_kernel_packed_bytes_match_pack_ref():
@@ -687,6 +704,94 @@ def test_kernel_strided_input_matches_contiguous(layout, dtype):
     assert torch.equal(y_s, y_c), "dequant differs"
 
 
+# --------------------------------------------------------------------------- #
+# Stage 4: strided / non-contiguous output
+#   Symmetric to the input tests above: the kernels address the destination by
+#   stride, so a caller may hand them a view. These launch with an explicit
+#   output buffer and assert both that the values match the contiguous launch
+#   and that nothing is written outside the view.
+# --------------------------------------------------------------------------- #
+def _launch_to_into(x2d, out, bpp=BLOCKS_PER_PROG_DEFAULT):
+    rows, cols = x2d.shape
+    assert cols % BLOCK_SIZE == 0
+    blocks_per_row = cols // BLOCK_SIZE
+    n_blocks = rows * blocks_per_row
+    sr, sc = x2d.stride()
+    sob, soc = out.stride()
+    grid = (triton.cdiv(n_blocks, bpp),)
+    _convert_to_mx6_kernel[grid](
+        x2d, out, n_blocks, cols, blocks_per_row, sr, sc, sob, soc,
+        BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
+        PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
+    )
+    return n_blocks
+
+
+def _launch_from_into(packed, out, n_blocks, last=BLOCK_SIZE, blocks_per_row=1, bpp=BLOCKS_PER_PROG_DEFAULT):
+    spb, spc = packed.stride()
+    sor, soc = out.stride()
+    grid = (triton.cdiv(n_blocks, bpp),)
+    _convert_from_mx6_kernel[grid](
+        packed, out, n_blocks, last, blocks_per_row, spb, spc, sor, soc,
+        BLOCK_SIZE=BLOCK_SIZE, BLOCKS_PER_PROG=bpp,
+        PRIME_GROUP=PRIME_GROUP, QUANT_BIT=QUANT_BIT,
+        OUT_DTYPE=_TL_DTYPE[out.dtype],
+    )
+
+
+def test_kernel_strided_packed_output_matches_contiguous():
+    """Packed output as a column window of a wider buffer: the row stride is not
+    N_PACKED_BYTES, so the segment offsets must be scaled by the byte stride."""
+    x = _rand((6, 64), torch.float32).cuda()
+    ref, n_blocks = _launch_to(x)
+
+    pad = 3
+    storage = torch.zeros((n_blocks, _N_PACKED_BYTES + 2 * pad), dtype=torch.uint8, device="cuda")
+    view = storage[:, pad:pad + _N_PACKED_BYTES]
+    assert not view.is_contiguous()
+    assert _launch_to_into(x, view) == n_blocks
+
+    assert torch.equal(view, ref), "packed bytes differ between strided and contiguous output"
+    assert not storage[:, :pad].any(), "wrote before the output view"
+    assert not storage[:, pad + _N_PACKED_BYTES:].any(), "wrote past the output view"
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_kernel_strided_dequant_output_matches_contiguous(dtype):
+    """Dequant output into a column-major (transposed) buffer, i.e. non-unit
+    element stride and a block stride of 1."""
+    x = _rand((6, 64), dtype).cuda()
+    packed, n_blocks = _launch_to(x)
+    ref = _launch_from(packed, n_blocks, dtype)
+
+    out_t = torch.empty((BLOCK_SIZE, n_blocks), dtype=dtype, device="cuda").t()
+    assert out_t.shape == (n_blocks, BLOCK_SIZE) and not out_t.is_contiguous()
+    _launch_from_into(packed, out_t, n_blocks)
+
+    assert torch.equal(out_t, ref), "dequant differs between strided and contiguous output"
+
+
+def test_kernel_dequant_ragged_tail_stays_inside_the_row():
+    """The destination is the unpadded ``[rows, last]`` tensor, so the tail
+    block's out-of-range columns must be masked in-kernel; otherwise they spill
+    into whatever follows the row."""
+    rows, last, pad = 3, 40, 3               # 40 = two full blocks + an 8-element tail
+    blocks_per_row = triton.cdiv(last, BLOCK_SIZE)
+    x = _rand((rows, last), torch.float32).cuda()
+    packed, n_blocks = _launch_to_ragged(x)
+    assert n_blocks == rows * blocks_per_row
+
+    # NaN sentinel rather than zeros: a spilled write of a legitimately zero
+    # dequantized value would be invisible against a zero-filled buffer.
+    storage = torch.full((rows, last + pad), float("nan"), dtype=torch.float32, device="cuda")
+    view = storage[:, :last]
+    _launch_from_into(packed, view, n_blocks, last=last, blocks_per_row=blocks_per_row)
+
+    assert torch.isnan(storage[:, last:]).all(), "tail block wrote past the row"
+    assert not torch.isnan(view).any(), "some in-range column was left unwritten"
+    assert torch.equal(view, convert_from_mx6(packed, torch.float32, (rows, last)))
+
+
 @pytest.mark.parametrize("bpp", [1, 16, 64, 256])
 def test_kernel_blocks_per_program_invariant(bpp):
     x = _rand((32, 256), torch.float32).cuda()
@@ -752,34 +857,32 @@ def _mx6_clamp15_ref_via_mxpy(x, block_size=BLOCK_SIZE, quant_bit=QUANT_BIT):
 
 
 # --------------------------------------------------------------------------- #
-# Stage 5: host wrappers (convert_to_mx6 / convert_from_mx6)
+# Stage 5: MX6 entry points (convert_to_mx6 / convert_from_mx6)
 #   The Stage 4 tests above launch the grid kernels directly on an already-2D,
-#   block-aligned tensor. These tests instead go through the public host
-#   wrappers, exercising what Stage 4 deliberately skips: axis transpose,
+#   block-aligned tensor. These tests instead go through the public entry
+#   points, exercising what Stage 4 deliberately skips: axis transpose,
 #   arbitrary tensor rank, padding-aware shape restore, and non-contiguous
 #   input arising naturally from the transpose (rather than constructed via
 #   slicing/``.t()`` as in the Stage 4 strided-input tests).
 # --------------------------------------------------------------------------- #
-def _host_roundtrip(x, block_size=BLOCK_SIZE, axis=-1):
-    packed = convert_to_mx6(x, block_size=block_size, axis=axis)
-    return convert_from_mx6(packed, x.dtype, x.shape, block_size=block_size, axis=axis)
+def _host_roundtrip(x, axis=-1):
+    packed = convert_to_mx6(x, axis=axis)
+    return convert_from_mx6(packed, x.dtype, x.shape, axis=axis)
 
 
 def test_host_output_dtype_and_shape():
     x = _rand((4, 64), torch.float32).cuda()
-    packed = convert_to_mx6(x, block_size=BLOCK_SIZE)
+    packed = convert_to_mx6(x)
     n_blocks = (4 * 64) // BLOCK_SIZE
     assert packed.dtype == torch.uint8
     assert packed.shape == (n_blocks, _N_PACKED_BYTES)
 
 
 def test_host_max_exp_biased_range():
-    # E8M0 stores true exponent + 127; finite fp32 true exponent in [-126, 127],
-    # biased to [1, 254]; should never be 0 or 255.
     x = _rand((16, 64), torch.float32).cuda()
-    packed = convert_to_mx6(x, block_size=BLOCK_SIZE)
-    assert packed[:, 0].min().item() >= 1
-    assert packed[:, 0].max().item() <= 254
+    x[0, :] = 0.0
+    packed = convert_to_mx6(x)
+    _assert_biased_max_exp_range(x, packed[:, 0])
 
 
 @pytest.mark.parametrize("shape", [(4, 64), (8, 16), (2, 3, 32), (3, 40), (1, 4096)])
@@ -797,7 +900,7 @@ def test_host_roundtrip_matches_clamp15_ref(shape, dtype):
 @pytest.mark.parametrize("axis", [0, 1, -1])
 def test_host_roundtrip_axis(axis):
     x = _rand((32, 64), torch.float32).cuda()
-    out = _host_roundtrip(x, block_size=BLOCK_SIZE, axis=axis)
+    out = _host_roundtrip(x, axis=axis)
     assert out.shape == x.shape
     assert out.dtype == x.dtype
     ref = _mx6_clamp15_ref_via_mxpy(
@@ -808,12 +911,14 @@ def test_host_roundtrip_axis(axis):
 
 
 @pytest.mark.parametrize("blocks_per_program", [1, 16, 64, 256])
-def test_host_blocks_per_program_does_not_change_numerics(blocks_per_program):
+def test_host_blocks_per_program_does_not_change_numerics(monkeypatch, blocks_per_program):
+    """blocks_per_program is a kernel tuning constant, not a public parameter, so
+    it is varied here by patching the module constant the dispatch reads."""
     x = _rand((32, 512), torch.float32).cuda()
     ref = _host_roundtrip(x)
-    packed = convert_to_mx6(x, block_size=BLOCK_SIZE, blocks_per_program=blocks_per_program)
-    out = convert_from_mx6(packed, x.dtype, x.shape, block_size=BLOCK_SIZE,
-                           blocks_per_program=blocks_per_program)
+    monkeypatch.setattr(_mx6_mod, "BLOCKS_PER_PROG_DEFAULT", blocks_per_program)
+    packed = convert_to_mx6(x)
+    out = convert_from_mx6(packed, x.dtype, x.shape)
     assert torch.equal(out, ref)
 
 
@@ -864,7 +969,7 @@ def test_host_non_contiguous_packed_input():
 
 def test_host_padding_non_divisible_last_dim():
     x = _rand((3, 40), torch.float32).cuda()   # 40 not divisible by 16
-    out = _host_roundtrip(x, block_size=BLOCK_SIZE)
+    out = _host_roundtrip(x)
     ref = _mx6_clamp15_ref_via_mxpy(x, block_size=BLOCK_SIZE)
     assert out.shape == x.shape
     assert torch.equal(out, ref)
@@ -898,27 +1003,10 @@ def test_host_rejects_float16():
         convert_to_mx6(x)
 
 
-def test_host_rejects_block_size_not_16():
-    x = _rand((4, 64), torch.float32).cuda()
-    with pytest.raises(AssertionError):
-        convert_to_mx6(x, block_size=24)   # not 16
-    with pytest.raises(AssertionError):
-        convert_to_mx6(x, block_size=32)   # even though multiple of 16, only 16 is supported
-
-
-@pytest.mark.parametrize("blocks_per_program", [0, 3, -1])
-def test_host_rejects_invalid_blocks_per_program(blocks_per_program):
+def test_host_rejects_unknown_target_dtype():
     x = _rand((4, 16), torch.float32).cuda()
-    packed = convert_to_mx6(x)
-    with pytest.raises(AssertionError, match="positive power of two"):
-        convert_to_mx6(x, blocks_per_program=blocks_per_program)
-    with pytest.raises(AssertionError, match="positive power of two"):
-        convert_from_mx6(
-            packed,
-            x.dtype,
-            x.shape,
-            blocks_per_program=blocks_per_program,
-        )
+    with pytest.raises(ValueError, match="target_dtype"):
+        convert_to_mx(x, "mx8")
 
 
 def test_host_rejects_empty_quantization_axis():
@@ -950,6 +1038,15 @@ def test_host_rejects_out_shape_inconsistent_with_packed():
     packed = convert_to_mx6(x)
     with pytest.raises(AssertionError):
         convert_from_mx6(packed, torch.float32, (3, 64))   # wrong row count for n_blocks
+
+
+def test_host_rejects_mx9_packed_tensor():
+    """target_dtype must match the one that produced the packed bytes; the row
+    width is the one mismatch that can be caught."""
+    x = _rand((4, 64), torch.float32).cuda()
+    packed = convert_to_mx6(x)
+    with pytest.raises(AssertionError, match=r"mx9 packed tensor must be"):
+        convert_from_mx(packed, "mx9", x.dtype, x.shape)
 
 
 @pytest.mark.parametrize("shape", [(4, 64), (8, 96), (16, 256)])

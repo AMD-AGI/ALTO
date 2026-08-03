@@ -57,38 +57,26 @@ class ModelPatcher:
 
             @staticmethod
             def forward(ctx, x, scale, zero_point, args, g_idx, global_scale):
-                if getattr(args, "format", None) == "mx9":
+                target_dtype = getattr(args, "format", None)
+                if target_dtype in ("mx6", "mx9"):
                     # Dispatches to the REAL packed Triton kernel (quantize ->
                     # bit-packed bytes -> dequantize), not the torch fake-quant
                     # emulation -- this is the intentional, validated design
                     # (commit 95b1114: LLaMA-3.2-1B wikitext loss 2.1141 == the
                     # fake-quant path's 2.1140). Requires a CUDA tensor (Triton
-                    # kernel launch); mx6 below mirrors this same method.
-                    from alto.kernels.mx.mx9_quantization import (
-                        convert_to_mx9,
-                        convert_from_mx9,
-                    )
+                    # kernel launch). num_bits / group_size are fixed by the
+                    # format rather than honoured, so they are validated here
+                    # instead of forwarded -- a recipe that disagrees with the
+                    # format would otherwise be silently ignored.
+                    from alto.kernels.mx import MX_QUANT_BIT, convert_to_mx, convert_from_mx
 
-                    packed = convert_to_mx9(x)
-                    return convert_from_mx9(
-                        packed, x.dtype, x.shape,
-                    )
-                if getattr(args, "format", None) == "mx6":
-                    # Same method as "mx9" above: dispatches to the REAL packed
-                    # Triton kernel (quantize -> bit-packed bytes -> dequantize),
-                    # not the mx6_fake_quantize emulation. Requires a CUDA tensor
-                    # (Triton kernel launch). quant_bit is not a parameter here:
-                    # the packed kernel's 5-bit width is a fixed module constant
-                    # (QUANT_BIT), not configurable.
-                    from alto.kernels.mx.mx6_quantization import (
-                        BLOCK_SIZE,
-                        convert_to_mx6,
-                        convert_from_mx6,
-                    )
-
-                    packed = convert_to_mx6(x, block_size=(args.group_size or BLOCK_SIZE))
-                    return convert_from_mx6(packed, x.dtype, x.shape,
-                                            block_size=(args.group_size or BLOCK_SIZE))
+                    assert args.group_size in (None, 16), \
+                        f"{target_dtype} packed kernel only supports group_size 16, got {args.group_size}"
+                    assert args.num_bits == MX_QUANT_BIT[target_dtype], \
+                        (f"{target_dtype} packed kernel is fixed at num_bits "
+                         f"{MX_QUANT_BIT[target_dtype]}, got {args.num_bits}")
+                    packed = convert_to_mx(x, target_dtype=target_dtype)
+                    return convert_from_mx(packed, target_dtype, x.dtype, x.shape)
                 return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod

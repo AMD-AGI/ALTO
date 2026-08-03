@@ -8,7 +8,7 @@ emulation) and ``test_mx9_quantization.py`` (real packed kernel). This file
 tests the *wiring* one layer up: after ``patch_fake_quantize()`` replaces
 ``compressed_tensors...forward.fake_quantize``, a ``QuantizationArgs`` carrying
 ``format == "mx9"`` must route to the REAL packed Triton kernel
-(``convert_to_mx9`` / ``convert_from_mx9``), NOT the ``mx9_fake_quantize``
+(``convert_to_mx`` with ``target_dtype="mx9"``), NOT the ``mx9_fake_quantize``
 emulation -- this is the intentional, validated design (see commit
 ``95b1114``: "feat: mx9: wire packed kernel into patcher and fix
 convert_from_mx9", validated end-to-end on LLaMA-3.2-1B). Plain int8 args (no
@@ -81,7 +81,7 @@ def test_mx9_args_dispatch_to_mx9_kernel():
     mx9_fake_quantize, which intentionally diverges at the rare demoted
     +/-128 boundary (see test_mx9_quantization.py::
     test_divergence_vs_mxpy_255clamp_is_tiny)."""
-    from alto.kernels.mx.mx9_quantization import convert_to_mx9, convert_from_mx9
+    from alto.kernels.mx import convert_to_mx9, convert_from_mx9
 
     torch.manual_seed(0)
     x = torch.randn(3, 40, dtype=torch.float32).cuda()

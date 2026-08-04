@@ -33,5 +33,6 @@ def _quantize_then_mxfp_scaled_grouped_mm(
         use_dge=use_dge,
         use_hadamard=use_hadamard,
         clip_mode=clip_mode,
+        use_midmax=use_midmax,
         use_macro_block_scaling=use_macro_block_scaling,
     )

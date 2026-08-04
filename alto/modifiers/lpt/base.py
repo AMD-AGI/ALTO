@@ -39,7 +39,8 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
-    
+    use_uos: bool = False
+
     lora_rank: int = 0
     """
     Lora rank for the decomposed linear layer.
@@ -110,6 +111,10 @@ class LowPrecisionTrainingModifier(Modifier):
                     raise ValueError(
                         f"lora_rank must be divisible by 32 for {scheme_name}, got {self.lora_rank}"
                     )
+
+        if self.use_uos:
+            assert all(scheme_name in ("mxfp4",) for scheme_name in schemes), "UOS is only supported for mxfp4"
+            assert self.clip_mode == "none", "UOS is only supported with clip mode none"
         return self
 
     @field_validator("deosc_step", mode="after")
@@ -158,6 +163,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_dge=self.use_dge,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
+                    use_uos=self.use_uos,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

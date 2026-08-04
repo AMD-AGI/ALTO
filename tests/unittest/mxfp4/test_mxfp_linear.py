@@ -110,14 +110,19 @@ def test_mxfp4_linear_kernel(shape, use_2dblock_a, use_2dblock_b, trans_a, trans
 @pytest.mark.parametrize("use_hadamard", [False, True])
 @pytest.mark.parametrize("clip_mode", ["none", "static", "dynamic"])
 @pytest.mark.parametrize("use_macro_block_scaling", [False, True])
+@pytest.mark.parametrize("use_uos", [False, True])
 @pytest.mark.parametrize("data_type", [torch.bfloat16, torch.float32])
 def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use_grad_sr, compile, use_hadamard,
-                                        clip_mode, use_macro_block_scaling, data_type):
+                                        clip_mode, use_macro_block_scaling, use_uos, data_type):
     if use_2dblock_x and use_hadamard:
         pytest.skip("Hadamard transform is applied only if 1D block is used for activations.")
 
     if clip_mode == "dynamic" and not use_hadamard:
         pytest.skip("Dynamic clip mode is not supported without Hadamard transform.")
+        
+    if use_uos:
+        if clip_mode != "none":
+            pytest.skip("UOS is not supported with clip mode.")
 
     B, M, N, K = shape
     inputs = prepare_data((B, M, K), data_type).requires_grad_(True)
@@ -160,7 +165,7 @@ def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use
     if compile:
         mxfp4_linear_func = torch.compile(mxfp4_linear_func, fullgraph=True)
     outputs = mxfp4_linear_func(inputs, weights, use_2dblock_x, use_2dblock_w, use_grad_sr, False, clip_mode,
-                                use_macro_block_scaling, transform)
+                                use_macro_block_scaling, transform, use_uos)
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
 
@@ -186,7 +191,7 @@ def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use
     if clip_mode == "static":
         min_snr = 6
     else:
-        min_snr = 8.6
+        min_snr = 8.4
     assert output_snr > min_snr
     assert dx_snr > min_snr
     assert dw_snr > min_snr

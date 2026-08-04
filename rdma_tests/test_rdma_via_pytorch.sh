@@ -6,4 +6,4 @@ export NCCL_DEBUG=INFO
 torchrun \
   --nnodes=2 --nproc-per-node=8 --node-rank=0 \
   --master-addr=<NODE_A_IP> --master-port=29500 \
-  test_rdma_allreduce.py
+  rdma_tests/test_rdma_allreduce.py

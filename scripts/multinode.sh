@@ -16,6 +16,9 @@ IMAGE="alto:multinode"
 ALTO_DIR="$HOME/lpt_branch/ALTO"
 GPUS_PER_NODE=8
 
+cd "$ALTO_DIR"
+docker build -f Dockerfile.multinode -t $IMAGE .
+
 # First allocated node becomes the torchrun rendezvous host.
 MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)"
 MASTER_PORT="$((20000 + SLURM_JOB_ID % 20000))"

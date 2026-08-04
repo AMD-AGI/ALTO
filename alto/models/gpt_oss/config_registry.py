@@ -20,6 +20,7 @@ __all__ = [
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_lpt_fresh",
+    "gpt_oss_20b_lpt_1dw",
     "gpt_oss_20b_lpt_no2dw",
     "gpt_oss_20b_adahop",
     "gpt_oss_20b_adahop_hadamard",
@@ -251,6 +252,18 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_lpt_1dw() -> Trainer.Config:
+    """Plain MXFP4 with 1D-block weight quantization (use_2dblock_w: false):
+    weights are scaled per-axis (1D macro blocks) instead of the baseline's 2D
+    blocks. Identical to gpt_oss_20b_lpt otherwise. Own dump folder so it never
+    collides with the 2D-weight baseline's checkpoints."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-1dw-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_1dw.yaml",),
     ],)
     return config
 

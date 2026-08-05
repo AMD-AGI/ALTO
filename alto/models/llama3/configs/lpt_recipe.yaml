@@ -4,3 +4,11 @@ training_stage:
       scheme: "mxfp4"
       targets: ["Linear"]
       ignore: ["output"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: none
+      lora_rank: 0

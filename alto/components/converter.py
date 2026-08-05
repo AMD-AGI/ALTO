@@ -46,9 +46,9 @@ class ModelOptConverter(ModelConverter, Configurable):
         for modifier in self.recipe.modifiers:
             modifier.convert(model)
 
-    def pre_step(self, model_parts: list[nn.Module]):
+    def pre_step(self, model_parts: list[nn.Module], **kwargs):
         for modifier in self.recipe.modifiers:
-            modifier.pre_step(model_parts)
+            modifier.pre_step(model_parts, **kwargs)
 
     def post_optimizer_hook(self, model_parts: list[nn.Module], **kwargs):
         for modifier in self.recipe.modifiers:

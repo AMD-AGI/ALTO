@@ -9,12 +9,14 @@ This module exposes the most commonly used public APIs for both FP4 families:
 - shared E2M1 encode/decode primitives from ``fp4_common``
 - MXFP4 quantize/dequantize entrypoints
 - NVFP4 quantize/dequantize entrypoints
+- AMD-FP4 quantize/dequantize entrypoints (NVFP4 layout + UE5M3 inner scale)
 
 Format-specific internals remain in their own subpackages:
 
 - ``alto.kernels.fp4.fp4_common``
 - ``alto.kernels.fp4.mxfp4``
 - ``alto.kernels.fp4.nvfp4``
+- ``alto.kernels.fp4.amdfp4``
 """
 
 from importlib import import_module
@@ -37,6 +39,8 @@ _LAZY_ATTRS = {
     ),
     "convert_from_nvfp4": (".nvfp4.nvfp_quantization", "convert_from_nvfp4"),
     "convert_to_nvfp4": (".nvfp4.nvfp_quantization", "convert_to_nvfp4"),
+    "convert_from_amdfp4": (".amdfp4.amdfp_quantization", "convert_from_amdfp4"),
+    "convert_to_amdfp4": (".amdfp4.amdfp_quantization", "convert_to_amdfp4"),
 }
 
 
@@ -58,8 +62,10 @@ __all__ = (
     "MXFP4_BLOCK_SIZE_DEFAULT",
     "NVFP4_BLOCK_SIZE_DEFAULT",
     "compute_dynamic_outer_scale",
+    "convert_from_amdfp4",
     "convert_from_mxfp4",
     "convert_from_nvfp4",
+    "convert_to_amdfp4",
     "convert_to_mxfp4",
     "convert_to_nvfp4",
     "dequantize_e2m1",

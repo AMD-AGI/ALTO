@@ -46,6 +46,15 @@ set -euo pipefail
 # Configuration
 # -----------------------------------------------------------------------------
 
+# If launched via sbatch, SLURM sets SLURM_JOB_ID; fold it into RUN_ID so the
+# checkpoint dir and log filename are traceable back to the SLURM job.
+SLURM_JOB_ID="${SLURM_JOB_ID:-${SLURM_JOBID:-}}"
+if [[ -n "$SLURM_JOB_ID" ]]; then
+    RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-slurm${SLURM_JOB_ID}}"
+else
+    RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+fi
+
 ### Machine-specific args
 NGPU="${NGPU:-8}"
 HF_HOME_DIR="${HF_HOME_DIR:-$HOME/.cache/huggingface}" # HF model location
@@ -56,8 +65,8 @@ HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 # *NOTE*: if you cloned multiple copies of this repo, make sure the path below is correct
 ALTO_DIR="${ALTO_DIR:-$HOME/lpt_branch/ALTO}" # expose repo dir to container 
 CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
-RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/$CONFIG_$RUN_ID}"
+
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/${CONFIG}_$RUN_ID}"
 LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname based on time
 
 ### Other modifiable args
@@ -80,6 +89,7 @@ mkdir -p \
 
 echo "=== ALTO GPT-OSS 20B ==="
 echo "Node:           $(hostname)"
+[[ -n "$SLURM_JOB_ID" ]] && echo "SLURM job:      $SLURM_JOB_ID"
 echo "Image:          $IMAGE"
 echo "Config:         $CONFIG"
 echo "GPUs:           $NGPU"
@@ -179,7 +189,7 @@ fi
 echo "[train] Installing dependencies ..."
 
 docker exec "$CONTAINER" bash -c "
-    python3 -m pip install -q torchao &&
+    python3 -m pip install -q 'torchao==0.16.0' &&
     python3 -m pip install -q \
         --no-build-isolation \
         --no-deps \

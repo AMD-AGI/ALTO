@@ -256,7 +256,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_hadamard=config.use_hadamard,
                 clip_mode=config.clip_mode,
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
-                use_midmax=config.use_midmax,
+                blockscale_selection=config.blockscale_selection,
             )
 
         # linear op override
@@ -288,7 +288,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 clip_mode=config.clip_mode,
                 use_hadamard=config.use_hadamard,
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
-                use_midmax=config.use_midmax,
+                blockscale_selection=config.blockscale_selection,
             )
             if bias is not None:
                 Y = Y + bias

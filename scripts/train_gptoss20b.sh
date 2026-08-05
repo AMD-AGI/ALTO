@@ -50,7 +50,7 @@ set -euo pipefail
 # checkpoint dir and log filename are traceable back to the SLURM job.
 SLURM_JOB_ID="${SLURM_JOB_ID:-${SLURM_JOBID:-}}"
 if [[ -n "$SLURM_JOB_ID" ]]; then
-    RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-slurm${SLURM_JOB_ID}}"
+    RUN_ID="${RUN_ID:${SLURM_JOB_ID}}"
 else
     RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 fi

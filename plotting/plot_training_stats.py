@@ -34,8 +34,9 @@ comma-separated on the CLI; they are parsed in order and drawn as one curve:
     python3 plot_training_stats.py part1.out,part2.out=baseline
 
 TOML config format (see runs.example.toml):
-    output = "val_loss.png"                 # optional, overridden by -o
-    title  = "Validation loss vs. step"     # optional
+    output   = "val_loss.png"               # optional, overridden by -o
+    title    = "Validation loss vs. step"   # optional
+    max_step = 5000                         # optional, global step cutoff (-m)
 
     [[runs]]
     file = "slurm-207639.out"
@@ -56,6 +57,16 @@ TOML config format (see runs.example.toml):
     [[runs]]
     file = "gpt_oss_20b-pretrain-bf16/tb"
     name = "bf16 (tb)"
+
+    # limit how far along the x-axis data is shown. a top-level `max_step`
+    # applies to every run; a per-run `max_step` overrides it for that run.
+    # (also settable on the CLI with --max-step.)
+    max_step = 5000                             # optional, global cutoff
+
+    [[runs]]
+    file = "slurm-209000.out"
+    name = "short view"
+    max_step = 2000                             # optional, per-run cutoff
 """
 import argparse
 import os
@@ -198,12 +209,30 @@ def parse_many(paths):
     return tr_steps, tr_losses, grad_norms, val_steps, val_losses
 
 
-def runs_from_config(path):
-    """Return (runs, output, title, details) from a .toml config.
+def clip_to_step(data, max_step):
+    """Trim parsed data to steps <= max_step (no-op if max_step is None).
 
-    runs is a list of (files, label) tuples where files is a list of one or
-    more paths (a run may span several .out files). Paths are resolved relative
-    to the config file's directory so a config can be run from anywhere.
+    `data` is the 5-tuple returned by parse()/parse_many(); training arrays
+    (steps/losses/grad_norms) stay aligned, as do the validation arrays.
+    """
+    tr_steps, tr_losses, grad_norms, val_steps, val_losses = data
+    if max_step is None:
+        return data
+    tr = [(s, l, g) for s, l, g in zip(tr_steps, tr_losses, grad_norms) if s <= max_step]
+    va = [(s, l) for s, l in zip(val_steps, val_losses) if s <= max_step]
+    tr_steps, tr_losses, grad_norms = map(list, zip(*tr)) if tr else ([], [], [])
+    val_steps, val_losses = map(list, zip(*va)) if va else ([], [])
+    return tr_steps, tr_losses, grad_norms, val_steps, val_losses
+
+
+def runs_from_config(path):
+    """Return (runs, output, title, details, max_step) from a .toml config.
+
+    runs is a list of (files, label, max_step) tuples where files is a list of
+    one or more paths (a run may span several .out files) and max_step is an
+    optional per-run step cutoff (None if unset). Paths are resolved relative
+    to the config file's directory so a config can be run from anywhere. The
+    returned top-level max_step is the global cutoff (None if unset).
     """
     if tomllib is None:
         sys.exit("reading a .toml config needs Python 3.11+ or the 'tomli' package (pip install tomli)")
@@ -222,8 +251,9 @@ def runs_from_config(path):
             sys.exit(f"{path}: runs[{i}] has an empty file list")
         paths = [f if os.path.isabs(f) else os.path.join(base, f) for f in file_list]
         label = r.get("name") or os.path.basename(file_list[0])
-        runs.append((paths, label))
-    return runs, cfg.get("output"), cfg.get("title"), cfg.get("details")
+        runs.append((paths, label, r.get("max_step")))
+    return (runs, cfg.get("output"), cfg.get("title"), cfg.get("details"),
+            cfg.get("max_step"))
 
 
 def main():
@@ -236,13 +266,16 @@ def main():
     ap.add_argument("-o", "--output", help="output image path (default: val_loss.png)")
     ap.add_argument("-t", "--title", help="plot title")
     ap.add_argument("-d", "--details", help="extra info shown in a small text box (top-right)")
+    ap.add_argument("-m", "--max-step", type=int,
+                    help="only show data up to this step (applies to all runs; "
+                         "overrides per-run/global max_step in a config)")
     args = ap.parse_args()
 
-    cfg_out = cfg_title = cfg_details = None
+    cfg_out = cfg_title = cfg_details = cfg_max_step = None
     if args.config:
         if args.logfiles:
             sys.exit("provide runs either positionally or via -c/--config, not both")
-        runs, cfg_out, cfg_title, cfg_details = runs_from_config(args.config)
+        runs, cfg_out, cfg_title, cfg_details, cfg_max_step = runs_from_config(args.config)
     else:
         if not args.logfiles:
             ap.error("no runs given: pass logfiles positionally or use -c/--config")
@@ -257,11 +290,14 @@ def main():
             paths = path.split(",")
             if label is None:
                 label = os.path.basename(paths[0])
-            runs.append((paths, label))
+            runs.append((paths, label, None))
 
     out = args.output or cfg_out or "val_loss.png"
     suptitle = args.title or cfg_title or "GPT-OSS 20b"
     details = args.details or cfg_details
+    # global step cutoff: CLI wins, else config's top-level max_step. A per-run
+    # max_step (set only via config) overrides this for that run.
+    global_max_step = args.max_step if args.max_step is not None else cfg_max_step
 
     # figure: stacked training-loss (top), grad-norm (middle), and
     # validation-loss (bottom) plots on the left, table on the right. When
@@ -286,7 +322,9 @@ def main():
     colors = {}                 # label -> line color
     total_val = 0               # validation datapoints (table)
 
-    for paths, label in runs:
+    for paths, label, run_max_step in runs:
+        # per-run max_step overrides the global cutoff; the global applies otherwise
+        max_step = run_max_step if run_max_step is not None else global_max_step
         existing = [p for p in paths if os.path.exists(p)]
         missing = [p for p in paths if not os.path.exists(p)]
         if missing:
@@ -301,7 +339,8 @@ def main():
             colors[label] = line.get_color()
             continue
 
-        tr_steps, tr_losses, grad_norms, val_steps, val_losses = parse_many(existing)
+        tr_steps, tr_losses, grad_norms, val_steps, val_losses = clip_to_step(
+            parse_many(existing), max_step)
 
         # curves plot TRAINING loss (no per-point marker — too dense)
         (line,) = ax.plot(tr_steps, tr_losses, linewidth=1.2, label=label)
@@ -407,7 +446,7 @@ def main():
     pdf_out, svg_out = base + ".pdf", base + ".svg"
     fig.savefig(pdf_out)
     fig.savefig(svg_out)
-    n_files = sum(len(paths) for paths, _ in runs)
+    n_files = sum(len(paths) for paths, *_ in runs)
     print(f"Wrote {out}, {pdf_out} and {svg_out} ({total_val} validation "
           f"datapoints in table across {len(runs)} run(s), {n_files} file(s))")
 

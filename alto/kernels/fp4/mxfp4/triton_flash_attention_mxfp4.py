@@ -314,8 +314,44 @@ def _attn_fwd_inner(
         else:
             p = tl.math.exp(q_shifted)
 
+        ps = _calculate_scales(
+            p,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+            IS_2D_BLOCK=False,
+        )
+        p_fp4 = _pack_fp4(
+            p,
+            ps,
+            None,
+            None,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+            IS_2D_BLOCK=False,
+            USE_SR=False,
+            USE_ASM=USE_ASM,
+        )
+        # The row sum must come from the same quantized tile the PV dot consumes.
+        # Summing the unquantized tile instead leaves the induced attention
+        # weights unnormalized, which shows up as a row-dependent scale error.
+        p_deq = _unpack_fp4(
+            p_fp4,
+            ps,
+            tl.float32,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+            IS_2D_BLOCK=False,
+            USE_ASM=USE_ASM,
+        )
+
         # CAVEAT: Must update l_ij before applying dropout
-        l_ij = tl.sum(p, 1)
+        l_ij = tl.sum(p_deq, 1)
+        # TODO(fix): p_fp4 is now packed above, so the mask below never reaches
+        # the PV dot -- enabling dropout would silently become a no-op. Keeping
+        # both dropout and PNQ requires masking the packed tile instead.
         if ENABLE_DROPOUT:
             philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
             keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
@@ -347,26 +383,6 @@ def _attn_fwd_inner(
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-
-        ps = _calculate_scales(
-            p,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
-            IS_2D_BLOCK=False,
-        )
-        p_fp4 = _pack_fp4(
-            p,
-            ps,
-            None,
-            None,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
-            IS_2D_BLOCK=False,
-            USE_SR=False,
-            USE_ASM=USE_ASM,
-        )
 
         acc += tl.dot_scaled(p_fp4, ps, "e2m1", v, vs, "e2m1", lhs_k_pack=True, rhs_k_pack=False, out_dtype=tl.float32)
 

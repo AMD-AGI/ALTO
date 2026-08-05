@@ -36,6 +36,20 @@ def attention_vanilla_forward_pytorch_ref_impl(q, k, v, sm_scale, causal, layout
     return o_ref
 
 
+def make_value(shape, mode, device, dtype):
+    """Build V under a given distribution.
+
+    Zero-mean V hides row-normalization errors: the quantized probability mass
+    that goes missing from the row sum cancels out of the numerator as well, so
+    a wrong softmax denominator is invisible. A nonzero mean removes that
+    cancellation and makes the error observable.
+    """
+    v = torch.randn(shape, device=device, dtype=dtype)
+    if mode == "biased":
+        v += 2.0
+    return v
+
+
 class AttnConfig:
 
     def __init__(self, seqlen_q, seqlen_kv, num_head_q, num_head_kv, head_dim_qk, head_dim_v):
@@ -72,7 +86,8 @@ test_cases = [
 @pytest.mark.parametrize("batch", [4])
 @pytest.mark.parametrize("config", test_cases)
 @pytest.mark.parametrize("causal", [True])
-def test_attention(batch, config, causal):
+@pytest.mark.parametrize("v_mode", ["randn", "biased"])
+def test_attention(batch, config, causal, v_mode):
     device = "cuda"
     dtype = torch.bfloat16
     seqlen_q, seqlen_kv, num_head_q, num_head_kv, head_dim_qk, head_dim_v = (
@@ -91,7 +106,7 @@ def test_attention(batch, config, causal):
 
     query = torch.randn(q_layout, device=device, dtype=dtype, requires_grad=True)
     key = torch.randn(k_layout, device=device, dtype=dtype, requires_grad=True)
-    value = torch.randn(v_layout, device=device, dtype=dtype, requires_grad=True)
+    value = make_value(v_layout, v_mode, device, dtype).requires_grad_()
     query_ref = query.clone().detach().requires_grad_()
     key_ref = key.clone().detach().requires_grad_()
     value_ref = value.clone().detach().requires_grad_()
@@ -123,10 +138,13 @@ def test_attention(batch, config, causal):
 
     output_snr = calc_snr(o_ref, o)
     output_sim = calc_cossim(o_ref, o)
+    # Row-normalization errors show up as a systematic gain, which SNR alone
+    # can drown out but this ratio reports directly.
+    output_mag = (o.float().norm(dim=-1) / o_ref.float().norm(dim=-1).clamp_min(1e-6)).mean()
     print()
     print(tabulate([
-        ["O", output_snr, output_sim],
-    ], headers=["Tensor", "SNR", "Cosine Sim"], tablefmt="github"))
+        ["O", output_snr, output_sim, output_mag.item()],
+    ], headers=["Tensor", "SNR", "Cosine Sim", "|O|/|O_ref|"], tablefmt="github"))
     # query_grad_snr = compute_snr(query_ref.grad, query.grad)
     # key_grad_snr = compute_snr(key_ref.grad, key.grad)
     # value_grad_snr = compute_snr(value_ref.grad, value.grad)

@@ -62,8 +62,7 @@ DATA_DIR="${DATA_DIR:-/shared_inference}" # exposte data dir to container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
-# *NOTE*: if you cloned multiple copies of this repo, make sure the path below is correct
-ALTO_DIR="${ALTO_DIR:-$HOME/lpt_branch/ALTO}" # expose repo dir to container 
+ALTO_DIR="${ALTO_DIR:-$PWD}" # assume repo dir is pwd
 CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
 
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/${CONFIG}_$RUN_ID}"

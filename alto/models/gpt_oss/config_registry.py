@@ -20,6 +20,8 @@ __all__ = [
     "gpt_oss_20b_pretrain_c4",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_lpt_midmax",
+    "gpt_oss_20b_lpt_uos",
+    "gpt_oss_20b_lpt_uos6",
     "gpt_oss_20b_lpt_lowrank",
     "gpt_oss_20b_lpt_deosc",
     "gpt_oss_20b_lpt_madam",
@@ -193,6 +195,24 @@ def gpt_oss_20b_lpt_midmax() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-midmax-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_midmax.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_lpt_uos() -> Trainer.Config:
+    """gpt_oss_20b_lpt_c4 with uos scale selection for MXFP4 quantization."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-uos"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_uos.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_lpt_uos6() -> Trainer.Config:
+    """gpt_oss_20b_lpt_c4 with uos scale selection for MXFP4 quantization."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-uos6"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe_uos6.yaml",),
     ],)
     return config
 

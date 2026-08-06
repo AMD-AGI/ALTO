@@ -37,7 +37,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_dge: bool = False
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
-    blockscale_selection: Literal["default", "midmax", "uos"] = "default"
+    blockscale_selection: Literal["default", "midmax-legacy", "uos", "uos6"] = "default"
 
 
     lora_rank: int = 0

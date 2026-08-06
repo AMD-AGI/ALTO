@@ -1,0 +1,25 @@
+# MX6 W+A fully-dynamic recipe (single GPU, dense).
+# Weight and input-activation are both quantized, both dynamic -> QDQ happens in
+# the forward pass, no calibration / observer / weight baking required.
+quantization_stage:
+  quantization_modifiers:
+    QuantizationModifier:
+      ignore: ["output"]          # lm_head not quantized
+      sequential: false
+      config_groups:
+        group_0:
+          targets: ["Linear"]
+          weights:                 # fully dynamic: QDQ in forward, no baking
+            num_bits: 5
+            type: "int"
+            symmetric: true
+            strategy: "tensor"
+            dynamic: true
+            format: "mx6"          # <- hits mx6 dispatch
+          input_activations:       # fully dynamic
+            num_bits: 5
+            type: "int"
+            symmetric: true
+            strategy: "tensor"
+            dynamic: true
+            format: "mx6"

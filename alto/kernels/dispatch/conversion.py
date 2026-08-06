@@ -31,7 +31,9 @@ def _get_tensor_cls_for_config(config: TrainingOpConfig) -> Type[torch.Tensor]:
         return MXFP4TrainingWeightWrapperTensor
     elif config.precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
         return MXFP8TrainingWeightWrapperTensor
-    elif config.precision == "nvfp4":
+    elif config.precision in ("nvfp4", "amdfp4"):
+        # AMD-FP4 reuses the NVFP4 wrapper; it re-dispatches on
+        # ``config.precision`` internally to pin the UE5M3 inner grid.
         return NVFP4TrainingWeightWrapperTensor
     else:
         raise ValueError(f"Unsupported training op config: {config}")
@@ -101,9 +103,10 @@ def swap_params(
             for param_name, param in module.named_parameters(recurse=False):
                 if (target_parameter_name is not None and param_name != target_parameter_name):
                     continue
-                full_param_name = f"{module_name}{'.' if module_name else ''}{cur_fqn}{'.' if cur_fqn else ''}{param_name}"
-                if (target_parameter_name is None and "bias" in param_name):
-                    logger.warn(f"Skipped {full_param_name} because it is a bias parameter")
+                module_prefix = f"{module_name}." if module_name else ""
+                full_param_name = f"{module_prefix}{cur_fqn}{'.' if cur_fqn else ''}{param_name}"
+                if target_parameter_name is None and param_name.endswith("bias"):
+                    logger.debug(f"Skipped {full_param_name} because it is a bias parameter")
                     continue
                 if not isinstance(param.data, TrainingWeightWrapperBaseTensor):
                     new_param = nn.Parameter(

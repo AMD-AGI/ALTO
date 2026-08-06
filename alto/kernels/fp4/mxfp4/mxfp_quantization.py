@@ -80,7 +80,7 @@ def _calculate_scales(
     # to FP32 for exponent-field surgery, while round-even bitcasts in the input's
     # native precision. Casting to element_ty up here would needlessly truncate
     # the FP32 dynamic-clip estimate before midmax re-widens it.
-    if SCALE_SELECTION == "midmax":
+    if SCALE_SELECTION == "midmax-legacy":
         # Pick the scale from absmax's FP32 exponent, then apply E2M1 "midmax"
         # rounding: normalize absmax into [2^target_max_pow2, 2^(target_max_pow2+1))
         # by overwriting its exponent field, and bump the scale by 1 if the result
@@ -102,12 +102,23 @@ def _calculate_scales(
         amax_scaled = amax_scaled_bits.to(tl.float32, bitcast=True)
 
         scales = scales + (amax_scaled > MIDMAX).to(tl.int32)
+    elif SCALE_SELECTION == "uos6":
+        max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
+        val_to_add = 1 << (hp_mbits - mbits)  # 0x00400000 for fp32, 0x0040 for bf16
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
+        # apply carry on mantissa, collect only the carried exponent
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2 # e8m0 po2 exponent, so applying po2 arithmetic
     elif SCALE_SELECTION == "uos":
-        # TODO: populate the "uos" scale-selection branch. Until it is
-        # implemented, selecting it is a compile-time error rather than a
-        # silent fallthrough to round-even.
-        tl.static_assert(False, "SCALE_SELECTION='uos' is not implemented yet")
+        # "default": round even (adaptive), incoming max_abs is in FP32
+        max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
+        val_to_add = 3 << (hp_mbits - mbits - 3) # 0x00180000 for fp32, 0x0018 for bf16
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
+        # apply carry on mantissa, collect only the carried exponent
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2 # e8m0 po2 exponent, so applying po2 arithmetic
     else:
+        # This is CHECK7
         # "default": round even (adaptive), incoming max_abs is in FP32
         max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
         # with rounding you apply value_to_add on mantissa, 
@@ -115,7 +126,7 @@ def _calculate_scales(
         # value_to_add is 0.5 here but below, is actually 0.25
         # so anything <0.25 away from carry will be carried
         # 7 in 
-        val_to_add = 1 << (hp_mbits - mbits - 1)  
+        val_to_add = 1 << (hp_mbits - mbits - 1)  # 0x00200000 for fp32, 0x0020 for bf16
         mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
         # apply carry on mantissa, collect only the carried exponent
         max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits

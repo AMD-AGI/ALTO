@@ -21,8 +21,8 @@ training_stage:
       # 2-level scaling, disabled by default
       # NVFP4 requires tensorwise scaling or you will get overflow issues
       two_level_scaling: none
-      # block scale selection: "default" (round-even), "midmax", or "uos"
-      blockscale_selection: "midmax"
+      # block scale selection: "default", "midmax-legacy", or "uos"
+      blockscale_selection: "midmax-legacy"
       # weight de-oscillation, disabled by default
       # deosc_step: 2000
       # deosc_period: 200

@@ -26,7 +26,7 @@ __all__ = [
     "gpt_oss_20b_lpt_no2dw",
     "gpt_oss_20b_adahop",
     "gpt_oss_20b_adahop_hadamard",
-    "gpt_oss_20b_pretrain_c4",
+    "gpt_oss_20b_pretrain_c4_megatron",
     "gpt_oss_20b_lpt_c4",
     "gpt_oss_20b_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_lpt",
@@ -135,7 +135,7 @@ def gpt_oss_debugmodel_obs_bf16() -> Trainer.Config:
 
 def gpt_oss_20b() -> Trainer.Config:
     config = gpt_oss_20b_orig()
-    config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
+    config.hf_assets_path = "/hf_home/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
     config.dump_folder = "gpt_oss_20b-outputs"
     config.profiling.enable_profiling = False
     config.training.steps = 0
@@ -148,7 +148,7 @@ def gpt_oss_20b() -> Trainer.Config:
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
-    config.checkpoint.initial_load_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
+    config.checkpoint.initial_load_path = "/hf_home/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
     config.checkpoint.initial_load_in_hf = True
     config.checkpoint.initial_load_in_hf_quantized = True
     config.checkpoint.interval = 100
@@ -182,8 +182,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
     config.dataloader.dataset = "megatron"
-    config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
-    config.parallelism.expert_parallel_degree = 8
+    config.dataloader.dataset_path = "/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
@@ -199,14 +198,14 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.debug.seed = 1234
     return config
 
-def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
-    """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
+def gpt_oss_20b_pretrain_c4_megatron() -> Trainer.Config:
+    """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline)."""
     config = gpt_oss_20b_pretrain()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-outputs"
     config.dataloader.dataset = "megatron"
-    config.dataloader.dataset_path = "/shared_inference/alirezak/hf_home/data/c4-train.en_6_text_document.idx"
+    config.dataloader.dataset_path = "/data/c4-train.en_6_text_document.idx"
     config.validator.dataloader.dataset = "megatron"
-    config.validator.dataloader.dataset_path = "/shared_inference/alirezak/hf_home/data/c4-validation-91205-samples.en_text_document.idx"
+    config.validator.dataloader.dataset_path = "/data/c4-validation-91205-samples.en_text_document.idx"
     config.checkpoint.enable = True
     config.checkpoint.initial_load_path = None      # fresh run: do NOT load any checkpoint
     config.checkpoint.initial_load_in_hf = False
@@ -254,49 +253,9 @@ def gpt_oss_20b_adahop_hadamard() -> Trainer.Config:
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_all_hadamard.yaml",),
     ],)
     return config
-
-def gpt_oss_20b_adahop() -> Trainer.Config:
-    config = gpt_oss_20b_pretrain()
-    config.training.global_batch_size = 16
-    config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 1
-    config.parallelism.expert_parallel_degree = 8
-    config.training.local_batch_size = 1
-    config.activation_checkpoint.mode = "none"
-    config.dataloader.dataset = "c4"
-    config.dataloader.dataset_path = None
-    config.validator.dataloader.dataset = "c4_validation"
-    config.validator.dataloader.dataset_path = None
-    config.checkpoint.enable = True                 # save checkpoints so we can resume later
-    config.checkpoint.initial_load_path = None      # fresh run: do NOT load any checkpoint
-    config.checkpoint.initial_load_in_hf = False
-    config.checkpoint.initial_load_in_hf_quantized = False
-    config.checkpoint.interval = 500               # Save at step interval
-    config.checkpoint.keep_latest_k = 2            # keep only the 2 latest (each ~234G)
-    # Distinct from gpt_oss_20b_lpt's dump_folder so the adahop and nolora runs
-    # never share/overwrite each other's checkpoints.
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-outputs"
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop.yaml",),
-    ],)
-    return config
-
-def gpt_oss_20b_adahop_hadamard() -> Trainer.Config:
-    """Phase-2 Run A: AdaHOP with every slot forced to `hadamard` (no outlier
-    extraction, no full_precision). Identical to gpt_oss_20b_adahop except the
-    recipe's layer_transform_config maps all pattern-pairs to "hadamard".
-    Isolates whether the AdaHOP training regression comes from mode SELECTION
-    (S3) rather than the transform math. Distinct dump_folder so it never
-    collides with the calibrated adahop or the nolora runs."""
-    config = gpt_oss_20b_adahop()
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-allhadamard-randomized-outputs"
-    config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_all_hadamard.yaml",),
-    ],)
-    return config
-
+    
 def gpt_oss_20b_lpt() -> Trainer.Config:
-    config = gpt_oss_20b_pretrain_c4()
+    config = gpt_oss_20b_pretrain_c4_megatron()
     config.dump_folder = "gpt_oss_20b-mi300-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-rank32-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),

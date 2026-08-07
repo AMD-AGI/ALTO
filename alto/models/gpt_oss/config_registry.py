@@ -255,7 +255,7 @@ def gpt_oss_20b_adahop_hadamard() -> Trainer.Config:
     return config
 
 def gpt_oss_20b_adahop() -> Trainer.Config:
-    config = gpt_oss_20b_pretrain()
+    config = gpt_oss_20b_pretrain_c4()
     config.training.global_batch_size = 16
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
@@ -429,7 +429,7 @@ def gpt_oss_20b_lpt_no2dw() -> Trainer.Config:
 
 def gpt_oss_20b_grad_clip_lpt() -> Trainer.Config:
     """20b pretrain + MXFP4 + gradient clipping at the quantizer boundary."""
-    config = gpt_oss_20b_pretrain()
+    config = gpt_oss_20b_pretrain_c4()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-grad-clip-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/grad_clip_lpt_recipe.yaml",),

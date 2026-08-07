@@ -223,3 +223,8 @@ gptoss_chkpt/
 plotting/plots
 
 *.safetensors
+
+docker/
+gpt_*/
+*/plotting/
+docs/

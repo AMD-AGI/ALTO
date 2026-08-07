@@ -19,6 +19,7 @@ import triton
 import triton.language as tl
 
 from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
+from alto.kernels.fp4.fp4_common.grad_clip_registry import apply_clip, get as get_grad_clip_cfg
 from alto.kernels.hadamard_transform import (HadamardTransform, HadamardFactory)
 from alto.kernels.dge import dge_bwd
 from .mxfp_quantization import (
@@ -275,6 +276,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         use_midmax,
         use_macro_block_scaling,
         hadamard_transform: Optional[HadamardTransform] = None,
+        module_id: Optional[int] = None,
     ):
         """
         Forward pass for the blockwise FP8 linear operation.
@@ -418,6 +420,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         ctx.clip_mode = clip_mode
         ctx.use_midmax = use_midmax
         ctx.use_macro_block_scaling = use_macro_block_scaling
+        ctx.module_id = module_id
 
         return y.view(*original_shape[:-1], -1)  # Reshape back to original
 
@@ -425,7 +428,15 @@ class MXFP4LinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         original_shape = grad_output.shape
         grad_output = grad_output.reshape(-1, original_shape[-1])  # Ensure grad_output is 2D
+        # [A/B #1] Match alto_rad baseline: dequantize grad_output to the incoming
+        # gradient's own dtype rather than the forward-committed ctx.original_dtype.
         original_dtype = grad_output.dtype
+
+        # Site ①: clip grad_output before it enters the quantizer.
+        _clip_cfg = get_grad_clip_cfg(ctx.module_id)
+        if _clip_cfg is not None and _clip_cfg.clip_grad_output:
+            grad_output = apply_clip(grad_output, _clip_cfg.grad_output_max_norm,
+                                     _clip_cfg.grad_output_clip_value)
 
         if is_cdna4():
             inputs_mxfp4, input_scales, weight_mxfp4, weight_scales, x_mbs, w_mbs = ctx.saved_tensors
@@ -567,7 +578,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
-        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None, None
+        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None, None, None
 
 
 def _to_mxfp4_then_scaled_mm(
@@ -581,6 +592,7 @@ def _to_mxfp4_then_scaled_mm(
     use_hadamard: bool,
     use_macro_block_scaling: bool = False,
     use_midmax: bool = False,
+    module_id: Optional[int] = None,
 ) -> torch.Tensor:
     if use_hadamard:
         with torch.no_grad():
@@ -598,5 +610,6 @@ def _to_mxfp4_then_scaled_mm(
         use_midmax,
         use_macro_block_scaling,
         hadamard_transform,
+        module_id,
     )
     return y

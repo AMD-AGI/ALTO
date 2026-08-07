@@ -33,6 +33,7 @@ class DecomposedLinear(nn.Module):
         new_layer.bias = linear.bias
         return new_layer
 
+
     def init_lora_weights(self, init_std: float = 0.02):
         nn.init.normal_(self.u, mean=0.0, std=init_std)
         nn.init.zeros_(self.v)

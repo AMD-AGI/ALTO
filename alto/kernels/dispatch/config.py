@@ -30,6 +30,15 @@ class TrainingOpConfig:
     use_sr_grad: bool
     use_dge: bool
 
+    full_precision_backward: bool = False
+    """
+    Quantize only the forward GEMM; keep the backward (dgrad + wgrad) in bf16 with
+    the gradient left unquantized. The backward GEMMs reuse the quantize-then-
+    dequantize x/w from the forward (QDQ operands). Used to isolate the training
+    quality impact of forward-only vs. full low-precision. Currently supported only
+    on the dense MXFP4 linear path.
+    """
+
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     """
     clipping mode applied in MXFP4/NVFP4 quantization.

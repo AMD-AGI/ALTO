@@ -245,7 +245,13 @@ def _kernel_mxfp4_grouped_gemm_backward_dw(
     stride_asm,
     stride_ask,
     # Matrix dimensions
-    M_TOTAL,  # Total M dimension
+    # constexpr: M_TOTAL is passed as a Python int (expert_indices.shape[0]) and
+    # is used to derive PACKED_M/Ms, which are declared tl.constexpr below. On the
+    # CDNA4 (gfx950) Triton backend a non-constexpr M_TOTAL stays a runtime tensor,
+    # so PACKED_M/Ms become int32[] tensors and tl.minimum() fails to compile
+    # ("cannot convert int32[] to tensor"). CDNA3 tolerated it; making it constexpr
+    # fixes CDNA4 and is a no-op on CDNA3 (value is already compile-time known).
+    M_TOTAL: tl.constexpr,  # Total M dimension
     N: tl.constexpr,  # N dimension
     K: tl.constexpr,  # K dimension
     # Number of experts

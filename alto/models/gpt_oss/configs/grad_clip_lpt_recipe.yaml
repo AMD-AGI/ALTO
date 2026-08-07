@@ -1,0 +1,22 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      ignore: ["output", "re:.*\\.router\\.gate"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: none
+    GradientClippingModifier:
+      targets: ["Linear"]
+      ignore: ["output", "re:.*\\.router\\.gate"]
+      clip_grad_output: true
+      grad_output_max_norm: 1.0
+      grad_output_clip_value: null
+      clip_grad_weight: true
+      grad_weight_max_norm: 1.0
+      grad_weight_clip_value: null

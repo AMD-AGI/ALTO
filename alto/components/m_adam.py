@@ -34,9 +34,11 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.optim.optimizer import Optimizer
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.tools.logging import logger
 
 __all__ = [
     "m_adam",
@@ -109,6 +111,7 @@ class m_adam(Optimizer):
         warmup_steps_e: int = 0,
         min_lr_ratio_e: float = 0.0,
         logcosine_alpha_e: float = 6.0,
+        track_dw_rms: bool = True,
     ):
         if not (0.0 <= lr_m and 0.0 <= lr_e):
             raise ValueError("Learning rates must be non-negative.")
@@ -147,9 +150,25 @@ class m_adam(Optimizer):
         )
         super().__init__(params, defaults)
 
+        # Per-step diagnostic accumulators for the exponent- vs mantissa-branch
+        # weight change. Populated during step() and consumed/logged by the
+        # MAdamOptimizersContainer. Kept off the param_groups so they never
+        # enter the optimizer state_dict / checkpoint schema.
+        self.track_dw_rms = bool(track_dw_rms)
+        self._dw_exp_sumsq: Optional[torch.Tensor] = None
+        self._dw_man_sumsq: Optional[torch.Tensor] = None
+        self._dw_numel: int = 0
+        self.last_rms_dw_exponent: Optional[float] = None
+        self.last_rms_dw_mantissa: Optional[float] = None
+
     @torch.no_grad()
     def step(self, closure: Optional[callable] = None):
         loss = closure() if closure is not None else None
+
+        if self.track_dw_rms:
+            self._dw_exp_sumsq = None
+            self._dw_man_sumsq = None
+            self._dw_numel = 0
 
         for grp in self.param_groups:
             t = int(grp.get("t", 0))
@@ -330,6 +349,28 @@ class m_adam(Optimizer):
                 m_new = m + d_m
                 w_new = m_new * torch.exp2(e_new)
 
+                if self.track_dw_rms:
+                    # Additive split of this step's weight change:
+                    #   Δw_exponent = m * 2**e_new - w   (the "w * 2**de - w" term)
+                    #   Δw_mantissa = d_w                (the AdamW additive part)
+                    # (Δw_exponent + Δw_mantissa == w_new - w, pre-clamp.)
+                    dwe = m * torch.exp2(e_new) - wf
+                    dwm = d_w
+                    dwe_l = dwe.detach()
+                    dwm_l = dwm.detach()
+                    if hasattr(dwe_l, "to_local"):
+                        dwe_l = dwe_l.to_local()
+                        dwm_l = dwm_l.to_local()
+                    se = dwe_l.double().pow(2).sum()
+                    sm = dwm_l.double().pow(2).sum()
+                    if self._dw_exp_sumsq is None:
+                        self._dw_exp_sumsq = se
+                        self._dw_man_sumsq = sm
+                    else:
+                        self._dw_exp_sumsq = self._dw_exp_sumsq + se
+                        self._dw_man_sumsq = self._dw_man_sumsq + sm
+                    self._dw_numel += dwe_l.numel()
+
                 if clamp_w:
                     w_new.clamp_(
                         -st["max"],
@@ -404,6 +445,9 @@ class MAdamOptimizersContainer(OptimizersContainer):
         min_lr_ratio_e: float = 0.0
         logcosine_alpha_e: float = 6.0
 
+        track_dw_rms: bool = True
+        """Log RMS of the per-step exponent-branch vs mantissa-branch weight change every step."""
+
     @staticmethod
     def _resolve_optimizer_cls(name: str) -> type:
         if name != "m_adam":
@@ -437,4 +481,66 @@ class MAdamOptimizersContainer(OptimizersContainer):
             "warmup_steps_e": config.warmup_steps_e,
             "min_lr_ratio_e": config.min_lr_ratio_e,
             "logcosine_alpha_e": config.logcosine_alpha_e,
+            "track_dw_rms": config.track_dw_rms,
         }
+
+    def step(self, *args, **kwargs) -> None:
+        super().step(*args, **kwargs)
+        self._log_dw_rms()
+
+    def _log_dw_rms(self) -> None:
+        """Aggregate the per-step exponent/mantissa weight-change RMS across all
+        model-part optimizers and all ranks, then log one line on rank 0.
+
+        RMS is invariant to parameter *replication* (sum-of-squares and count
+        scale together), so a plain SUM all-reduce over the world yields the
+        correct global RMS whether params are FSDP-sharded or replicated.
+        """
+        opts = [o for o in self.optimizers if getattr(o, "track_dw_rms", False)]
+        if not opts:
+            return
+
+        exp_sumsq: Optional[torch.Tensor] = None
+        man_sumsq: Optional[torch.Tensor] = None
+        numel = 0
+        step = 0
+        for o in opts:
+            step = max(step, int(o.param_groups[0].get("t", 0)))
+            if o._dw_exp_sumsq is None:
+                continue
+            exp_sumsq = (
+                o._dw_exp_sumsq if exp_sumsq is None else exp_sumsq + o._dw_exp_sumsq
+            )
+            man_sumsq = (
+                o._dw_man_sumsq if man_sumsq is None else man_sumsq + o._dw_man_sumsq
+            )
+            numel += o._dw_numel
+
+        if exp_sumsq is None or numel == 0:
+            return
+
+        device = exp_sumsq.device
+        packed = torch.stack([
+            exp_sumsq.double(),
+            man_sumsq.double(),
+            torch.tensor(float(numel), dtype=torch.float64, device=device),
+        ])
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+
+        exp_ss, man_ss, n = packed.tolist()
+        if n <= 0:
+            return
+
+        rms_exp = math.sqrt(max(0.0, exp_ss) / n)
+        rms_man = math.sqrt(max(0.0, man_ss) / n)
+        self.last_rms_dw_exponent = rms_exp
+        self.last_rms_dw_mantissa = rms_man
+
+        is_dist = dist.is_available() and dist.is_initialized()
+        if (not is_dist) or dist.get_rank() == 0:
+            ratio = rms_exp / rms_man if rms_man > 0 else float("inf")
+            logger.info(
+                f"[m_adam] step: {step}  rms_dw_exp: {rms_exp:.6e}  "
+                f"rms_dw_man: {rms_man:.6e}  exp/man: {ratio:.4f}"
+            )

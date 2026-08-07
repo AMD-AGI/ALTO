@@ -206,7 +206,27 @@ def parse_many(paths):
         grad_norms.extend(c)
         val_steps.extend(d)
         val_losses.extend(e)
+    # a resumed job replays earlier steps; keep only the latest datapoint per
+    # step (last occurrence in concat order wins), then sort ascending by step
+    tr_steps, (tr_losses, grad_norms) = _dedup_latest(tr_steps, tr_losses, grad_norms)
+    val_steps, (val_losses,) = _dedup_latest(val_steps, val_losses)
     return tr_steps, tr_losses, grad_norms, val_steps, val_losses
+
+
+def _dedup_latest(steps, *aligned):
+    """Collapse duplicate steps, keeping the last occurrence, sorted by step.
+
+    `aligned` are lists parallel to `steps`. Returns (sorted_steps, (col, ...))
+    where each col is the corresponding aligned list, filtered and reordered to
+    match. Iterating in order and writing into a dict makes later (resumed-run)
+    datapoints overwrite earlier ones at the same step.
+    """
+    latest = {}
+    for i, s in enumerate(steps):
+        latest[s] = tuple(col[i] for col in aligned)
+    ordered = sorted(latest)
+    cols = tuple([latest[s][j] for s in ordered] for j in range(len(aligned)))
+    return ordered, cols
 
 
 def clip_to_step(data, max_step):
@@ -252,7 +272,8 @@ def runs_from_config(path):
         paths = [f if os.path.isabs(f) else os.path.join(base, f) for f in file_list]
         label = r.get("name") or os.path.basename(file_list[0])
         runs.append((paths, label, r.get("max_step")))
-    return (runs, cfg.get("output"), cfg.get("title"), cfg.get("details"),
+    return ((runs, cfg.get("output"), cfg.get("title"), cfg.get("details"),
+            cfg.get("max_step")),
             cfg.get("max_step"))
 
 
@@ -272,9 +293,11 @@ def main():
     args = ap.parse_args()
 
     cfg_out = cfg_title = cfg_details = cfg_max_step = None
+    cfg_out = cfg_title = cfg_details = cfg_max_step = None
     if args.config:
         if args.logfiles:
             sys.exit("provide runs either positionally or via -c/--config, not both")
+        runs, cfg_out, cfg_title, cfg_details, cfg_max_step = runs_from_config(args.config)
         runs, cfg_out, cfg_title, cfg_details, cfg_max_step = runs_from_config(args.config)
     else:
         if not args.logfiles:
@@ -342,6 +365,28 @@ def main():
         tr_steps, tr_losses, grad_norms, val_steps, val_losses = clip_to_step(
             parse_many(existing), max_step)
 
+        # drop anything past max_step so curves + table all stop at the same x
+        if max_step is not None:
+            tr = [(s, l, g) for s, l, g in zip(tr_steps, tr_losses, grad_norms)
+                  if s <= max_step]
+            tr_steps = [s for s, _, _ in tr]
+            tr_losses = [l for _, l, _ in tr]
+            grad_norms = [g for _, _, g in tr]
+            vl = [(s, l) for s, l in zip(val_steps, val_losses) if s <= max_step]
+            val_steps = [s for s, _ in vl]
+            val_losses = [l for _, l in vl]
+
+        # drop anything past max_step so curves + table all stop at the same x
+        if max_step is not None:
+            tr = [(s, l, g) for s, l, g in zip(tr_steps, tr_losses, grad_norms)
+                  if s <= max_step]
+            tr_steps = [s for s, _, _ in tr]
+            tr_losses = [l for _, l, _ in tr]
+            grad_norms = [g for _, _, g in tr]
+            vl = [(s, l) for s, l in zip(val_steps, val_losses) if s <= max_step]
+            val_steps = [s for s, _ in vl]
+            val_losses = [l for _, l in vl]
+
         # curves plot TRAINING loss (no per-point marker — too dense)
         (line,) = ax.plot(tr_steps, tr_losses, linewidth=1.2, label=label)
         color = line.get_color()
@@ -369,6 +414,8 @@ def main():
     ax.set_title("Training Loss", fontweight="bold")
     ax.grid(True, alpha=0.3)
     ax.legend()
+    if max_step is not None:
+        ax.set_xlim(right=max_step)  # ax_grad/ax_val share this x-axis
 
     ax_grad.set_xlabel("step")
     ax_grad.set_ylabel("grad norm")

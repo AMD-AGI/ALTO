@@ -446,6 +446,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 axis=-1,
                 is_2d_block=True,
                 use_sr=ctx.use_sr_grad,
+                use_midmax=ctx.use_midmax,
             )
             grad_output_mxfp4_m = grad_output_mxfp4
             grad_output_scales_m = grad_output_scales

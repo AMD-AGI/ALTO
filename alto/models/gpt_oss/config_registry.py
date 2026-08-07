@@ -43,7 +43,9 @@ __all__ = [
     "gpt_oss_20b_lpt_deosc",
     "gpt_oss_20b_lpt_madam",
     "gpt_oss_20b_lpt_madam_stable",
-    "gpt_oss_20b_mxfp4_base"
+    "gpt_oss_20b_mxfp4_base",
+    "gpt_oss_20b_lpt_madam_tie_lr",
+    "gpt_oss_20b_lpt_madam_sanity"
 ]
 
 
@@ -210,7 +212,7 @@ def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
     config.checkpoint.initial_load_path = None      # fresh run: do NOT load any checkpoint
     config.checkpoint.initial_load_in_hf = False
     config.checkpoint.initial_load_in_hf_quantized = False
-    config.checkpoint.interval = 1000               # Save at step interval
+    config.checkpoint.interval = 500               # Save at step interval
     config.checkpoint.last_save_model_only = False   # save full ckpt at final step (model+optim+dataloader) so training can resume
     return config
 
@@ -321,6 +323,43 @@ def gpt_oss_20b_lpt_madam() -> Trainer.Config:
     )
     return config
 
+def gpt_oss_20b_lpt_madam_sanity() -> Trainer.Config:
+    """Debug-model smoke test for the custom ``m_adam`` optimizer.
+
+    ``lr`` maps to m_adam's additive (AdamW) branch ``lr_m`` and is driven
+    by the usual LR scheduler; ``lr_e`` is the multiplicative (exponent)
+    branch learning rate.
+    """
+    config = gpt_oss_20b_lpt()
+    config.optimizer = MAdamOptimizersContainer.Config(
+        lr=4e-4,
+        lr_e=0,
+        tie_e_to_m=False,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-5,
+        weight_decay_m=0.1,
+    )
+    return config
+
+def gpt_oss_20b_lpt_madam_tie_lr() -> Trainer.Config:
+    """Debug-model smoke test for the custom ``m_adam`` optimizer.
+
+    ``lr`` maps to m_adam's additive (AdamW) branch ``lr_m`` and is driven
+    by the usual LR scheduler; ``lr_e`` is the multiplicative (exponent)
+    branch learning rate.
+    """
+    config = gpt_oss_20b_lpt()
+    config.optimizer = MAdamOptimizersContainer.Config(
+        lr=4e-4,
+        lr_e=4e-4,
+        tie_e_to_m=True,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-5,
+        weight_decay_m=0.1,
+    )
+    return config
 
 def gpt_oss_20b_lpt_madam_stable() -> Trainer.Config:
     """``gpt_oss_lpt_madam`` with a damped exponent branch.

@@ -35,6 +35,11 @@ class LowPrecisionTrainingModifier(Modifier):
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
+    full_precision_backward: bool = False
+    """
+    Quantize the forward only; keep the backward (dgrad + wgrad) in bf16 with the
+    gradient unquantized. Dense MXFP4 linear path only.
+    """
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
 
@@ -92,6 +97,19 @@ class LowPrecisionTrainingModifier(Modifier):
                 value[key] = cls.validate_targets(target)
 
         return value
+
+    @model_validator(mode="after")
+    def validate_full_precision_backward(self):
+        if self.full_precision_backward:
+            scheme_names = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
+            for scheme_name in scheme_names:
+                if scheme_name not in ("mxfp4",):
+                    raise ValueError(
+                        f"full_precision_backward is only supported for scheme 'mxfp4', got '{scheme_name}'")
+            if self.use_dge:
+                raise ValueError("full_precision_backward is incompatible with use_dge "
+                                 "(DGE is a gradient-quantization estimator; the backward is not quantized here)")
+        return self
 
     @model_validator(mode="after")
     def validate_lora_rank_alignment(self):
@@ -159,6 +177,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_hadamard=self.use_hadamard,
                     use_sr_grad=self.use_sr_grad,
                     use_dge=self.use_dge,
+                    full_precision_backward=self.full_precision_backward,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
                 )

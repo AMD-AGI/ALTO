@@ -16,6 +16,7 @@ from torchao.utils import TorchAOBaseTensor
 from torchtitan.tools.logging import logger
 
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.fp4.mxfp4.mxfp4_forward_only import _mxfp4_forward_only
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_mxfp_scaled_grouped_mm
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
@@ -245,6 +246,10 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             assert A_is_2d and B_is_3d and offs is not None, "Only 2d x 3d with offsets is supported for now"
             assert bias is None, "Bias is not supported for now"
             assert config.precision == "mxfp4", ("expected TrainingOpConfig with precision=mxfp4")
+            if config.full_precision_backward:
+                raise NotImplementedError(
+                    "full_precision_backward is not implemented for the MoE grouped-mm path yet "
+                    "(dense Linear only)")
 
             # logger.info(
             #     f"[MXFP4GroupedMM]config: {config} A.shape: {A.shape} B.shape: {B.shape} offs.shape: {offs.shape}")
@@ -282,18 +287,27 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             #             f"A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}")
 
             module_id = getattr(B, "module_id", None)
-            Y = _to_mxfp4_then_scaled_mm(
-                A,
-                B if trans_b else B.T,
-                use_2dblock_x=config.use_2dblock_x,
-                use_2dblock_w=config.use_2dblock_w,
-                use_sr_grad=config.use_sr_grad,
-                use_dge=config.use_dge,
-                clip_mode=config.clip_mode,
-                use_hadamard=config.use_hadamard,
-                use_macro_block_scaling=config.two_level_scaling == "blockwise",
-                module_id=module_id,
-            )
+            if config.full_precision_backward:
+                Y = _mxfp4_forward_only(
+                    A,
+                    B if trans_b else B.T,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                )
+            else:
+                Y = _to_mxfp4_then_scaled_mm(
+                    A,
+                    B if trans_b else B.T,
+                    use_2dblock_x=config.use_2dblock_x,
+                    use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                    use_dge=config.use_dge,
+                    clip_mode=config.clip_mode,
+                    use_hadamard=config.use_hadamard,
+                    use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                    module_id=module_id,
+                )
             if bias is not None:
                 Y = Y + bias
             return Y

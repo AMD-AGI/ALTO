@@ -24,13 +24,16 @@ __all__ = [
     "llama3_1b",
     "llama3_1b_opt",
     "llama3_1b_lpt",
+    "llama3_1b_lpt_fwdonly",
     "llama3_1b_lpt_hadamard",
     "llama3_1b_adahop",
     "llama3_8b",
     "llama3_8b_pretrain",
     "llama3_8b_random_init",
     "llama3_8b_opt",
+    "llama3_8b_bf16",
     "llama3_8b_lpt",
+    "llama3_8b_lpt_fwdonly",
     "llama3_8b_lpt_hadamard",
     "llama3_8b_adahop",
     "llama3_1b_gptq",
@@ -150,6 +153,17 @@ def llama3_1b_lpt() -> Trainer.Config:
     return config
 
 
+def llama3_1b_lpt_fwdonly() -> Trainer.Config:
+    """MXFP4 forward-only: quantize the forward, keep the backward in bf16
+    (gradient unquantized). Isolates the training-quality impact of forward-only
+    vs. full low-precision."""
+    config = llama3_1b()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_fwdonly.yaml",)],)
+    return config
+
+
 def llama3_1b_lpt_hadamard() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1000
@@ -235,11 +249,46 @@ def llama3_8b_random_init() -> Trainer.Config:
     return config
 
 
+def llama3_8b_bf16() -> Trainer.Config:
+    """Plain bf16 full-precision baseline (no quantization converter). The
+    reference point the mxfp4 / fwdonly variants compare against. Same
+    architecture / data / init as llama3_8b_pretrain, but with checkpointing
+    enabled so a long run is resumable."""
+    config = llama3_8b_pretrain()
+    config.dump_folder = "llama3_8b-pretrain-subset-bf16-outputs"
+    # Fresh random init at debug.seed (1234), same as the gpt_oss runs — do NOT
+    # load pretrained weights. Reproducible across launches at fixed parallelism.
+    config.checkpoint.initial_load_path = None
+    config.checkpoint.initial_load_in_hf = False
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 500
+    config.checkpoint.keep_latest_k = 2
+    return config
+
+
 def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b_pretrain()
     config.dump_folder = "llama3_8b-mi308-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-gbs384-lr1e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+def llama3_8b_lpt_fwdonly() -> Trainer.Config:
+    """MXFP4 forward-only: quantize the forward, keep the backward in bf16
+    (gradient unquantized). Isolates the training-quality impact of forward-only
+    vs. full low-precision. 8B is untied-weights so it runs (unlike 1B)."""
+    config = llama3_8b_pretrain()
+    config.dump_folder = "llama3_8b-pretrain-subset-mxfp4-fwdonly-outputs"
+    # Fresh random init at debug.seed (1234), same as the gpt_oss runs — do NOT
+    # load pretrained weights. Reproducible across launches at fixed parallelism.
+    config.checkpoint.initial_load_path = None
+    config.checkpoint.initial_load_in_hf = False
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 500
+    config.checkpoint.keep_latest_k = 2
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_fwdonly.yaml",)],)
     return config
 
 

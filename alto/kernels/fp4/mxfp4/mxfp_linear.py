@@ -422,11 +422,9 @@ class MXFP4LinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         original_shape = grad_output.shape
         grad_output = grad_output.reshape(-1, original_shape[-1])  # Ensure grad_output is 2D
-        # PyTorch disables autocast inside autograd.Function.backward, so without FSDP's
-        # MixedPrecisionPolicy grad_output can arrive in a dtype that differs from the saved
-        # x_dq / w_dq (which were cast to ctx.original_dtype in forward). Use the dtype
-        # committed by forward to keep the non-CDNA4 matmul below well-typed.
-        original_dtype = ctx.original_dtype
+        # [A/B #1] Match alto_rad baseline: dequantize grad_output to the incoming
+        # gradient's own dtype rather than the forward-committed ctx.original_dtype.
+        original_dtype = grad_output.dtype
 
         # Site ①: clip grad_output before it enters the quantizer.
         _clip_cfg = get_grad_clip_cfg(ctx.module_id)

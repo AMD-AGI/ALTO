@@ -215,3 +215,5 @@ comm_traces/
 
 docker/
 gpt_*/
+*/plotting/
+docs/

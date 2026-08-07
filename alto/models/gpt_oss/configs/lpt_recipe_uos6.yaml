@@ -8,9 +8,9 @@ training_stage:
       ignore: ["output", "re:.*\\.router\\.gate"]
       # ignore: ["output", "re:.*\\.router\\.gate", "re:layers\\.\\d+\\.attention.wq", "re:layers\\.\\d+\\.attention.wk", "re:layers\\.\\d+\\.attention.wv", "re:layers\\.\\d+\\.attention.wo"]
       use_2dblock_x: false
-      use_2dblock_w: false
-      use_hadamard: false
-      use_sr_grad: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
 
       # differential gradient estimation, disabled by default
       use_dge: false
@@ -21,8 +21,8 @@ training_stage:
       # 2-level scaling, disabled by default
       # NVFP4 requires tensorwise scaling or you will get overflow issues
       two_level_scaling: none
-      # block scale selection: "default" (round-even), "midmax", or "uos"
-      blockscale_selection: "default"
+      # block scale selection: "default", "midmax-legacy", or "uos"
+      blockscale_selection: "uos6"
       # weight de-oscillation, disabled by default
       # deosc_step: 2000
       # deosc_period: 200

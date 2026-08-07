@@ -33,7 +33,7 @@ def _calculate_scales(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
     USE_DYNAMIC_CLIP: tl.constexpr = False,
-    USE_MIDMAX: tl.constexpr = False,
+    SCALE_SELECTION: tl.constexpr = "default",
 ):
     if x.type.element_ty == tl.float32:
         hp_int_dtype = tl.int32
@@ -80,7 +80,7 @@ def _calculate_scales(
     # to FP32 for exponent-field surgery, while round-even bitcasts in the input's
     # native precision. Casting to element_ty up here would needlessly truncate
     # the FP32 dynamic-clip estimate before midmax re-widens it.
-    if USE_MIDMAX:
+    if SCALE_SELECTION == "midmax-legacy":
         # Pick the scale from absmax's FP32 exponent, then apply E2M1 "midmax"
         # rounding: normalize absmax into [2^target_max_pow2, 2^(target_max_pow2+1))
         # by overwriting its exponent field, and bump the scale by 1 if the result
@@ -102,15 +102,31 @@ def _calculate_scales(
         amax_scaled = amax_scaled_bits.to(tl.float32, bitcast=True)
 
         scales = scales + (amax_scaled > MIDMAX).to(tl.int32)
+    elif SCALE_SELECTION == "uos6":
+        max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
+        val_to_add = 1 << (hp_mbits - mbits)  # 0x00400000 for fp32, 0x0040 for bf16
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
+        # apply carry on mantissa, collect only the carried exponent
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2 # e8m0 po2 exponent, so applying po2 arithmetic
+    elif SCALE_SELECTION == "uos":
+        # "default": round even (adaptive), incoming max_abs is in FP32
+        max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
+        val_to_add = 3 << (hp_mbits - mbits - 3) # 0x00180000 for fp32, 0x0018 for bf16
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
+        # apply carry on mantissa, collect only the carried exponent
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2 # e8m0 po2 exponent, so applying po2 arithmetic
     else:
-        # round even (adaptive), incoming max_abs is in FP32
+        # This is CHECK7
+        # "default": round even (adaptive), incoming max_abs is in FP32
         max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
         # with rounding you apply value_to_add on mantissa, 
         # i.e. 123.2 + 0.5 --> no carry to 124
         # value_to_add is 0.5 here but below, is actually 0.25
         # so anything <0.25 away from carry will be carried
         # 7 in 
-        val_to_add = 1 << (hp_mbits - mbits - 1)  
+        val_to_add = 1 << (hp_mbits - mbits - 1)  # 0x00200000 for fp32, 0x0020 for bf16
         mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
         # apply carry on mantissa, collect only the carried exponent
         max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
@@ -307,7 +323,7 @@ def _convert_to_mxfp4_kernel(
     USE_ASM: tl.constexpr,
     USE_STATIC_CLIP: tl.constexpr,
     USE_DYNAMIC_CLIP: tl.constexpr,
-    USE_MIDMAX: tl.constexpr,
+    SCALE_SELECTION: tl.constexpr,
 ):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
@@ -347,7 +363,7 @@ def _convert_to_mxfp4_kernel(
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_DYNAMIC_CLIP=USE_DYNAMIC_CLIP,
-        USE_MIDMAX=USE_MIDMAX,
+        SCALE_SELECTION=SCALE_SELECTION,
     )
 
     if USE_STATIC_CLIP:
@@ -450,7 +466,7 @@ def convert_to_mxfp4(
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
     clip_mode: str = "none",
-    use_midmax: bool = False,
+    blockscale_selection: str = "default",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
@@ -510,7 +526,7 @@ def convert_to_mxfp4(
         USE_ASM=use_asm,
         USE_STATIC_CLIP=use_static_clip,
         USE_DYNAMIC_CLIP=use_dynamic_clip,
-        USE_MIDMAX=use_midmax,
+        SCALE_SELECTION=blockscale_selection,
     )
 
     return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)

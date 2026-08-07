@@ -42,7 +42,7 @@ class LowPrecisionTrainingModifier(Modifier):
     """
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
-    use_midmax: bool = False
+    blockscale_selection: Literal["default", "midmax-legacy", "uos", "uos6"] = "default"
 
 
     lora_rank: int = 0
@@ -182,7 +182,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     full_precision_backward=self.full_precision_backward,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
-                    use_midmax=self.use_midmax,
+                    blockscale_selection=self.blockscale_selection,
                 )
                 # Tag the underlying scheme so on_convert can pick the right
                 # wrapper class. Stored on the dict key via a sibling attribute

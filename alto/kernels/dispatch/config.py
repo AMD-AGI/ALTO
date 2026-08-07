@@ -57,7 +57,13 @@ class TrainingOpConfig:
       * NVFP4: not implemented
     """
 
-    use_midmax: bool = False
+    blockscale_selection: Literal["default", "midmax", "uos"] = "default"
+    """
+    block scale-selection strategy for MXFP4 quantization.
+    * default: round-even (adaptive) exponent selection (threshold > 7.0)
+    * midmax: alternative implementation of default with threshold >= 7.0
+    * uos: not yet implemented
+    """
 
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

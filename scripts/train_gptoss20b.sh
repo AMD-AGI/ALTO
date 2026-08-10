@@ -3,7 +3,7 @@
 #
 # Example:
 #   NGPU=4 CONFIG=gpt_oss_debugmodel TRAINING_STEPS=20 \
-#       bash ~/ALTO/train_gptoss.sh
+#       bash ~/ALTO/train_gptoss20b.sh
 
 ######## STEP 0: Install ALTO repository and update ALTO_DIR below
 # git clone --recurse-submodules https://github.com/AMD-AGI/ALTO.git
@@ -57,22 +57,22 @@ fi
 
 ### Machine-specific args
 NGPU="${NGPU:-8}"
-HF_HOME_DIR="${HF_HOME_DIR:-$HOME/.cache/huggingface}" # HF model location
-DATA_DIR="${DATA_DIR:-/shared_inference}" # exposte data dir to container
+HF_HOME_DIR="${HF_HOME_DIR:-/shared_inference/alirezak/hf_home}" # HF model location
+DATA_DIR="${DATA_DIR:-/shared_inference/alirezak/hf_home/data}" # expose data dir to container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 
 ### Run-specific args
 ALTO_DIR="${ALTO_DIR:-$PWD}" # assume repo dir is pwd
-CONFIG="${CONFIG:-gpt_oss_20b_pretrain_c4}"
+CONFIG="${CONFIG:-gpt_oss_20b_mxfp4_base}"
 
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-$ALTO_DIR/gptoss_chkpt/${CONFIG}_$RUN_ID}"
-LOG_FILE="${LOG_FILE:-$ALTO_DIR/logs/gpt_oss_20b-bf16-$RUN_ID.log}" # log fname based on time
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-/shared_inference/alirezak/gptoss_chkpt/${USER}/${CONFIG}}"
+LOG_FILE_DEFAULT="${ALTO_DIR}/logs/${CONFIG}_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${LOG_FILE:-$LOG_FILE_DEFAULT}" # log fname based on time
 
 ### Other modifiable args
 MODULE="${MODULE:-gpt_oss}"
 TRAINING_STEPS="${TRAINING_STEPS:-15000}"
-CONTAINER="${CONTAINER:-$CONFIG}" # container name (for user readability)
-
+CONTAINER="${CONTAINER:-${CONFIG}_${RUN_ID}}" # container name (for user readability)
 
 # default Docker image from Han Wang
 IMAGE="${IMAGE:-wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch}"
@@ -108,13 +108,14 @@ docker_args=(
     --network host
     --ipc host
     --cap-add SYS_PTRACE
+    --shm-size 512G
     --security-opt seccomp=unconfined
     --env-file "$HF_ENV_FILE"
     -v "$HOME:$HOME"
     -v "$ALTO_DIR:/alto"
-    -v "$DATA_DIR:$DATA_DIR"
+    -v "$DATA_DIR:/data"
     -v "$HF_HOME_DIR:/hf_home"
-    -v "$CHECKPOINT_DIR:$CHECKPOINT_DIR"
+    -v "$CHECKPOINT_DIR:/checkpoints"
     -v /etc/passwd:/etc/passwd:ro
     -v /etc/group:/etc/group:ro
     -e HOME="$HOME"
@@ -144,7 +145,7 @@ for group in $DEVICE_GROUPS; do
     fi
 done
 
-# start docker contrainer
+# start docker container
 docker run "${docker_args[@]}" "$IMAGE" sleep infinity
 
 # make sure docker is gracefully stopped quickly on exit
@@ -171,10 +172,11 @@ trap 'exit 143' TERM
 # -----------------------------------------------------------------------------
 # Load model and install additional docker dependencies
 # -----------------------------------------------------------------------------
-MODEL_DIR="${MODEL_DIR:-$HF_HOME_DIR/models/gpt-oss-20b}"
-echo "[model] Ensuring tokenizer is available at $MODEL_DIR ..."
+MODEL_DIR="/hf_home/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee"
+MODEL_DIR_HOST="${HF_HOME_DIR}/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee"
+echo "[model] Ensuring tokenizer is available at $MODEL_DIR_HOST ..."
 
-if [[ -f "$MODEL_DIR/tokenizer.json" ]]; then
+if [[ -f "$MODEL_DIR_HOST/tokenizer.json" ]]; then
     echo "[model] Tokenizer already present, skipping download."
 else
     echo "[model] Downloading tokenizer ..."
@@ -217,7 +219,7 @@ docker exec \
         --training.steps "$TRAINING_STEPS" \
         --comm.init_timeout_seconds 1800 \
         --hf_assets_path "$MODEL_DIR" \
-        --dump_folder "$CHECKPOINT_DIR" \
+        --dump_folder /checkpoints \
         --profiling.enable_profiling \
         --profiling.profile_freq 1000 \
         --profiling.profiler_warmup 3 \

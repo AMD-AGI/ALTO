@@ -65,7 +65,7 @@ HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 ALTO_DIR="${ALTO_DIR:-$PWD}" # assume repo dir is pwd
 CONFIG="${CONFIG:-gpt_oss_20b_mxfp4_base}"
 
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-/shared_inference/alirezak/gptoss_chkpt/${USER}/${CONFIG}_$RUN_ID}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-/shared_inference/alirezak/gptoss_chkpt/${USER}/${CONFIG}}"
 LOG_FILE_DEFAULT="${ALTO_DIR}/logs/${CONFIG}_$(date +%Y%m%d_%H%M%S).log"
 LOG_FILE="${LOG_FILE:-$LOG_FILE_DEFAULT}" # log fname based on time
 

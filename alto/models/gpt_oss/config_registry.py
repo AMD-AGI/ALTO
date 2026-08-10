@@ -19,14 +19,13 @@ __all__ = [
     "gpt_oss_debugmodel_obs_bf16",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
-    "gpt_oss_20b_pretrain_c4",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_lpt_fresh",
     "gpt_oss_20b_lpt_1dw",
     "gpt_oss_20b_lpt_no2dw",
     "gpt_oss_20b_adahop",
     "gpt_oss_20b_adahop_hadamard",
-    "gpt_oss_20b_pretrain_c4",
+    "gpt_oss_20b_pretrain_c4_megatron",
     "gpt_oss_20b_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_obs_lpt",
@@ -388,7 +387,7 @@ def gpt_oss_20b_lpt_no2dw() -> Trainer.Config:
 
 def gpt_oss_20b_grad_clip_lpt() -> Trainer.Config:
     """20b pretrain + MXFP4 + gradient clipping at the quantizer boundary."""
-    config = gpt_oss_20b_pretrain_c4()
+    config = gpt_oss_20b_pretrain_c4_megatron()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-grad-clip-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/grad_clip_lpt_recipe.yaml",),

@@ -149,22 +149,39 @@ class SelfDistillationModifier(Modifier):
             observer.disable(clear=False)
 
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
+        
+        for _microbatch, microbatches in enumerate(input_iterator):
+            input_dict_mbs = []
+            label_mbs = []
+            for input_dict, labels in microbatches:
+                for key, value in input_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        input_dict[key] = value.to(device_type)
+                input_dict_mbs.append(input_dict)
+                label_mbs.append(labels.to(device_type))
+                local_valid_tokens += (labels != IGNORE_INDEX).sum()
 
-        for _microbatch, batch in enumerate(input_iterator):
-            input_dict, labels = batch
+            if parallel_dims.pp_enabled:
+                fwd_bwd_input_dict = input_dict_mbs
+                fwd_bwd_labels = label_mbs
+            else:
+                assert len(input_dict_mbs) == len(label_mbs) == 1
+                fwd_bwd_input_dict = input_dict_mbs[0]
+                fwd_bwd_labels = label_mbs[0]
+
             # TODO: support gradient accumulation once we moved the high precision agent into vLLM
             self._optimizers.zero_grad()
             lr = self._lr_schedulers.schedulers[0].get_last_lr()[0]
-            # TODO: change to += if gradient accumulation is supported
-            local_valid_tokens = (labels != IGNORE_INDEX).sum().to(device_type)
 
             for name, observer in self._student_observers.items():
                 module = self._target_layers[name]
                 observer.enable()
 
-            student_result = forward_step({
-                k: v.to(device_type) for k, v in input_dict.items()
-            }, labels, local_valid_tokens)
+            student_result = forward_step(
+                input_dict=fwd_bwd_input_dict,
+                labels=fwd_bwd_labels,
+                global_valid_tokens=local_valid_tokens,
+            )
             teacher_result = next(output_iterator).to(device_type)
 
             loss_values = {}

@@ -71,7 +71,7 @@ LOG_FILE="${LOG_FILE:-$LOG_FILE_DEFAULT}" # log fname based on time
 
 ### Other modifiable args
 MODULE="${MODULE:-gpt_oss}"
-TRAINING_STEPS="${TRAINING_STEPS:-15000}"
+TRAINING_STEPS="${TRAINING_STEPS:-17000}"
 CONTAINER="${CONTAINER:-${CONFIG}_${RUN_ID}}" # container name (for user readability)
 
 # default Docker image from Han Wang

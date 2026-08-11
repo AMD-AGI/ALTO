@@ -24,6 +24,9 @@ __all__ = [
     "llama3_1b_lpt",
     "llama3_8b",
     "llama3_8b_pretrain",
+    "llama3_8b_mxfp8_linear",
+    "llama3_8b_mxfp8_attn",
+    "llama3_8b_mxfp8_linear_attn",
     "llama3_8b_opt",
     "llama3_8b_lpt",
     "llama3_1b_gptq",
@@ -124,8 +127,12 @@ def llama3_1b_lpt() -> Trainer.Config:
 
 def llama3_8b_pretrain() -> Trainer.Config:
     config = llama3_8b_orig()
-    config.hf_assets_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
-    config.dump_folder = "llama3_8b-mi308-pretrain-subset-gbs384-lr1e-4-outputs"
+    config.hf_assets_path = (
+        "/apps/hanwang2/huggingface/hub/"
+        "models--unsloth--Llama-3.1-8B/snapshots/"
+        "3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
+    )
+    config.dump_folder = "llama3_8b-c4-pretrain-bf16-gbs384-lr1e-4-outputs"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
     config.profiling.enable_profiling = False
@@ -139,21 +146,66 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.lr_scheduler.decay_ratio = 0.9
     config.lr_scheduler.decay_type = "cosine"
     config.dataloader.dataset = "megatron"
-    config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
+    config.dataloader.dataset_path = (
+        "/apps/hanwang2/workspace/megatron_dataset/data/"
+        "c4-train.en_6_text_document.idx"
+    )
     config.parallelism.expert_parallel_degree = 1
     config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.activation_checkpoint.mode = "none"
     config.checkpoint.enable = False
     config.checkpoint.interval = 10
-    config.checkpoint.initial_load_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
+    config.checkpoint.initial_load_path = None
     config.checkpoint.initial_load_in_hf = False
     config.validator.enable = False
     config.validator.dataloader.dataset = "megatron"
-    config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
+    config.validator.dataloader.dataset_path = (
+        "/apps/hanwang2/workspace/megatron_dataset/data/"
+        "c4-validation-91205-samples.en_text_document.idx"
+    )
     config.validator.freq = 768
     config.validator.steps = 64
     config.debug.seed = 1234
+    return config
+
+
+def llama3_8b_mxfp8_attn() -> Trainer.Config:
+    config = llama3_8b_pretrain()
+    config.dump_folder = "llama3_8b-c4-pretrain-mxfp8-attn-gbs384-lr1e-4-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/mxfp8_attn_recipe.yaml",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_mxfp8_linear() -> Trainer.Config:
+    config = llama3_8b_pretrain()
+    config.dump_folder = "llama3_8b-c4-pretrain-mxfp8-linear-gbs384-lr1e-4-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/mxfp8_linear_recipe.yaml",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_mxfp8_linear_attn() -> Trainer.Config:
+    config = llama3_8b_pretrain()
+    config.dump_folder = "llama3_8b-c4-pretrain-mxfp8-linear-attn-gbs384-lr1e-4-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/mxfp8_linear_attn_recipe.yaml",
+            ),
+        ],
+    )
     return config
 
 

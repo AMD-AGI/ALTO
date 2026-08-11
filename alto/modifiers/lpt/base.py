@@ -195,10 +195,10 @@ class LowPrecisionTrainingModifier(Modifier):
         # convert configs to enable token alignment
         from torchtitan.models.common.moe import GroupedExperts
         from torchtitan.components.quantization.utils import swap_token_dispatcher
-        from torchtitan.models.common.nn_modules import Linear
+        from torchtitan.models.common.linear import Linear
 
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(config, ALIGN_SIZE_M)
+            swap_token_dispatcher(parent, ALIGN_SIZE_M)
 
         def is_match(
             name: str,

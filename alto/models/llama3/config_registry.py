@@ -27,6 +27,9 @@ __all__ = [
     "llama3_8b_mxfp8_linear",
     "llama3_8b_mxfp8_attn",
     "llama3_8b_mxfp8_linear_attn",
+    "llama3_8b_light_mxfp8_linear",
+    "llama3_8b_light_mxfp8_attn",
+    "llama3_8b_light_mxfp8_linear_attn",
     "llama3_8b_opt",
     "llama3_8b_lpt",
     "llama3_1b_gptq",
@@ -135,6 +138,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.dump_folder = "llama3_8b-c4-pretrain-bf16-gbs384-lr1e-4-outputs"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
+    config.metrics.enable_wandb = True
     config.profiling.enable_profiling = False
     config.training.steps = 5000
     config.training.local_batch_size = 2
@@ -266,29 +270,76 @@ def llama3_1b_mx6_wa() -> Trainer.Config:
     return config
 
 
-LLAMA3_8B_PATH = "/workspace/Model-Optimizer/models/meta-llama/Llama-3.1-8B"
+LLAMA3_8B_PATH = (
+    "/apps/hanwang2/huggingface/hub/"
+    "models--unsloth--Llama-3.1-8B/snapshots/"
+    "3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
+)
 
 
 def llama3_8b() -> Trainer.Config:
     config = llama3_8b_orig()
     config.hf_assets_path = LLAMA3_8B_PATH
+    config.dump_folder = "llama3_8b-c4-bf16-outputs"
     config.metrics.log_freq = 1
+    config.metrics.enable_wandb = True
     config.profiling.enable_profiling = False
-    config.training.steps = 0
+    config.training.steps = 1000
     config.training.local_batch_size = 1
-    config.training.global_batch_size = 8
-    config.training.seq_len = 2048
-    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4_test")
+    config.training.global_batch_size = -1
+    config.training.seq_len = 8192
+    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4")
+    config.parallelism.data_parallel_shard_degree = -1
+    config.parallelism.tensor_parallel_degree = 1
     config.activation_checkpoint.mode = "none"
-    config.checkpoint.enable = True
-    config.checkpoint.interval = 10
-    config.checkpoint.initial_load_path = LLAMA3_8B_PATH
-    config.checkpoint.initial_load_in_hf = True
+    config.compile.enable = False
+    config.checkpoint.enable = False
+    config.checkpoint.initial_load_path = None
+    config.checkpoint.initial_load_in_hf = False
     config.validator.enable = True
     config.validator.dataloader = HuggingFaceTextDataLoader.Config(dataset="wikitext_test")
     config.validator.freq = 10
     config.validator.steps = 10
     config.debug.seed = 1234
+    return config
+
+
+def llama3_8b_light_mxfp8_linear() -> Trainer.Config:
+    config = llama3_8b()
+    config.dump_folder = "llama3_8b-c4-mxfp8-linear-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/mxfp8_linear_recipe.yaml",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_light_mxfp8_attn() -> Trainer.Config:
+    config = llama3_8b()
+    config.dump_folder = "llama3_8b-c4-mxfp8-attn-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/mxfp8_attn_recipe.yaml",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_light_mxfp8_linear_attn() -> Trainer.Config:
+    config = llama3_8b()
+    config.dump_folder = "llama3_8b-c4-mxfp8-linear-attn-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/mxfp8_linear_attn_recipe.yaml",
+            ),
+        ],
+    )
     return config
 
 

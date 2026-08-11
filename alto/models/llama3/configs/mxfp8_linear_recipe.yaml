@@ -7,7 +7,7 @@ training_stage:
       use_2dblock_x: false
       use_2dblock_w: true
       use_hadamard: false
-      use_sr_grad: true
+      use_sr_grad: false
       use_dge: false
       clip_mode: none
       two_level_scaling: none

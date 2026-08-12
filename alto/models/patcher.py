@@ -62,12 +62,6 @@ class ModelPatcher:
                     # Dispatches to the REAL packed Triton kernel (quantize ->
                     # bit-packed bytes -> dequantize), not the torch fake-quant
                     # emulation -- this is the intentional, validated design
-                    # (commit 95b1114: LLaMA-3.2-1B wikitext loss 2.1141 == the
-                    # fake-quant path's 2.1140). Requires a CUDA tensor (Triton
-                    # kernel launch). num_bits / group_size are fixed by the
-                    # format rather than honoured, so they are validated here
-                    # instead of forwarded -- a recipe that disagrees with the
-                    # format would otherwise be silently ignored.
                     from alto.kernels.mx import MX_QUANT_BIT, convert_to_mx, convert_from_mx
 
                     assert args.group_size in (None, 16), \
@@ -75,8 +69,9 @@ class ModelPatcher:
                     assert args.num_bits == MX_QUANT_BIT[target_dtype], \
                         (f"{target_dtype} packed kernel is fixed at num_bits "
                          f"{MX_QUANT_BIT[target_dtype]}, got {args.num_bits}")
-                    packed = convert_to_mx(x, target_dtype=target_dtype)
-                    return convert_from_mx(packed, target_dtype, x.dtype, x.shape)
+                    axis = getattr(args, "block_axis", -1)
+                    packed = convert_to_mx(x, target_dtype=target_dtype, axis=axis)
+                    return convert_from_mx(packed, target_dtype, x.dtype, x.shape, axis=axis)
                 return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod

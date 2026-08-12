@@ -10,13 +10,17 @@ from torchtitan.models.gpt_oss.config_registry import (
 )
 
 from alto.components.converter import ModelOptConverter
+from alto.components.m_adam import MAdamOptimizersContainer
 
 __all__ = [
     "gpt_oss_debugmodel",
     "gpt_oss_debugmodel_lpt",
+    "gpt_oss_debugmodel_madam",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
+    "gpt_oss_20b_madam",
+    "gpt_oss_20b_madam_stable",
 ]
 
 
@@ -114,4 +118,57 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)
+    return config
+
+
+def gpt_oss_20b_madam() -> Trainer.Config:
+    """gpt_oss_20b pretrain (plain BF16, no quantization) with the custom
+    ``m_adam`` optimizer.
+
+    ``lr`` maps to m_adam's additive (AdamW) branch ``lr_m`` and is driven by
+    the usual LR scheduler; ``lr_e`` is the multiplicative (exponent) branch
+    learning rate (tied to ``lr_m`` here via ``tie_e_to_m``).
+    """
+    config = gpt_oss_20b_pretrain()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-madam-outputs"
+    config.optimizer = MAdamOptimizersContainer.Config(
+        lr=1e-4,
+        lr_e=1e-4,
+        tie_e_to_m=True,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-5,
+        weight_decay_m=0.1,
+    )
+    return config
+
+
+def gpt_oss_20b_madam_stable() -> Trainer.Config:
+    """``gpt_oss_20b_madam`` with a damped exponent branch.
+
+    Same additive branch, but the multiplicative (exponent) branch is turned
+    down to suppress the loss spikes seen when it runs as loud as the mantissa
+    branch: ``lr_e`` is lowered and ``de_step_cap`` tightened to 0.2 (max
+    per-step magnitude change ~2**0.2 ~= 1.15x instead of ~1.41x).
+    """
+    config = gpt_oss_20b_madam()
+    config.optimizer.lr_e = 3e-5
+    config.optimizer.de_step_cap = 0.2
+    return config
+
+
+def gpt_oss_debugmodel_madam() -> Trainer.Config:
+    """Debug-model smoke test for the custom ``m_adam`` optimizer (plain BF16,
+    no quantization). Fast to run for verifying the optimizer steps end-to-end.
+    """
+    config = gpt_oss_debugmodel()
+    config.optimizer = MAdamOptimizersContainer.Config(
+        lr=1e-4,
+        lr_e=1e-4,
+        tie_e_to_m=True,
+        beta1=0.9,
+        beta2=0.95,
+        eps=1e-5,
+        weight_decay_m=0.1,
+    )
     return config

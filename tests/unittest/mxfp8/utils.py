@@ -194,6 +194,7 @@ def mxfp8_attention_forward_reference(
     causal: bool,
     block_n: int = 64,
     block_size: int = BLOCK_SIZE_DEFAULT,
+    pnq: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Pure-PyTorch golden reference for the MXFP8 (e4m3) flash-attention forward.
 
@@ -218,6 +219,8 @@ def mxfp8_attention_forward_reference(
             ``F.sdpa(is_causal=True)`` on bhsd tensors in PyTorch 2.x).
         block_n: key-block width, must match the kernel ``BLOCK_N`` (default 64).
         block_size: MXFP8 quant block, must match ``QUANT_BLOCK_SIZE`` (default 32).
+        pnq: use quantized P for both the row sum and P@V. ``False`` retains the
+            pre-PNQ behavior solely for controlled A/B tests.
 
     Returns:
         (o, softmax_lse): output ``[batch, nheads_q, seqlen_q, head_dim_v]`` and
@@ -267,10 +270,10 @@ def mxfp8_attention_forward_reference(
         p = torch.exp(s - m_ij[..., None])  # unnormalized, running max
         # Rows fully masked in this block yield exp(neg_inf - (-inf)) issues; zero them.
         p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
-        l_ij = p.sum(dim=-1)  # [b, hq, sq]
 
         # Quantize P per key block exactly like the kernel (1D block along key axis).
         p_dq = _mxfp8_qdq(p.to(torch.float32), axis=-1, is_2d_block=False, block_size=block_size)
+        l_ij = (p_dq if pnq else p).sum(dim=-1)  # [b, hq, sq]
 
         alpha = torch.exp(m_i - m_ij)
         alpha = torch.nan_to_num(alpha, nan=0.0, posinf=0.0, neginf=0.0)

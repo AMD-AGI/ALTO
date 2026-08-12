@@ -300,7 +300,9 @@ def test_public_autograd_matches_sdpa(config, causal):
 
     The lower-level backward op is tested across the large shape grid below. This
     smaller test covers the user-facing autograd wrapper: saved tensors, ctx
-    metadata, backward op dispatch, and returned gradient positions.
+    metadata, backward op dispatch, and returned gradient positions. The forward
+    saves the PNQ LSE, so this also verifies that backward consumes the updated
+    normalization state through the public API.
     """
     from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
 

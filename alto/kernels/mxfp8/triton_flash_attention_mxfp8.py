@@ -35,6 +35,7 @@ from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
     _calculate_scales,
+    _dequantize_fp8,
     _quantize_fp8,
 )
 
@@ -309,37 +310,6 @@ def _attn_fwd_inner(
         else:
             p = tl.math.exp(q_shifted)
 
-        # CAVEAT: Must update l_ij before applying dropout
-        l_ij = tl.sum(p, 1)
-        if ENABLE_DROPOUT:
-            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
-            if RETURN_SCORES:
-                exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & (
-                    (start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-                tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
-            p = tl.where(keep, p, 0.0)
-        elif RETURN_SCORES:
-            exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & (
-                (start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
-            tl.store(exp_scores_ptrs, p, mask=exp_score_mask)
-
-        # -- update output accumulator --
-        # alpha is an adjustment factor for acc and li as we loop and find new maxes
-        m_diff = m_i - m_ij
-        if USE_EXP2:
-            alpha = tl.math.exp2(m_diff * RCP_LN2)
-        else:
-            alpha = tl.math.exp(m_diff)
-        acc = acc * alpha[:, None]
-        if not PRE_LOAD_V:
-            v = load_fn(v_ptrs, k_offs_n, v_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL_V)
-            vs = load_fn(vs_ptrs, vs_offs_k, vs_offs_n, ACTUAL_BLOCK_DMODEL_V, actual_seqlen_k_scale, other=1)
-        # -- update m_i and l_i
-        l_i = l_i * alpha + l_ij
-        # update m_i and l_i
-        m_i = m_ij
-
         ps = _calculate_scales(
             p,
             BLOCK_M=BLOCK_M,
@@ -362,6 +332,65 @@ def _attn_fwd_inner(
             USE_ASM=USE_ASM,
             USE_SR=False,
         )
+        # The row sum must use the same quantized tile as the PV dot.
+        p_deq = _dequantize_fp8(
+            p_fp8,
+            ps,
+            tl.float32,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+            FP8_FORMAT=E4M3_FORMAT_ID,
+            IS_2D_BLOCK=False,
+            USE_ASM=USE_ASM,
+        )
+        # CAVEAT: Must update l_ij before applying dropout
+        l_ij = tl.sum(p_deq, 1)
+        if ENABLE_DROPOUT:
+            philox_offset = batch_philox_offset + start_m * BLOCK_M * actual_seqlen_k + start_n - BLOCK_N
+            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M, BLOCK_N, actual_seqlen_k)
+            if RETURN_SCORES:
+                exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & (
+                    (start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
+                tl.store(exp_scores_ptrs, tl.where(keep, p, -p), mask=exp_score_mask)
+            p = tl.where(keep, p, 0.0)
+        elif RETURN_SCORES:
+            exp_score_mask = (OFFS_M[:, None] < actual_seqlen_q) & (
+                (start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
+            tl.store(exp_scores_ptrs, p, mask=exp_score_mask)
+
+        if ENABLE_DROPOUT:
+            # Dropout affects only PV. Reuse the pre-dropout scale because zero
+            # is exact in e4m3 and the original block maximum is still valid.
+            p_fp8 = _quantize_fp8(
+                p,
+                ps,
+                philox_seed,
+                batch_philox_offset,
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_N,
+                QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+                FP8_FORMAT=E4M3_FORMAT_ID,
+                IS_2D_BLOCK=False,
+                USE_ASM=USE_ASM,
+                USE_SR=False,
+            )
+
+        # -- update output accumulator --
+        # alpha is an adjustment factor for acc and li as we loop and find new maxes
+        m_diff = m_i - m_ij
+        if USE_EXP2:
+            alpha = tl.math.exp2(m_diff * RCP_LN2)
+        else:
+            alpha = tl.math.exp(m_diff)
+        acc = acc * alpha[:, None]
+        if not PRE_LOAD_V:
+            v = load_fn(v_ptrs, k_offs_n, v_offs_k, actual_seqlen_k, ACTUAL_BLOCK_DMODEL_V)
+            vs = load_fn(vs_ptrs, vs_offs_k, vs_offs_n, ACTUAL_BLOCK_DMODEL_V, actual_seqlen_k_scale, other=1)
+        # -- update m_i and l_i
+        l_i = l_i * alpha + l_ij
+        # update m_i and l_i
+        m_i = m_ij
 
         acc += tl.dot_scaled(p_fp8, ps, "e4m3", v, vs, "e4m3", out_dtype=tl.float32)
 

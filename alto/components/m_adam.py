@@ -111,7 +111,7 @@ class m_adam(Optimizer):
         warmup_steps_e: int = 0,
         min_lr_ratio_e: float = 0.0,
         logcosine_alpha_e: float = 6.0,
-        track_dw_rms: bool = True,
+        track_dw_rms: bool = False,
     ):
         if not (0.0 <= lr_m and 0.0 <= lr_e):
             raise ValueError("Learning rates must be non-negative.")
@@ -445,7 +445,7 @@ class MAdamOptimizersContainer(OptimizersContainer):
         min_lr_ratio_e: float = 0.0
         logcosine_alpha_e: float = 6.0
 
-        track_dw_rms: bool = True
+        track_dw_rms: bool = False
         """Log RMS of the per-step exponent-branch vs mantissa-branch weight change every step."""
 
     @staticmethod

@@ -239,7 +239,7 @@ class Trainer(ForgeTrainer):
 
         # Process each microbatch: move to GPU, forward/backward, then free
         with torch.no_grad():
-            for microbatches in microbatch_groups:
+            for _microbatch, microbatches in enumerate(microbatch_groups):
                 input_dict_mbs = []
                 label_mbs = []
                 for input_dict, labels in microbatches:

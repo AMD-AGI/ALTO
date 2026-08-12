@@ -15,12 +15,10 @@ from alto.components.m_adam import MAdamOptimizersContainer
 __all__ = [
     "gpt_oss_debugmodel",
     "gpt_oss_debugmodel_lpt",
-    "gpt_oss_debugmodel_madam",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_madam",
-    "gpt_oss_20b_madam_stable",
 ]
 
 
@@ -111,9 +109,20 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.debug.seed = 1234
     return config
 
+def gpt_oss_20b_pretrain_c4_megatron() -> Trainer.Config:
+    """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline)."""
+    config = gpt_oss_20b_pretrain()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-outputs"
+    config.dataloader.dataset_path = "/data/c4-train.en_6_text_document.idx"
+    config.validator.dataloader.dataset_path = "/data/c4-validation-91205-samples.en_text_document.idx"
+    config.checkpoint.initial_load_path = None      # fresh run: do NOT load any checkpoint
+    config.checkpoint.initial_load_in_hf = False
+    config.checkpoint.initial_load_in_hf_quantized = False
+    config.checkpoint.last_save_model_only = False   # save full ckpt at final step (model+optim+dataloader) so training can resume
+    return config
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
-    config = gpt_oss_20b_pretrain()
+    config = gpt_oss_20b_pretrain_c4_megatron()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
@@ -129,39 +138,8 @@ def gpt_oss_20b_madam() -> Trainer.Config:
     the usual LR scheduler; ``lr_e`` is the multiplicative (exponent) branch
     learning rate (tied to ``lr_m`` here via ``tie_e_to_m``).
     """
-    config = gpt_oss_20b_pretrain()
+    config = gpt_oss_20b_lpt()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-madam-outputs"
-    config.optimizer = MAdamOptimizersContainer.Config(
-        lr=1e-4,
-        lr_e=1e-4,
-        tie_e_to_m=True,
-        beta1=0.9,
-        beta2=0.95,
-        eps=1e-5,
-        weight_decay_m=0.1,
-    )
-    return config
-
-
-def gpt_oss_20b_madam_stable() -> Trainer.Config:
-    """``gpt_oss_20b_madam`` with a damped exponent branch.
-
-    Same additive branch, but the multiplicative (exponent) branch is turned
-    down to suppress the loss spikes seen when it runs as loud as the mantissa
-    branch: ``lr_e`` is lowered and ``de_step_cap`` tightened to 0.2 (max
-    per-step magnitude change ~2**0.2 ~= 1.15x instead of ~1.41x).
-    """
-    config = gpt_oss_20b_madam()
-    config.optimizer.lr_e = 3e-5
-    config.optimizer.de_step_cap = 0.2
-    return config
-
-
-def gpt_oss_debugmodel_madam() -> Trainer.Config:
-    """Debug-model smoke test for the custom ``m_adam`` optimizer (plain BF16,
-    no quantization). Fast to run for verifying the optimizer steps end-to-end.
-    """
-    config = gpt_oss_debugmodel()
     config.optimizer = MAdamOptimizersContainer.Config(
         lr=1e-4,
         lr_e=1e-4,

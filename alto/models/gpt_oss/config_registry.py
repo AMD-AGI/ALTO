@@ -17,6 +17,7 @@ __all__ = [
     "gpt_oss_debugmodel_lpt",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
+    "gpt_oss_20b_pretrain_c4_megatron",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_madam",
 ]
@@ -87,15 +88,15 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.optimizer.eps = 1e-5
     config.lr_scheduler.min_lr_factor = 0.1
     config.lr_scheduler.warmup_steps = 128
-    config.lr_scheduler.decay_ratio = 1 - 128 / config.training.steps
+    config.lr_scheduler.decay_ratio = 1 - 128 / 1200000
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
     config.dataloader.dataset = "megatron"
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
-    config.parallelism.expert_parallel_degree = 4
+    config.parallelism.expert_parallel_degree = 8
     config.parallelism.expert_tensor_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 4
+    config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
     config.checkpoint.interval = 1000
     config.checkpoint.keep_latest_k = 2
@@ -104,8 +105,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
     config.validator.freq = 768
     config.validator.steps = 64
-    config.activation_checkpoint.mode = "selective"
-    config.activation_checkpoint.selective_ac_option = "1"
+    config.activation_checkpoint.mode = "none"
+    # config.activation_checkpoint.selective_ac_option = "1"
     config.debug.seed = 1234
     return config
 

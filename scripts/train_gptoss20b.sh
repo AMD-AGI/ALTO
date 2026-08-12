@@ -65,13 +65,13 @@ HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
 ALTO_DIR="${ALTO_DIR:-$PWD}" # assume repo dir is pwd
 CONFIG="${CONFIG:-gpt_oss_20b_mxfp4_base}"
 
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-/shared_inference/alirezak/gptoss_chkpt/${USER}/${CONFIG}}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-/shared_inference/gptoss_chkpt/${USER}/${CONFIG}}"
 LOG_FILE_DEFAULT="${ALTO_DIR}/logs/${CONFIG}_$(date +%Y%m%d_%H%M%S).log"
 LOG_FILE="${LOG_FILE:-$LOG_FILE_DEFAULT}" # log fname based on time
 
 ### Other modifiable args
 MODULE="${MODULE:-gpt_oss}"
-TRAINING_STEPS="${TRAINING_STEPS:-17000}"
+TRAINING_STEPS="${TRAINING_STEPS:-1200000}"
 CONTAINER="${CONTAINER:-${CONFIG}_${RUN_ID}}" # container name (for user readability)
 
 # default Docker image from Han Wang

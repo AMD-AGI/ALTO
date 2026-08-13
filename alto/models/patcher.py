@@ -57,30 +57,26 @@ class ModelPatcher:
 
             @staticmethod
             def forward(ctx, x, scale, zero_point, args, g_idx, global_scale):
-                if getattr(args, "format", None) == "mx9":
-                    from alto.modifiers.quantization.mx import (
-                        BLOCK_SIZE,
-                        MX9_QUANT_BIT,
-                        mx9_fake_quantize,
-                    )
+                target_dtype = getattr(args, "format", None)
+                if target_dtype in ("mx6", "mx9"):
+                    # Dispatches to the REAL packed Triton kernel (quantize ->
+                    # bit-packed bytes -> dequantize), not the torch fake-quant
+                    # emulation -- this is the intentional, validated design
+                    # (commit 95b1114: LLaMA-3.2-1B wikitext loss 2.1141 == the
+                    # fake-quant path's 2.1140). Requires a CUDA tensor (Triton
+                    # kernel launch). num_bits / group_size are fixed by the
+                    # format rather than honoured, so they are validated here
+                    # instead of forwarded -- a recipe that disagrees with the
+                    # format would otherwise be silently ignored.
+                    from alto.kernels.mx import MX_QUANT_BIT, convert_to_mx, convert_from_mx
 
-                    return mx9_fake_quantize(
-                        x,
-                        block_size=(args.group_size or BLOCK_SIZE),
-                        quant_bit=(args.num_bits or MX9_QUANT_BIT),
-                    )
-                if getattr(args, "format", None) == "mx6":
-                    from alto.modifiers.quantization.mx import (
-                        BLOCK_SIZE,
-                        MX6_QUANT_BIT,
-                        mx6_fake_quantize,
-                    )
-
-                    return mx6_fake_quantize(
-                        x,
-                        block_size=(args.group_size or BLOCK_SIZE),
-                        quant_bit=(args.num_bits or MX6_QUANT_BIT),
-                    )
+                    assert args.group_size in (None, 16), \
+                        f"{target_dtype} packed kernel only supports group_size 16, got {args.group_size}"
+                    assert args.num_bits == MX_QUANT_BIT[target_dtype], \
+                        (f"{target_dtype} packed kernel is fixed at num_bits "
+                         f"{MX_QUANT_BIT[target_dtype]}, got {args.num_bits}")
+                    packed = convert_to_mx(x, target_dtype=target_dtype)
+                    return convert_from_mx(packed, target_dtype, x.dtype, x.shape)
                 return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod

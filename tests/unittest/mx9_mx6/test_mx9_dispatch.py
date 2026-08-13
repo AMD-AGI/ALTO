@@ -3,11 +3,16 @@
 # SPDX-License-Identifier: MIT
 """Tests for the MX9 dispatch wiring in ``ModelPatcher.patch_fake_quantize``.
 
-The MX9 kernel itself is covered by ``test_mx9_quantize.py``. This file tests the
-*wiring* one layer up: after ``patch_fake_quantize()`` replaces
+The MX9 kernel itself is covered by ``test_mx9_quantize.py`` (fake-quant
+emulation) and ``test_mx9_quantization.py`` (real packed kernel). This file
+tests the *wiring* one layer up: after ``patch_fake_quantize()`` replaces
 ``compressed_tensors...forward.fake_quantize``, a ``QuantizationArgs`` carrying
-``format == "mx9"`` must route to ``mx9_fake_quantize``, while plain int8 args
-(no ``format``) must fall through to the original implementation untouched.
+``format == "mx9"`` must route to the REAL packed Triton kernel
+(``convert_to_mx`` with ``target_dtype="mx9"``), NOT the ``mx9_fake_quantize``
+emulation -- this is the intentional, validated design (see commit
+``95b1114``: "feat: mx9: wire packed kernel into patcher and fix
+convert_from_mx9", validated end-to-end on LLaMA-3.2-1B). Plain int8 args (no
+``format``) must fall through to the original implementation untouched.
 
 Also checks that ``format_registry.inject_format_field()`` makes the ``format``
 field survive pydantic validation (otherwise the recipe value is silently
@@ -68,21 +73,31 @@ def test_format_field_defaults_none_for_plain_int8():
 # --------------------------------------------------------------------------- #
 # dispatch routing
 # --------------------------------------------------------------------------- #
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="mx9 dispatch launches the real Triton kernel")
 def test_mx9_args_dispatch_to_mx9_kernel():
-    """format == "mx9" must route fake_quantize to mx9_fake_quantize bit-exact."""
+    """format == "mx9" must route fake_quantize to the REAL packed kernel
+    (convert_to_mx9 -> convert_from_mx9 round trip) bit-exact. Requires CUDA
+    since the packed kernel launches a Triton kernel; NOT compared against
+    mx9_fake_quantize, which intentionally diverges at the rare demoted
+    +/-128 boundary (see test_mx9_quantization.py::
+    test_divergence_vs_mxpy_255clamp_is_tiny)."""
+    from alto.kernels.mx import convert_to_mx9, convert_from_mx9
+
     torch.manual_seed(0)
-    x = torch.randn(3, 40, dtype=torch.float32)
+    x = torch.randn(3, 40, dtype=torch.float32).cuda()
     args = _mx9_args()
 
     patched_out = forward_module.fake_quantize(
         x=x,
-        scale=torch.ones(1),
+        scale=torch.ones(1, device="cuda"),
         zero_point=None,
         args=args,
         g_idx=None,
         global_scale=None,
     )
-    expected = mx9_fake_quantize(x, block_size=BLOCK_SIZE)
+
+    packed = convert_to_mx9(x)
+    expected = convert_from_mx9(packed, x.dtype, x.shape)
 
     assert torch.equal(patched_out, expected)
 

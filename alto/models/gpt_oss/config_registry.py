@@ -507,7 +507,7 @@ def gpt_oss_20b_moe_pattern_obs() -> Trainer.Config:
     ],)
     return config
 
-
+# legacy dataset ingestion using un-tokenized C4
 def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
     """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline, no Megatron files required)."""
     config = gpt_oss_20b_pretrain()
@@ -523,6 +523,7 @@ def gpt_oss_20b_pretrain_c4() -> Trainer.Config:
     config.checkpoint.initial_load_in_hf_quantized = True
     return config
 
+# legacy dataset ingestion using un-tokenized C4
 def gpt_oss_20b_lpt_c4() -> Trainer.Config:
     config = gpt_oss_20b_pretrain_c4()
     config.dump_folder = "gpt_oss_20b-mi300-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-rank32-c4-outputs"

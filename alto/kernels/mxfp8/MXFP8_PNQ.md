@@ -1,5 +1,42 @@
 # MXFP8 Attention Pre-Normalization Quantization
 
+## 状态：阶段性封存（2026-08-14）
+
+PNQ 前向修复已完成：量化概率 `P̂` 同时用于 `P̂ @ V` 和归一化分母，`V = 1`
+不变量验证了这一点。
+
+但 PNQ 不能视为完整交付。当前 backward 从 PNQ LSE 重建
+`P / sum(P̂)`；这可作为 Q/K 路径的 straight-through estimator（STE）项，
+却不能直接用于 V 的梯度。由于前向实际计算的是：
+
+```text
+O = P̂ @ V / sum(P̂)
+```
+
+正确的 V 梯度必须使用前向真实权重：
+
+```text
+dV = (P̂ / sum(P̂))ᵀ @ dO
+```
+
+当前实现的 dV 路径使用的是：
+
+```text
+dV = (P / sum(P̂))ᵀ @ dO
+```
+
+因此 dV 与 PNQ 前向不一致，必须在恢复 PNQ 工作时修正。训练结果目前显示
+MXFP8 attention kernel 仍存在精度问题；先定位并修复该问题，再恢复 PNQ，避免
+同时修改两套数值语义而失去归因。
+
+### 恢复 PNQ 前的最小清单
+
+1. 先修复并验证 MXFP8 attention kernel 的基础精度问题。
+2. 修改 dV 路径，使其使用 `P̂ / sum(P̂)`；Q/K 的 dS 路径保持 STE 语义。
+3. 增加独立的 PyTorch fake-quant autograd oracle，分别校验 dQ、dK、dV，不能让
+   kernel 与 reference 复用同一反向公式。
+4. 补充 GPU kernel 的 biased-V、LSE 与 dropout（或显式拒绝 dropout）回归测试。
+
 ## 问题
 
 每个 online-softmax key tile 的概率 `P` 会被量化为 MXFP8 E4M3，再参与

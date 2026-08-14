@@ -30,6 +30,7 @@ class HadamardFactory:
     block_size: int = 32
     randomized: bool = True
     dtype: torch.dtype = torch.float32
+    transform_type: str = "default"
     seed: Optional[int] = None
     generator: torch.Generator = torch.Generator()
 
@@ -39,6 +40,7 @@ class HadamardFactory:
         block_size: Optional[int] = None,
         randomized: Optional[bool] = None,
         dtype: Optional[torch.dtype] = None,
+        transform_type: Optional[str] = None,
         seed: Optional[int] = None,
     ) -> None:
         """
@@ -55,6 +57,8 @@ class HadamardFactory:
             cls.randomized = randomized
         if dtype is not None:
             cls.dtype = dtype
+        if transform_type is not None:
+            cls.transform_type = transform_type
         if seed is not None:
             cls.seed = seed
             cls.generator.manual_seed(seed)
@@ -73,10 +77,27 @@ class HadamardFactory:
         :param device: Device to create the transform on
         :return: HadamardTransform instance
         """
+        if cls.transform_type == "default":
+            weight = cls._create_weight(device)
+            perm = cls._create_permutation(weight) if cls.randomized else None
+            return HadamardTransform(weight, perm)
+        elif cls.transform_type == "3rht":
+            w = cls._create_weight(device)
+            p = cls._create_permutation(w)
+            combined = w[p][:, p]
+            s = torch.tensor(w.size(0), dtype=torch.float64, device=w.device).sqrt()
 
-        weight = cls._create_weight(device)
-        perm = cls._create_permutation(weight) if cls.randomized else None
-        return HadamardTransform(weight, perm)
+            w = cls._create_weight(device)
+            p = cls._create_permutation(w)
+            combined = combined @ (w[p][:, p]) / s
+
+            w = cls._create_weight(device)
+            p = cls._create_permutation(w)
+            combined = combined @ (w[p][:, p]) / s
+
+            return HadamardTransform(combined, perm=None)
+        else:
+            raise NotImplementedError("transform_type options are: default and 3rht")
 
     @classmethod
     def _create_weight(

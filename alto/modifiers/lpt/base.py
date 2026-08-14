@@ -33,6 +33,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_2dblock_x: bool = False
     use_2dblock_w: bool = True
     use_hadamard: bool = False
+    hadamard_type: Literal["default", "3rht"] = "default"
     use_sr_grad: bool = False
     use_dge: bool = False
     full_precision_backward: bool = False
@@ -193,6 +194,9 @@ class LowPrecisionTrainingModifier(Modifier):
         return self._resolved_config
 
     def on_convert(self, model: Module, **kwargs) -> bool:
+        if self.use_hadamard and self.hadamard_type != "default":                                
+          from alto.kernels.hadamard_transform import HadamardFactory
+          HadamardFactory.configure(transform_type=self.hadamard_type)
         for scheme_obj, targets in self.resolved_config.items():
             tensor_cls = self._wrapper_cls_for_scheme(scheme_obj)
             scheme_name = getattr(self, "_scheme_tag", {}).get(scheme_obj, scheme_obj.precision)

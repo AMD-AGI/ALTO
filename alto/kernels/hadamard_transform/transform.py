@@ -33,6 +33,7 @@ class HadamardFactory:
     transform_type: str = "default"
     seed: Optional[int] = None
     generator: torch.Generator = torch.Generator()
+    _cached_transform: Optional['HadamardTransform'] = None
 
     @classmethod
     def configure(
@@ -64,6 +65,11 @@ class HadamardFactory:
             cls.generator.manual_seed(seed)
 
     @classmethod
+    def refresh(cls) -> None:
+        """Clear the cached transform so the next create_transform generates a fresh one."""
+        cls._cached_transform = None
+
+    @classmethod
     def create_transform(
         cls,
         device: torch.device,
@@ -77,27 +83,34 @@ class HadamardFactory:
         :param device: Device to create the transform on
         :return: HadamardTransform instance
         """
+        if cls._cached_transform is not None:
+            return cls._cached_transform
+
         if cls.transform_type == "default":
             weight = cls._create_weight(device)
             perm = cls._create_permutation(weight) if cls.randomized else None
-            return HadamardTransform(weight, perm)
+            t = HadamardTransform(weight, perm)
         elif cls.transform_type == "3rht":
+            n = cls.block_size
             w = cls._create_weight(device)
             p = cls._create_permutation(w)
             combined = w[p][:, p]
-            s = torch.tensor(w.size(0), dtype=torch.float64, device=w.device).sqrt()
 
             w = cls._create_weight(device)
             p = cls._create_permutation(w)
-            combined = combined @ (w[p][:, p]) / s
+            combined = combined @ (w[p][:, p])
 
             w = cls._create_weight(device)
             p = cls._create_permutation(w)
-            combined = combined @ (w[p][:, p]) / s
+            combined = combined @ (w[p][:, p])
 
-            return HadamardTransform(combined, perm=None)
+            combined = combined / n
+            t = HadamardTransform(combined, perm=None)
         else:
             raise NotImplementedError("transform_type options are: default and 3rht")
+
+        cls._cached_transform = t
+        return t
 
     @classmethod
     def _create_weight(
@@ -129,9 +142,13 @@ class HadamardTransform:
         weight: Tensor,
         perm: Optional[Tensor],
     ):
-        self.weight = weight
-        self.perm = perm
-        self._scale = torch.tensor(weight.size(0), dtype=torch.float64, device=weight.device).sqrt()
+        scale = weight.size(0) ** 0.5
+        if perm is not None:
+            weight = weight[perm][:, perm]
+        if isinstance(weight, DTensor):
+            assert weight.placements[0] == Replicate()
+            weight = weight.to_local()
+        self.weight = (weight / scale).contiguous()
 
     def __call__(self, value: Tensor, inverse: bool = False, left_mul: bool = False) -> Tensor:
         """
@@ -145,19 +162,11 @@ class HadamardTransform:
         """
         weight = self.weight
 
-        if self.perm is not None:
-            weight = weight[self.perm][:, self.perm]
-
         if inverse:
             weight = weight.T
 
-        if isinstance(weight, DTensor):
-            assert weight.placements[0] == Replicate()
-            weight = weight.to_local()
-
+        w = weight.to(device=value.device, dtype=value.dtype)
         if left_mul:
-            return (multihead_matmul(weight.to(device=value.device), value.to(dtype=weight.dtype)) / self._scale).to(
-                value.dtype)
+            return multihead_matmul(w, value)
         else:
-            return (multihead_matmul(value.to(dtype=weight.dtype), weight.to(device=value.device)) / self._scale).to(
-                value.dtype)
+            return multihead_matmul(value, w)

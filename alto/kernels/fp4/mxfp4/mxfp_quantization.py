@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from typing import Tuple, Optional
+from functools import lru_cache
 import torch
 from torch.library import triton_op, wrap_triton
 import triton
@@ -20,6 +21,7 @@ _generate_philox_randval_2x = make_generate_philox_randval_2x()
 _quantize_e2m1 = make_quantize_e2m1()
 
 
+@lru_cache(maxsize=1)
 def is_cdna4():
     target = triton.runtime.driver.active.get_current_target()
     return target is not None and target.backend == "hip" and target.arch == "gfx950"

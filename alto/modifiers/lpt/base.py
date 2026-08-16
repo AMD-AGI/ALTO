@@ -245,6 +245,10 @@ class LowPrecisionTrainingModifier(Modifier):
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
+        if self.use_hadamard:
+            from alto.kernels.hadamard_transform import HadamardFactory
+            HadamardFactory.refresh()
+
         trainer = kwargs.get("trainer", None)
 
         if self.deosc_step > 0:

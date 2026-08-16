@@ -22,6 +22,8 @@ from safetensors import safe_open
 
 REPO_PATH = Path(__file__).parent / "hadamards.safetensors"
 
+_HADAMARD_CACHE: dict[tuple[int, torch.dtype, torch.device], torch.Tensor] = {}
+
 __all__ = ["random_hadamard_matrix", "deterministic_hadamard_matrix", "is_pow2"]
 
 # note that hadamard matrix multiplication can be accelerated using a library such as
@@ -108,21 +110,26 @@ def _fetch_hadamard_divisor(
     be of of size `k` such that `n / k` is a power of two. Return None if no such
     matrix exists.
 
-    Note: This function reopens the safetensors file every time it is called.
-    This is technically inefficient, but a very small runtime cost and simpler
-    than forcing callers to manage the file open context
+    Results are cached by (n, dtype, device) so the safetensors file is only
+    opened on the first call for each combination.
 
     :param n: size of known hadamard matrix
     :param dtype: data type to move fetched hadamard to
     :param device: device to move fetched hadamard to
     :return: a known hadamard matrix of size `n` if one exists, else None
     """
+    cache_key = (n, dtype, device)
+    if cache_key in _HADAMARD_CACHE:
+        return _HADAMARD_CACHE[cache_key]
+
     open_device = torch.device("cpu") if device.type == "meta" else device
     with safe_open(file_path, framework="pt", device=str(open_device)) as file:
         divisors = sorted((int(key) for key in file.keys()), reverse=True)
         for divisor in divisors:
             if n % divisor == 0 and is_pow2(n // divisor):
-                return file.get_tensor(str(divisor)).to(dtype=dtype, device=device)
+                result = file.get_tensor(str(divisor)).to(dtype=dtype, device=device)
+                _HADAMARD_CACHE[cache_key] = result
+                return result
 
     return None
 
@@ -140,7 +147,7 @@ def _matmul_hadU(X: torch.Tensor) -> torch.Tensor:
 
     # Reshape diag matrix with randomized -1/+1
     input = X.clone().view(-1, size, 1)
-    output = input.clone()
+    output = torch.empty_like(input)
     while input.shape[1] > K:
         input = input.view(input.shape[0], input.shape[1] // 2, 2, input.shape[2])
         output = output.view(input.shape)

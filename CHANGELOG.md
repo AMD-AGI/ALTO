@@ -1,12 +1,14 @@
 # Changelog
 
-## v0.0.2 [dev]
+## v0.0.2
 
 - Changed
     - **[BREAKING CHANGE]** rewind validation dataloader each step
 - Added
     - Weight De-Oscillation for FP4
     - AMDFP4 (ue5m3 scales) support
+    - MX6/MX9 quantization
+    - MXFP8 Attention
 - Fixed
     - NVFP4 triton kernels without `TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1`
 

@@ -5,6 +5,8 @@
 - Changed
   - Mixed precision is now handled by FSDP even if world_size=1.
   - Dropped Instella-3B model config.
+  - Use VarlenAttn instead of FlexAttn for GPT-OSS models.
+  - Position ids are always populated by dataloader.
 
 
 ## v0.0.2 [dev]
@@ -14,6 +16,8 @@
 - Added
     - Weight De-Oscillation for FP4
     - AMDFP4 (ue5m3 scales) support
+    - MX6/MX9 quantization
+    - MXFP8 Attention
 - Fixed
     - NVFP4 triton kernels without `TRITON_ALLOW_NON_CONSTEXPR_GLOBALS=1`
 

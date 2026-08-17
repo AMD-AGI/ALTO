@@ -22,12 +22,12 @@ __all__ = [
 
 def gpt_oss_debugmodel() -> Trainer.Config:
     config = gpt_oss_debugmodel_orig()
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 10
     config.training.local_batch_size = 4
     config.training.global_batch_size = 16
     config.training.seq_len = 2048
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 
@@ -44,7 +44,7 @@ def gpt_oss_20b() -> Trainer.Config:
     config = gpt_oss_20b_orig()
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
     config.dump_folder = "gpt_oss_20b-outputs"
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.seq_len = 8192
@@ -52,7 +52,6 @@ def gpt_oss_20b() -> Trainer.Config:
     config.metrics.enable_tensorboard = True
     config.dataloader.dataset = "c4_test"
     config.parallelism.expert_parallel_degree = 1
-    config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
     config.checkpoint.initial_load_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
@@ -63,7 +62,7 @@ def gpt_oss_20b() -> Trainer.Config:
     config.validator.dataloader.dataset = "wikitext_test"
     config.validator.freq = 10
     config.validator.steps = 10
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 
@@ -72,16 +71,14 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config = gpt_oss_20b_orig()
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
     config.dump_folder = "gpt_oss_20b-pretrain-subset-lr4e-4-outputs"
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 1200000
     config.training.local_batch_size = 1
     config.training.global_batch_size = 16
     config.training.seq_len = 8192
-    config.optimizer.lr = 4e-4
-    config.optimizer.weight_decay = 0.1
-    config.optimizer.beta1 = 0.9
-    config.optimizer.beta2 = 0.95
-    config.optimizer.eps = 1e-5
+    config.optimizer.param_groups[0].optimizer_kwargs["lr"] = 4e-4
+    config.optimizer.param_groups[0].optimizer_kwargs["betas"] = (0.9, 0.95)
+    config.optimizer.param_groups[0].optimizer_kwargs["eps"] = 1e-5
     config.lr_scheduler.min_lr_factor = 0.1
     config.lr_scheduler.warmup_steps = 128
     config.lr_scheduler.decay_ratio = 1 - 128 / config.training.steps
@@ -91,7 +88,6 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.dataloader.dataset = "megatron"
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 8
-    config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
     config.checkpoint.enable = True
     config.checkpoint.interval = 1000
@@ -101,14 +97,14 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.validator.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-validation-91205-samples.en_text_document.idx"
     config.validator.freq = 768
     config.validator.steps = 64
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-refactor-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)

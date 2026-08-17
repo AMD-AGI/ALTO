@@ -27,8 +27,9 @@ from .utils import (
 @pytest.mark.parametrize("use_sr", [False, True])
 @pytest.mark.parametrize("use_asm", [False, True])
 @pytest.mark.parametrize("clip_mode", ["dynamic"])
+@pytest.mark.parametrize("use_uos", [False, True])
 @pytest.mark.parametrize("compile", [False])
-def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, use_asm, clip_mode, compile):
+def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, use_asm, clip_mode, use_uos, compile):
     if use_asm and not is_cdna4():
         pytest.skip("ASM mode is only available on CDNA4 hardwares.")
 
@@ -45,6 +46,7 @@ def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, u
         axis=axis,
         is_2d_block=is_2d_block,
         clip_mode=clip_mode,
+        use_uos=use_uos,
     )
     x_dq_ref = convert_from_mxfp4_pytorch(
         data_lp_ref,
@@ -62,6 +64,7 @@ def test_mxfp_quantization(tensor_shape, axis, is_2d_block, data_type, use_sr, u
         use_sr=use_sr,
         use_asm=use_asm,
         clip_mode=clip_mode,
+        use_uos=use_uos,
     )
     if clip_mode == "dynamic" and data_type == torch.bfloat16:
         pass

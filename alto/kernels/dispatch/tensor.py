@@ -152,6 +152,9 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
             flatten_spec["config"],
         )
 
+    def untyped_storage(self):
+        return self._data.untyped_storage()
+
     # fsdp hooks based on https://github.com/pytorch/pytorch/blob/20e40492b046b9287726d3ec656117e4dc38f0e2/test/distributed/_composable/fsdp/test_fully_shard_extensions.py#L81
     def fsdp_pre_all_gather(
         self,
@@ -256,6 +259,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 use_hadamard=config.use_hadamard,
                 clip_mode=config.clip_mode,
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                use_uos=config.use_uos,
             )
 
         # linear op override
@@ -287,6 +291,7 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 clip_mode=config.clip_mode,
                 use_hadamard=config.use_hadamard,
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
+                use_uos=config.use_uos,
             )
             if bias is not None:
                 Y = Y + bias

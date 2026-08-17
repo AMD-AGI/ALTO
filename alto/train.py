@@ -109,9 +109,9 @@ class Trainer(ForgeTrainer):
                 logger.info("data replay buffer disabled")
                 self.enable_data_cache = False
 
-    def cache_input(self, microbatches: list[tuple[dict[str, torch.Tensor], torch.Tensor]]):
+    def cache_input(self, microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]]):
         if self.enable_data_cache:
-            self._input_cache = microbatches
+            self._input_cache = microbatch_groups
 
     def cache_output(self, output: torch.Tensor):
         if self.enable_data_cache:
@@ -139,49 +139,65 @@ class Trainer(ForgeTrainer):
         pp_schedule._loss_fn = loss_fn
         pp_schedule._has_backward = has_backward
 
+    def pp_forward_step(
+        self,
+        *,
+        input_dict_mbs: list[dict[str, torch.Tensor]],
+        label_mbs: list[torch.Tensor],
+        global_valid_tokens: float,
+    ) -> torch.Tensor:
+        arg_mbs: list[tuple[torch.Tensor, ...]] = []
+        kwarg_mbs: list[dict[str, Any]] = []
+        target_mbs = None
+        losses = None
+        for input_dict, labels in zip(input_dict_mbs, label_mbs, strict=True):
+            inputs, labels, extra_kwargs = self.post_dataloading_process(
+                input_dict, labels
+            )
+            if self.pp_has_first_stage:
+                arg_mbs.append((inputs,))
+            kwarg_mbs.append(extra_kwargs)
+
+        loss_kwargs = {"global_valid_tokens": global_valid_tokens}
+        with self.train_context():
+            with self.pp_no_loss_function(self.pp_schedule):
+                result = self.pp_schedule.step(
+                    arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                    kwarg_mbs=kwarg_mbs,
+                    target_mbs=target_mbs,
+                    losses=losses,
+                    loss_kwargs=loss_kwargs,
+                    return_outputs=self.pp_has_last_stage,
+                )
+
+        return result if self.pp_has_last_stage else None
+
     def forward_step(
         self,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
+        global_valid_tokens: float,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, _, extra_inputs, extra_kwargs = self.post_dataloading_process(input_dict, labels)
-
         if parallel_dims.pp_enabled:
-            targets, losses = None, None
-            result = None
-            with self.train_context():
-                with self.pp_no_loss_function(self.pp_schedule):
-                    if self.pp_has_first_stage:
-                        self.pp_schedule.eval(
-                            inputs,
-                            **extra_inputs,
-                            **extra_kwargs,
-                            target=targets,
-                            losses=losses,
-                        )
-                    elif self.pp_has_last_stage:
-                        result = self.pp_schedule.eval(
-                            **extra_kwargs,
-                            target=targets,
-                            losses=losses,
-                            return_outputs=True,
-                        )
-                    else:
-                        self.pp_schedule.eval(
-                            **extra_kwargs,
-                            target=targets,
-                            losses=losses,
-                        )
-        else:
-            # Non-PP forward / backward
-            with self.train_context():
-                assert len(model_parts) == 1
-                with self.maybe_enable_amp:
-                    result = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+            assert isinstance(input_dict, list)
+            assert isinstance(labels, list)
+            return self.pp_forward_backward_step(
+                input_dict_mbs=input_dict,
+                label_mbs=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
+
+        assert isinstance(input_dict, dict)
+        assert isinstance(labels, torch.Tensor)
+        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+
+        # Non-PP forward / backward
+        with self.train_context():
+            assert len(model_parts) == 1
+            result = model_parts[0](inputs, **extra_kwargs)
 
         return result
 
@@ -198,14 +214,19 @@ class Trainer(ForgeTrainer):
         assert not parallel_dims.dp_cp_enabled, "DP_CP is not supported in post-training"
 
         # Collect all microbatches on CPU and count total valid tokens
-        microbatches = []
+        # All groups form one optimizer step; each group feeds one fwd-bwd call.
+        microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
-        for _microbatch in range(self.gradient_accumulation_steps):
-            input_dict, labels = next(data_iterator)
-            local_valid_tokens += (labels != IGNORE_INDEX).sum()
-            microbatches.append((input_dict, labels))
+        for _ in range(self.gradient_accumulation_steps):
+            microbatches = []
+            for _ in range(self.num_pipeline_parallel_microbatches):
+                with sl.log_trace_span("fetching_batch"):
+                    input_dict, labels = next(data_iterator)
+                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                microbatches.append((input_dict, labels))
+            microbatch_groups.append(microbatches)
 
-        self.cache_input(microbatches)
+        self.cache_input(microbatch_groups)
 
         # All-reduce to get global token count across DP ranks
         # Move to GPU for distributed communication
@@ -218,13 +239,29 @@ class Trainer(ForgeTrainer):
 
         # Process each microbatch: move to GPU, forward/backward, then free
         with torch.no_grad():
-            for _microbatch, (input_dict, labels) in enumerate(microbatches):
-                for k, v in input_dict.items():
-                    if isinstance(v, torch.Tensor):
-                        input_dict[k] = v.to(self.device)
-                labels = labels.to(self.device)
+            for _microbatch, microbatches in enumerate(microbatch_groups):
+                input_dict_mbs = []
+                label_mbs = []
+                for input_dict, labels in microbatches:
+                    for key, value in input_dict.items():
+                        if isinstance(value, torch.Tensor):
+                            input_dict[key] = value.to(self.device)
+                    input_dict_mbs.append(input_dict)
+                    label_mbs.append(labels.to(self.device))
 
-                result = self.forward_step(input_dict, labels, global_valid_tokens)
+                if parallel_dims.pp_enabled:
+                    fwd_bwd_input_dict = input_dict_mbs
+                    fwd_bwd_labels = label_mbs
+                else:
+                    assert len(input_dict_mbs) == len(label_mbs) == 1
+                    fwd_bwd_input_dict = input_dict_mbs[0]
+                    fwd_bwd_labels = label_mbs[0]
+                
+                result = self.forward_step(
+                    input_dict=fwd_bwd_input_dict,
+                    labels=fwd_bwd_labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
                 self.cache_output(result.detach().cpu())
 
                 # log metrics

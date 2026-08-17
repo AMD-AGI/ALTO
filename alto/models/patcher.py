@@ -97,14 +97,14 @@ class ModelPatcher:
 
     @classmethod
     def patch_apply_rotary_emb_complex(cls):
-        from torchtitan.models.common import rope, attention
-        original_apply_rotary_emb_complex = rope.apply_rotary_emb_complex
+        from torchtitan.models.common.rope import ComplexRoPE
+        original_apply_rotary_emb_complex = ComplexRoPE.apply_rotary_emb
 
         def apply_rotary_emb_complex(
+            cls,
             xq: torch.Tensor,
             xk: torch.Tensor,
-            freqs_cis: torch.Tensor,
-            positions: torch.Tensor | None = None,
+            rope_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             head_dim = xq.shape[-1]
             xq = xq.reshape(
@@ -123,8 +123,6 @@ class ModelPatcher:
                 *xk.shape[:-1],
                 head_dim,
             ).contiguous()
-            return original_apply_rotary_emb_complex(xq, xk, freqs_cis, positions)
+            return original_apply_rotary_emb_complex(xq, xk, rope_cache)
 
-        rope.apply_rotary_emb_complex = apply_rotary_emb_complex
-        attention.apply_rotary_emb_complex = apply_rotary_emb_complex
-        patch("torchtitan.models.common.rope.apply_rotary_emb_complex", apply_rotary_emb_complex).__enter__()
+        ComplexRoPE.apply_rotary_emb = classmethod(apply_rotary_emb_complex)

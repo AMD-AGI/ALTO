@@ -11,7 +11,7 @@
 # Subclasses override _process_block() for algorithm-specific per-block logic.
 
 import gc
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union, TYPE_CHECKING
 
 import torch
 import tqdm
@@ -28,6 +28,9 @@ from alto.modifiers import Modifier
 from alto.modifiers.quantization.mixin import QuantizationMixin
 from alto.modifiers.quantization.calibration import update_weight_zp_scale
 from alto.utils.pytorch.module import get_layers
+
+if TYPE_CHECKING:
+    from torchtitan.protocols.model import BaseModel
 
 __all__ = ["QuantizationModifier"]
 
@@ -70,11 +73,6 @@ class QuantizationModifier(Modifier, QuantizationMixin):
     # ---- lifecycle ----------------------------------------------------
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
-        if not QuantizationMixin.has_config(self):
-            raise ValueError("QuantizationModifier requires that quantization fields be specified")
-        for m in model_parts:
-            QuantizationMixin.initialize_quantization(self, m)
-
         if self.sequential:
             self._build_sequential_blocks(model_parts)
         return True
@@ -110,6 +108,25 @@ class QuantizationModifier(Modifier, QuantizationMixin):
         return True
 
     def on_convert(self, model: Module, **kwargs) -> bool:
+        if not QuantizationMixin.has_config(self):
+            raise ValueError("QuantizationModifier requires that quantization fields be specified")
+        # Note: qparams will be registered in the initialize_quantization method,
+        #       so it has to be done before applying parallelism
+        QuantizationMixin.initialize_quantization(self, model)
+        
+        # patch param_init dict because the qparams are registered on meta device
+        # and need to be initialized after to_empty copy.
+        for mod_name, mod in model.named_modules():
+            qscheme = getattr(mod, "quantization_scheme", None)
+            if qscheme is not None:
+                for pname, p in mod.named_parameters():
+                    if pname.endswith("scale"):
+                        mod._param_init[pname] = torch.nn.init.ones_
+                    elif pname.endswith("zero_point"):
+                        mod._param_init[pname] = torch.nn.init.zeros_
+        return True
+
+    def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         return True
 
     # ---- sequential loop (template) -----------------------------------

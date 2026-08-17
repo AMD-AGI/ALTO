@@ -1,23 +1,66 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
 # SPDX-License-Identifier: MIT
-
+from dataclasses import dataclass
+from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.protocols.module import Module
 
-class DecomposedLinear(nn.Module):
-    def __init__(self, in_features, out_features, bias=True, lora_rank=32):
-        super(DecomposedLinear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
+class DecomposedLinear(Module):
+    
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        in_features: int
+        out_features: int
+        bias: bool = False
+        lora_rank: int = 32
+        
+    _EXTRA_INIT = {
+        "u": partial(nn.init.normal_, std=0.02),
+        "v": nn.init.zeros_,
+        "sigma": nn.init.ones_,
+    }
 
-        self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        self.bias = nn.Parameter(torch.empty(out_features)) if bias else None
-        self.u = nn.Parameter(torch.empty(lora_rank, out_features))  # transposed
-        self.v = nn.Parameter(torch.empty(in_features, lora_rank))
-        self.sigma = nn.Parameter(torch.empty(lora_rank))
+    def __init__(self, config: Config):
+        super().__init__()
+        self.in_features = config.in_features
+        self.out_features = config.out_features
+
+        self.weight = nn.Parameter(torch.empty(self.out_features, self.in_features))
+        self.bias = nn.Parameter(torch.empty(self.out_features)) if config.bias else None
+        self.u = nn.Parameter(torch.empty(config.lora_rank, self.out_features))  # transposed
+        self.v = nn.Parameter(torch.empty(self.in_features, config.lora_rank))
+        self.sigma = nn.Parameter(torch.empty(config.lora_rank))
+
+    @classmethod
+    def from_linear(cls, linear: nn.Linear, lora_rank: int = 32) -> "DecomposedLinear":
+        config = cls.Config(
+            in_features=linear.in_features,
+            out_features=linear.out_features,
+            bias=linear.bias is not None,
+            lora_rank=lora_rank,
+        )
+        module = cls(config).to(device=linear.weight.device, dtype=linear.weight.dtype)
+
+        # Meta tensors cannot be copied-from; keep original params and rely on later init.
+        if linear.weight.is_meta:
+            module.weight = linear.weight
+            module.bias = linear.bias
+        else:
+            module.weight.data.copy_(linear.weight.data)
+            if linear.bias is not None:
+                module.bias.data.copy_(linear.bias.data)
+
+        # Initialize LoRA parameters (matches the previous init_lora_weights defaults)
+        if not module.u.is_meta:
+            nn.init.normal_(module.u, mean=0.0, std=0.02)
+            nn.init.zeros_(module.v)
+            nn.init.ones_(module.sigma)
+
+        return module
 
     def forward(self, input):
         lora_update = (input @ self.v) * self.sigma
@@ -25,20 +68,3 @@ class DecomposedLinear(nn.Module):
         if self.bias is not None:
             y += self.bias
         return y
-
-    @classmethod
-    def from_linear(cls, linear: nn.Linear, lora_rank: int = 32):
-        new_layer = cls(linear.in_features, linear.out_features, linear.bias is not None, lora_rank)
-        new_layer.weight = linear.weight
-        new_layer.bias = linear.bias
-        device = linear.weight.device
-        dtype = linear.weight.dtype
-        new_layer.u.data = new_layer.u.data.to(device=device, dtype=dtype)
-        new_layer.v.data = new_layer.v.data.to(device=device, dtype=dtype)
-        new_layer.sigma.data = new_layer.sigma.data.to(device=device, dtype=dtype)
-        return new_layer
-    
-    def init_lora_weights(self, init_std: float = 0.02):
-        nn.init.normal_(self.u, mean=0.0, std=init_std)
-        nn.init.zeros_(self.v)
-        nn.init.ones_(self.sigma)

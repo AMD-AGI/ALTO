@@ -245,7 +245,13 @@ def _kernel_mxfp4_grouped_gemm_backward_dw(
     stride_asm,
     stride_ask,
     # Matrix dimensions
-    M_TOTAL,  # Total M dimension
+    # constexpr: M_TOTAL is passed as a Python int (expert_indices.shape[0]) and
+    # is used to derive PACKED_M/Ms, which are declared tl.constexpr below. On the
+    # CDNA4 (gfx950) Triton backend a non-constexpr M_TOTAL stays a runtime tensor,
+    # so PACKED_M/Ms become int32[] tensors and tl.minimum() fails to compile
+    # ("cannot convert int32[] to tensor"). CDNA3 tolerated it; making it constexpr
+    # fixes CDNA4 and is a no-op on CDNA3 (value is already compile-time known).
+    M_TOTAL: tl.constexpr,  # Total M dimension
     N: tl.constexpr,  # N dimension
     K: tl.constexpr,  # K dimension
     # Number of experts
@@ -614,6 +620,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
         use_sr_grad=False,
         use_dge=False,
         clip_mode=False,
+        blockscale_selection="default",
         use_macro_block_scaling=False,
         hadamard_transform: Optional[HadamardTransform] = None,
     ):
@@ -641,11 +648,13 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             inputs_scaled,
             axis=-1,
             is_2d_block=use_2dblock_x,
+            blockscale_selection=blockscale_selection,
         )
         expert_weights_mxfp4, expert_weight_scales = torch.ops.torchtitan.convert_to_mxfp4(
             expert_weights_scaled,
             axis=quant_axis_w,
             is_2d_block=use_2dblock_w,
+            blockscale_selection=blockscale_selection,
         )
 
         if is_cdna4():
@@ -697,6 +706,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 expert_weights_scaled,
                 axis=requant_axis_w,
                 is_2d_block=False,
+                blockscale_selection=blockscale_selection,
             )
             if not is_cdna4():
                 w_dq = torch.ops.torchtitan.convert_from_mxfp4(
@@ -724,6 +734,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 axis=0,
                 is_2d_block=False,
                 clip_mode=clip_mode,
+                blockscale_selection=blockscale_selection,
             )
             if not is_cdna4():
                 x_dq = torch.ops.torchtitan.convert_from_mxfp4(
@@ -751,6 +762,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
         ctx.use_dge = use_dge
         ctx.hadamard_transform = hadamard_transform
         ctx.clip_mode = clip_mode
+        ctx.blockscale_selection = blockscale_selection
         ctx.use_macro_block_scaling = use_macro_block_scaling
 
         return res
@@ -785,6 +797,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 axis=-1,
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=True,
+                blockscale_selection=ctx.blockscale_selection,
             )
             grad_output_mxfp4_m = grad_output_mxfp4
             grad_output_scales_m = grad_output_scales
@@ -812,6 +825,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 axis=-1,
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=False,
+                blockscale_selection=ctx.blockscale_selection,
             )
             if ctx.hadamard_transform is not None:
                 grad_output = ctx.hadamard_transform(grad_output, left_mul=True)
@@ -826,6 +840,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 use_sr=ctx.use_sr_grad,
                 is_2d_block=False,
                 clip_mode=ctx.clip_mode,
+                blockscale_selection=ctx.blockscale_selection,
             )
 
             if not is_cdna4():
@@ -918,7 +933,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
-        return grad_inputs, grad_weights, None, None, None, None, None, None, None, None, None
+        return grad_inputs, grad_weights, None, None, None, None, None, None, None, None, None, None
 
 
 def mxfp4_grouped_gemm(
@@ -933,6 +948,7 @@ def mxfp4_grouped_gemm(
     use_dge: bool = False,
     use_hadamard: bool = False,
     clip_mode: str = "none",
+    blockscale_selection: str = "default",
     use_macro_block_scaling: bool = False,
 ) -> torch.Tensor:
     """
@@ -973,6 +989,7 @@ def mxfp4_grouped_gemm(
         use_sr_grad,
         use_dge,
         clip_mode,
+        blockscale_selection,
         use_macro_block_scaling,
         hadamard_transform,
     )

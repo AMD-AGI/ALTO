@@ -27,12 +27,13 @@ def is_cdna4():
 
 @triton.jit
 def _calculate_scales(
-    x,
+    x, # raw input dtype, not e2m1 yet. likely fp16 or bf16?
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
     USE_DYNAMIC_CLIP: tl.constexpr = False,
+    SCALE_SELECTION: tl.constexpr = "default",
 ):
     if x.type.element_ty == tl.float32:
         hp_int_dtype = tl.int32
@@ -44,39 +45,92 @@ def _calculate_scales(
         hp_ebits = 8
     mbits = 1
     sbits = 1
-    target_max_pow2 = 2
+    target_max_pow2 = 2 # maximum exponent value ( exp^{target_max_pow2} )
 
+    # Reduce each quantization block to its running stats. The 2D and 1D cases
+    # differ only in how many intra-block axes we reduce over; the downstream
+    # math is shared.
     NEW_BLOCK_N: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
     if IS_2D_BLOCK:
         NEW_BLOCK_M: tl.constexpr = BLOCK_M // QUANT_BLOCK_SIZE
         x = x.reshape(NEW_BLOCK_M, QUANT_BLOCK_SIZE, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
+        block_numel = QUANT_BLOCK_SIZE * QUANT_BLOCK_SIZE
         if USE_DYNAMIC_CLIP:
-            mean_squared = tl.sum(tl.sum(x * x, axis=-1), axis=-2) / (QUANT_BLOCK_SIZE * QUANT_BLOCK_SIZE)
-            mean = tl.sum(tl.sum(x, axis=-1), axis=-2) / (QUANT_BLOCK_SIZE * QUANT_BLOCK_SIZE)
-            std = tl.sqrt(mean_squared - mean * mean)
-            max_abs = (2.92247856 / 6.0) * std + 1e-8
-            target_max_pow2 = 0
+            sum_x = tl.sum(tl.sum(x, axis=-1), axis=-2)
+            sum_sq = tl.sum(tl.sum(x * x, axis=-1), axis=-2)
         else:
-            max_abs = tl.max(tl.abs(x), axis=-1)
-            max_abs = tl.max(max_abs, axis=-2)
+            max_abs = tl.max(tl.max(tl.abs(x), axis=-1), axis=-2)
     else:
         x = x.reshape(BLOCK_M, NEW_BLOCK_N, QUANT_BLOCK_SIZE)
+        block_numel = QUANT_BLOCK_SIZE
         if USE_DYNAMIC_CLIP:
-            mean_squared = tl.sum(x * x, axis=-1) / QUANT_BLOCK_SIZE
-            mean = tl.sum(x, axis=-1) / QUANT_BLOCK_SIZE
-            std = tl.sqrt(mean_squared - mean * mean)
-            max_abs = (2.92247856 / 6.0) * std + 1e-8
-            target_max_pow2 = 0
+            sum_x = tl.sum(x, axis=-1)
+            sum_sq = tl.sum(x * x, axis=-1)
         else:
             max_abs = tl.max(tl.abs(x), axis=-1)
-    max_abs = max_abs.to(x.type.element_ty)
 
-    # round even (adaptive)
-    max_abs = max_abs.to(hp_int_dtype, bitcast=True)
-    val_to_add = 1 << (hp_mbits - mbits - 1)
-    mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
-    max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
-    scales = max_abs - target_max_pow2
+    if USE_DYNAMIC_CLIP:
+        # Estimate absmax from the block's std instead of its true max.
+        mean = sum_x / block_numel
+        std = tl.sqrt(sum_sq / block_numel - mean * mean)
+        max_abs = (2.92247856 / 6.0) * std + 1e-8
+        target_max_pow2 = 0
+
+    # Each branch casts max_abs to the width it needs: the midmax path promotes
+    # to FP32 for exponent-field surgery, while round-even bitcasts in the input's
+    # native precision. Casting to element_ty up here would needlessly truncate
+    # the FP32 dynamic-clip estimate before midmax re-widens it.
+    if SCALE_SELECTION == "midmax-legacy":
+        # Pick the scale from absmax's FP32 exponent, then apply E2M1 "midmax"
+        # rounding: normalize absmax into [2^target_max_pow2, 2^(target_max_pow2+1))
+        # by overwriting its exponent field, and bump the scale by 1 if the result
+        # exceeds midmax = 7.0 (the midpoint between E2M1's maxfloat 6.0 and 8.0).
+        FP32_MBITS = 23
+        FP32_BIAS = 127
+        FP32_MANT_MASK = 0x7FFFFF
+        FP32_EXP_MAX = 0xFF  # exponent field of NaN/Inf
+        MIDMAX = 7.0
+
+        # collect exponent (in FP32) from max_abs
+        max_abs_bits = max_abs.to(tl.float32).to(tl.int32, bitcast=True)
+        f32_exp = (max_abs_bits >> FP32_MBITS) & FP32_EXP_MAX
+        # NaN/Inf have exponent 0xFF; cap to 0xFE so the scale stays bounded.
+        f32_exp = tl.where(f32_exp >= FP32_EXP_MAX, FP32_EXP_MAX - 1, f32_exp)
+
+        scales = f32_exp - target_max_pow2
+        amax_scaled_bits = (max_abs_bits & FP32_MANT_MASK) | ((FP32_BIAS + target_max_pow2) << FP32_MBITS)
+        amax_scaled = amax_scaled_bits.to(tl.float32, bitcast=True)
+
+        scales = scales + (amax_scaled > MIDMAX).to(tl.int32)
+    elif SCALE_SELECTION == "uos6":
+        max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
+        val_to_add = 1 << (hp_mbits - mbits)  # 0x00400000 for fp32, 0x0040 for bf16
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
+        # apply carry on mantissa, collect only the carried exponent
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2 # e8m0 po2 exponent, so applying po2 arithmetic
+    elif SCALE_SELECTION == "uos":
+        # "default": round even (adaptive), incoming max_abs is in FP32
+        max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
+        val_to_add = 3 << (hp_mbits - mbits - 3) # 0x00180000 for fp32, 0x0018 for bf16
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
+        # apply carry on mantissa, collect only the carried exponent
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2 # e8m0 po2 exponent, so applying po2 arithmetic
+    else:
+        # This is CHECK7
+        # "default": round even (adaptive), incoming max_abs is in FP32
+        max_abs = max_abs.to(x.type.element_ty).to(hp_int_dtype, bitcast=True)
+        # with rounding you apply value_to_add on mantissa, 
+        # i.e. 123.2 + 0.5 --> no carry to 124
+        # value_to_add is 0.5 here but below, is actually 0.25
+        # so anything <0.25 away from carry will be carried
+        # 7 in 
+        val_to_add = 1 << (hp_mbits - mbits - 1)  # 0x00200000 for fp32, 0x0020 for bf16
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits 
+        # apply carry on mantissa, collect only the carried exponent
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2 # e8m0 po2 exponent, so applying po2 arithmetic
 
     # Today, 2**-127 returns 0 in compile+inductor+triton because it is in the
     # float32 denormal range. For now, manually adjust the fp scale. This is
@@ -269,6 +323,7 @@ def _convert_to_mxfp4_kernel(
     USE_ASM: tl.constexpr,
     USE_STATIC_CLIP: tl.constexpr,
     USE_DYNAMIC_CLIP: tl.constexpr,
+    SCALE_SELECTION: tl.constexpr,
 ):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
@@ -308,6 +363,7 @@ def _convert_to_mxfp4_kernel(
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_DYNAMIC_CLIP=USE_DYNAMIC_CLIP,
+        SCALE_SELECTION=SCALE_SELECTION,
     )
 
     if USE_STATIC_CLIP:
@@ -410,6 +466,7 @@ def convert_to_mxfp4(
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
     clip_mode: str = "none",
+    blockscale_selection: str = "default",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
@@ -469,6 +526,7 @@ def convert_to_mxfp4(
         USE_ASM=use_asm,
         USE_STATIC_CLIP=use_static_clip,
         USE_DYNAMIC_CLIP=use_dynamic_clip,
+        SCALE_SELECTION=blockscale_selection,
     )
 
     return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)

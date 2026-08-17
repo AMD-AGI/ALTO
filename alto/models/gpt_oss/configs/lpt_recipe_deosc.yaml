@@ -1,0 +1,28 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp4"
+      targets: ["Linear", "GptOssGroupedExperts"]
+      # targets: ["Linear"]
+      # ignore: ["output", "re:.*\\.router\\.gate", "re:layers\\.0.*", "re:layers\\.22.*", "re:layers\\.23.*"]
+      ignore: ["output", "re:.*\\.router\\.gate"]
+      # ignore: ["output", "re:.*\\.router\\.gate", "re:layers\\.\\d+\\.attention.wq", "re:layers\\.\\d+\\.attention.wk", "re:layers\\.\\d+\\.attention.wv", "re:layers\\.\\d+\\.attention.wo"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+
+      # differential gradient estimation, disabled by default
+      use_dge: false
+
+      # choices: none, static, dynamic
+      clip_mode: none
+
+      # 2-level scaling, disabled by default
+      # NVFP4 requires tensorwise scaling or you will get overflow issues
+      two_level_scaling: none
+
+      # weight de-oscillation, disabled by default
+      deosc_step: 2000
+      deosc_period: 200
+      deosc_ratio: 4.0

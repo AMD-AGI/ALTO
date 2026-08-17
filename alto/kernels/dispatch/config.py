@@ -30,6 +30,15 @@ class TrainingOpConfig:
     use_sr_grad: bool
     use_dge: bool
 
+    full_precision_backward: bool = False
+    """
+    Quantize only the forward GEMM; keep the backward (dgrad + wgrad) in bf16 with
+    the gradient left unquantized. The backward GEMMs reuse the quantize-then-
+    dequantize x/w from the forward (QDQ operands). Used to isolate the training
+    quality impact of forward-only vs. full low-precision. Currently supported only
+    on the dense MXFP4 linear path.
+    """
+
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     """
     clipping mode applied in MXFP4/NVFP4 quantization.
@@ -46,6 +55,14 @@ class TrainingOpConfig:
     * blockwise:
       * MXFP4: apply a blockwise scale factor containing shared mantissa to each block
       * NVFP4: not implemented
+    """
+
+    blockscale_selection: Literal["default", "midmax", "uos"] = "default"
+    """
+    block scale-selection strategy for MXFP4 quantization.
+    * default: round-even (adaptive) exponent selection (threshold > 7.0)
+    * midmax: alternative implementation of default with threshold >= 7.0
+    * uos: not yet implemented
     """
 
 

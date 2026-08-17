@@ -1,0 +1,98 @@
+# torch 2.11 (+ matching torchvision/triton) is required by the bundled torchtitan,
+# which uses torch>=2.11 APIs (torch.nn.attention.varlen, the
+# wrap_inductor_compiled_regions inductor option, ...). There is no prebuilt
+# torch 2.11 + ROCm 7.2 image, so this pins the validated ROCm 7.14 + torch 2.11.0
+# build. NOTE: this bumps ROCm 7.2 -> 7.14; the Slurm hosts' amdgpu/KFD driver must
+# support a ROCm 7.14 container userspace.
+FROM rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.11.0
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Port 80 to archive.ubuntu.com/security.ubuntu.com is blocked in this build
+# environment, but 443 works. Rewrite every apt source (including the deb822
+# /etc/apt/sources.list.d/ubuntu.sources used on noble) from http:// to https://.
+
+# Packages
+# ibverbs-utils for debug via to `rdma link show`
+# iproute2 debug ip addresses such as RDMA ips
+# perftest RDMA debug
+
+RUN find /etc/apt -type f \
+        \( -name '*.list' -o -name '*.sources' \) \
+        -exec sed -i 's|http://|https://|g' {} + \
+    && apt-get \
+        -o Acquire::ForceIPv4=true \
+        -o Acquire::Retries=5 \
+        -o Acquire::https::Timeout=30 \
+        update \
+    && apt-get install -y \
+    git-lfs \
+    pkg-config \
+    clang \
+    libclang-dev \
+    libunwind-dev \
+    libnl-3-dev \
+    libnl-route-3-dev \
+    libibverbs-dev \
+    ibverbs-utils \
+    iproute2 \
+    perftest \
+    ibverbs-providers \
+    cmake \
+    pciutils \
+    && (update-pciids || true)
+# /var/lib/apt/lists is intentionally NOT removed, to keep apt usable for debugging.
+
+RUN pip install --no-cache-dir huggingface_hub "datasets>=3.6.0" \
+    transformers tabulate wandb fsspec tyro "tokenizers>=0.15.0" safetensors \
+    tensorboard pre-commit yapf pybind11 meson-python torchdata pytablewriter \
+    "antlr4-python3-runtime==4.11.0" sympy math_verify more_itertools peft \
+    accelerate pillow "numpy<2" opencv-python-headless scipy \
+    numba huggingface-hub[cli,hf_transfer] "packaging>=24.2" \
+    "setuptools>=77.0.3,<80.0.0" "setuptools-scm>=8" \
+    protobuf-protoc-bin fmt 
+
+RUN mkdir -p /var/lib/jenkins && \
+    cd /var/lib/jenkins && \
+    git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness && \
+    cd lm-evaluation-harness && \
+    pip install -e .
+
+ENV PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950"
+
+# RDMA providers (the libibverbs plugins, e.g. libmlx5 / libbnxt_re) are ABI-tied
+# to each host's rdma-core and kernel, which vary across our machines, so they are
+# deliberately NOT baked into the image. rdma_tests/start_container.sh mounts the
+# host's libibverbs userspace (library + provider modules + /etc/libibverbs.d)
+# read-only at runtime, so the in-container RDMA stack always matches the host it
+# runs on. The ibverbs-providers/libibverbs-dev apt packages above remain as a
+# self-contained fallback for same-ABI hosts (USE_HOST_RDMA=0).
+
+RUN FSDP_PARAM=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'distributed/fsdp/_fully_shard/_fsdp_param.py'))") && \
+    sed -i 's/self.sharded_param = nn.Parameter(self.to_sharded_dtensor(sharded_param))/self.sharded_param = nn.Parameter(self.to_sharded_dtensor(sharded_param), requires_grad=param.requires_grad)/' "$FSDP_PARAM" && \
+    sed -i 's/        self.sharded_param.requires_grad_(param.requires_grad)//' "$FSDP_PARAM"
+
+# Install torchtitan and ALTO training deps at build time (as root) to avoid
+# /opt/venv permission errors when the container runs as a non-root user.
+COPY 3rdparty/torchtitan /tmp/torchtitan_src
+# Pin the ROCm torch/torchvision/triton already in the base image via a pip
+# constraints file so no transitive dependency (compressed_tensors -> transformers,
+# torchao, torchtitan, ...) can pull a CUDA build of torch and the nvidia-* wheels.
+# Replacing the ROCm torch breaks the pre-compiled ROCm torchvision ops at runtime
+# ("RuntimeError: operator torchvision::nms does not exist" -> ABI mismatch).
+# Constraints still let other packages upgrade; they just cannot move torch et al.
+# torchao is also installed with --no-deps as belt-and-suspenders. meson-python/
+# pybind11/ninja are torchtitan's declared build backend (build-backend = "mesonpy")
+# and must be present here because the torchtitan install uses --no-build-isolation.
+# Read versions from package metadata (not `pip freeze`): the ROCm torch is a
+# locally-built wheel that pip freeze renders as "torch @ file://...", which a
+# "^torch==" grep would miss, producing an empty constraints file.
+RUN python3 -c "import importlib.metadata as md; have={d.metadata['Name'].lower() for d in md.distributions()}; want=['torch','torchvision','triton','pytorch-triton-rocm']; open('/tmp/torch-constraints.txt','w').write(''.join(f'{p}=={md.version(p)}\n' for p in want if p.lower() in have))" && \
+    cat /tmp/torch-constraints.txt && \
+    pip install --no-cache-dir -c /tmp/torch-constraints.txt aim \
+    compressed_tensors easydict loguru \
+    poetry-core "poetry-dynamic-versioning>=1.0.0,<2.0.0" \
+    meson-python pybind11 ninja tyro && \
+    pip install --no-cache-dir -c /tmp/torch-constraints.txt --no-deps torchao && \
+    pip install --no-cache-dir --no-build-isolation --no-deps /tmp/torchtitan_src && \
+    rm -rf /tmp/torchtitan_src /tmp/torch-constraints.txt

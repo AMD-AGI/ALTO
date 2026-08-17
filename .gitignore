@@ -212,3 +212,19 @@ __marimo__/
 datasets/
 /models/
 comm_traces/
+
+
+# Slurm
+*.out
+
+# Checkpoints
+*.distcp
+gptoss_chkpt/
+plotting/plots
+
+*.safetensors
+
+docker/
+gpt_*/
+*/plotting/
+docs/

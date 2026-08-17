@@ -19,13 +19,23 @@ __all__ = [
     "llama3_debugmodel",
     "llama3_debugmodel_opt",
     "llama3_debugmodel_lpt",
+    "llama3_debugmodel_adahop",
+    "llama3_debugmodel_adahop_short",
     "llama3_1b",
     "llama3_1b_opt",
     "llama3_1b_lpt",
+    "llama3_1b_lpt_fwdonly",
+    "llama3_1b_lpt_hadamard",
+    "llama3_1b_adahop",
     "llama3_8b",
     "llama3_8b_pretrain",
+    "llama3_8b_random_init",
     "llama3_8b_opt",
+    "llama3_8b_bf16",
     "llama3_8b_lpt",
+    "llama3_8b_lpt_fwdonly",
+    "llama3_8b_lpt_hadamard",
+    "llama3_8b_adahop",
     "llama3_1b_gptq",
     "llama3_1b_awq",
     "llama3_1b_mx9_wa",
@@ -75,9 +85,30 @@ def llama3_debugmodel_opt() -> Trainer.Config:
 
 def llama3_debugmodel_lpt() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.training.steps = 10
+    config.training.steps = 100
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+def llama3_debugmodel_adahop() -> Trainer.Config:
+    config = llama3_debugmodel()
+    # Need enough steps for the 30-step calibration plus a handful of post-calibration
+    # iterations to confirm Phase-B wrappers are actually exercised.
+    config.training.steps = 130
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_recipe.yaml",),
+    ],)
+    return config
+
+
+def llama3_debugmodel_adahop_short() -> Trainer.Config:
+    """3-step calibration variant for fast debug iteration on cluster."""
+    config = llama3_debugmodel()
+    config.training.steps = 8  # 3 calibration + 5 post-Phase-B
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_debug_recipe.yaml",),
+    ],)
     return config
 
 
@@ -119,6 +150,33 @@ def llama3_1b_lpt() -> Trainer.Config:
     config.training.steps = 1000
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+def llama3_1b_lpt_fwdonly() -> Trainer.Config:
+    """MXFP4 forward-only: quantize the forward, keep the backward in bf16
+    (gradient unquantized). Isolates the training-quality impact of forward-only
+    vs. full low-precision."""
+    config = llama3_1b()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_fwdonly.yaml",)],)
+    return config
+
+
+def llama3_1b_lpt_hadamard() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_hadamard_recipe.yaml",)],)
+    return config
+
+
+def llama3_1b_adahop() -> Trainer.Config:
+    config = llama3_1b()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_recipe.yaml",)],)
     return config
 
 
@@ -166,11 +224,87 @@ def llama3_8b_opt() -> Trainer.Config:
     return config
 
 
+def llama3_8b_random_init() -> Trainer.Config:
+    """Random-init Llama 3.1 8B for a controlled init checkpoint, mirroring
+    AdaHOP's pretrain-from-scratch recipe. The launcher runs this for 1 step,
+    relies on torchtitan's checkpoint.interval=1 to save a DCP at step 1, and
+    all quantization variants then `--checkpoint.initial_load_path` that file
+    so every variant starts from the SAME random weights (seeded with 1234).
+    """
+    config = llama3_8b_orig()
+    # Tokenizer (overridden on CLI anyway), no weight initial load.
+    config.hf_assets_path = LLAMA3_8B_PATH
+    config.metrics.log_freq = 1
+    config.profiling.enable_profiling = False
+    config.training.local_batch_size = 1
+    config.training.global_batch_size = 8
+    config.training.seq_len = 2048
+    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4")
+    config.activation_checkpoint.mode = "selective"
+    config.activation_checkpoint.selective_ac_option = "op"
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 1  # save IMMEDIATELY so we can branch from this
+    config.validator.enable = False
+    config.debug.seed = 1234
+    return config
+
+
+def llama3_8b_bf16() -> Trainer.Config:
+    """Plain bf16 full-precision baseline (no quantization converter). The
+    reference point the mxfp4 / fwdonly variants compare against. Same
+    architecture / data / init as llama3_8b_pretrain, but with checkpointing
+    enabled so a long run is resumable."""
+    config = llama3_8b_pretrain()
+    config.dump_folder = "llama3_8b-pretrain-subset-bf16-outputs"
+    # Fresh random init at debug.seed (1234), same as the gpt_oss runs — do NOT
+    # load pretrained weights. Reproducible across launches at fixed parallelism.
+    config.checkpoint.initial_load_path = None
+    config.checkpoint.initial_load_in_hf = False
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 500
+    config.checkpoint.keep_latest_k = 2
+    return config
+
+
 def llama3_8b_lpt() -> Trainer.Config:
     config = llama3_8b_pretrain()
     config.dump_folder = "llama3_8b-mi308-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-gbs384-lr1e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe.yaml",)],)
+    return config
+
+
+def llama3_8b_lpt_fwdonly() -> Trainer.Config:
+    """MXFP4 forward-only: quantize the forward, keep the backward in bf16
+    (gradient unquantized). Isolates the training-quality impact of forward-only
+    vs. full low-precision. 8B is untied-weights so it runs (unlike 1B)."""
+    config = llama3_8b_pretrain()
+    config.dump_folder = "llama3_8b-pretrain-subset-mxfp4-fwdonly-outputs"
+    # Fresh random init at debug.seed (1234), same as the gpt_oss runs — do NOT
+    # load pretrained weights. Reproducible across launches at fixed parallelism.
+    config.checkpoint.initial_load_path = None
+    config.checkpoint.initial_load_in_hf = False
+    config.checkpoint.enable = True
+    config.checkpoint.interval = 500
+    config.checkpoint.keep_latest_k = 2
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_recipe_fwdonly.yaml",)],)
+    return config
+
+
+def llama3_8b_lpt_hadamard() -> Trainer.Config:
+    config = llama3_8b_pretrain()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_hadamard_recipe.yaml",)],)
+    return config
+
+
+def llama3_8b_adahop() -> Trainer.Config:
+    config = llama3_8b_pretrain()
+    config.training.steps = 1000
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe="./alto/models/llama3/configs/lpt_adahop_recipe.yaml",)],)
     return config
 
 

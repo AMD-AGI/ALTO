@@ -3,5 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from .base import LowPrecisionTrainingModifier
+from .adahop import AdaHOPModifier
+from .grad_clip import GradientClippingModifier
 
-__all__ = ["LowPrecisionTrainingModifier"]
+__all__ = ["LowPrecisionTrainingModifier", "AdaHOPModifier", "GradientClippingModifier"]

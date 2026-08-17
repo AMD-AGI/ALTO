@@ -1,0 +1,20 @@
+# Example config for plot_val_loss.py
+#   python3 plot_val_loss.py -c runs.example.toml
+#
+# `output` and `title` are optional (both overridable with -o / -t on the CLI).
+# Relative `file` paths are resolved from THIS config file's directory.
+
+output = "plotting/plots/baselines.png"
+title  = "Reproducing Low-Precision Baselines on GPT-OSS 20b"
+
+[[runs]]
+file = "../slurm-207989.out"
+name = "bf16"
+
+[[runs]]
+file = "../slurm-207639.out"
+name = "lpt_recipe"
+
+[[runs]]
+file = "../slurm-208070.out"
+name = "deoscillation"

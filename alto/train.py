@@ -4,6 +4,7 @@
 
 from typing import Iterable, Any
 from contextlib import contextmanager
+import os
 import time
 import torch
 from torchtitan.components.loss import IGNORE_INDEX
@@ -84,6 +85,34 @@ class Trainer(ForgeTrainer):
     def __init__(self, config: TitanTrainer.Config):
         super().__init__(config)
 
+        # AdaHOP (Strategy-2 port): if an AdaHOPModifier is in the recipe,
+        # register its checkpointable calibration state with the checkpointer so
+        # per-layer transform modes are saved/restored alongside model/optimizer
+        # state. CheckpointManager.states is a live, mutable dict iterated by
+        # save()/load(); injecting here (after super().__init__, before
+        # train()->checkpointer.load) keeps the whole change inside alto/.
+        try:
+            from alto.modifiers.lpt.adahop import AdaHOPModifier
+            from alto.modifiers.lpt.adahop_internals.calibration_state import (
+                get_adahop_calibration_state,
+            )
+            has_adahop = any(
+                isinstance(m, AdaHOPModifier)
+                for conv in self.model_converters.converters
+                if isinstance(conv, ModelOptConverter)
+                for m in getattr(conv, "recipe", None).modifiers
+            ) if not self.model_converters.is_empty() else False
+            if has_adahop and getattr(self, "checkpointer", None) is not None:
+                self.checkpointer.states["adahop_calibration"] = get_adahop_calibration_state()
+                logger.info("[AdaHOP] Registered CalibrationStateManager with checkpointer "
+                            "(states key='adahop_calibration').")
+        except Exception as e:  # never let this break trainer construction
+            logger.warning(f"[AdaHOP] Could not register calibration state with checkpointer: {e}")
+
+        self.checkpointer.states["dataloader"] = self.dataloader
+
+        self.ntokens_seen = 0
+
         self.training_mode = True
         self.enable_data_cache = False
 
@@ -108,6 +137,22 @@ class Trainer(ForgeTrainer):
             else:
                 logger.info("data replay buffer disabled")
                 self.enable_data_cache = False
+
+    def state_dict(self) -> dict[str, Any]:
+        sd = super().state_dict()
+        sd["ntokens_seen"] = self.ntokens_seen
+        return sd
+
+    def load_state_dict(self, state_dict: dict[str, Any]):
+        super().load_state_dict(state_dict)
+        self.ntokens_seen = state_dict.get("ntokens_seen", 0)
+
+    def batch_generator(
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        for input_dict, labels in super().batch_generator(data_iterable):
+            self.ntokens_seen += labels.numel()
+            yield input_dict, labels
 
     def cache_input(self, microbatches: list[tuple[dict[str, torch.Tensor], torch.Tensor]]):
         if self.enable_data_cache:
@@ -190,6 +235,18 @@ class Trainer(ForgeTrainer):
         data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
     ):
         if self.training_mode:
+            # FIXME: This is a hack to enable de-oscillation at a specific step.
+            deosc_step = int(os.environ.get("DEOSC_STEP", "0"))
+            ratio_threshold = float(os.environ.get("DEOSC_RATIO", "8.0"))
+            if deosc_step > 0 and self.step == deosc_step:
+                deosc_config = DeOscillationConfig(
+                    enable=True,
+                    period=200,
+                    ratio_threshold=ratio_threshold,
+                    log_freq=1,
+                )
+                enable_de_oscillation(self.optimizers, deosc_config)
+
             return super().train_step(data_iterator)
 
         # Keep these variables local to shorten the code as these are

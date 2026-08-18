@@ -4,7 +4,7 @@ set -euo pipefail
 IMAGE="wanghanthu/torchtitan:ubuntu22.04-pytorch2.12.0dev20260217-rocm7.2-patch"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 ALTO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-HF_MODELS_DIR="${HF_MODELS_DIR:-$(cd "${ALTO_DIR}/../hf_models" && pwd)}"
+HF_MODELS_DIR="${HF_MODELS_DIR:-${ALTO_DIR}/../hf_models}"
 GID_RENDER="$(getent group render | cut -d: -f3)"
 GID_VIDEO="$(getent group video | cut -d: -f3)"
 WANDB_TEAM="${WANDB_TEAM:-yue-sun2-amd}"
@@ -56,8 +56,10 @@ fi
 
 if [[ ! -f "${HF_MODELS_DIR}/llama3-8b/tokenizer.json" ]]; then
     echo "Missing tokenizer assets in ${HF_MODELS_DIR}/llama3-8b" >&2
+    echo "Copy the llama3-8b asset directory there, or point HF_MODELS_DIR at it. See docker/README.md." >&2
     exit 1
 fi
+HF_MODELS_DIR="$(cd "${HF_MODELS_DIR}" && pwd)"
 
 if [[ ! -f "${ALTO_DIR}/3rdparty/torchtitan/pyproject.toml" ]]; then
     git -C "${ALTO_DIR}" submodule update --init --recursive

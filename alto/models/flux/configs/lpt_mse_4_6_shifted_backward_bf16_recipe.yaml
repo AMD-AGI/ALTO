@@ -4,8 +4,6 @@ training_stage:
       scheme: "mxfp4"
       targets: ["Linear"]
       ignore:
-        # These layers operate on per-sample vectors. With small local batches,
-        # MXFP4 activation quantization along axis 0 is not block-size aligned.
         - "re:^img_in\\."
         - "re:^txt_in\\."
         - "re:^time_in\\."
@@ -21,15 +19,9 @@ training_stage:
       clip_mode: none
       two_level_scaling: tensorwise
       mxfp4_scale_selection: mse_4_6_shifted
-      # Directional ablation: both defaults preserve the low-precision baseline.
-      # Set either field to bf16 to bypass QDQ only for that direction.
-      forward_precision: bf16
-      backward_precision: low
-      # Weight de-oscillation is disabled by default. Uncomment to enable it
-      # after the configured step.
+      forward_precision: low
+      backward_precision: bf16
       deosc_step: 2000
       deosc_period: 200
       deosc_ratio: 4.0
       deosc_log_freq: 1
-      # deosc_targets:
-      #   - "re:double_blocks\\..*_attn\\.(qkv|proj)\\.weight$"

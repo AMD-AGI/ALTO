@@ -42,6 +42,16 @@ class LowPrecisionTrainingModifier(Modifier):
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     mxfp4_scale_selection: Literal["default", "mse_4_6_shifted", "mse_4_6_strict"] = "default"
     precision_schedule: list[dict[str, Any]] = Field(default_factory=list)
+    forward_precision: Literal["low", "bf16"] = "low"
+    """
+    Precision used by the Linear forward path. ``low`` uses the configured
+    scheme; ``bf16`` bypasses quantization for the forward GEMM.
+    """
+    backward_precision: Literal["low", "bf16"] = "low"
+    """
+    Precision used by the Linear backward path. ``low`` uses the configured
+    scheme; ``bf16`` computes input and weight gradients in BF16.
+    """
     deosc_step: int = 0
     """
     Step to enable weight de-oscillation. If 0, de-oscillation is disabled.
@@ -215,6 +225,8 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_hadamard=self.use_hadamard,
                     use_sr_grad=self.use_sr_grad,
                     use_dge=self.use_dge,
+                    forward_precision=self.forward_precision,
+                    backward_precision=self.backward_precision,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
                     mxfp4_scale_selection=self.mxfp4_scale_selection,

@@ -60,6 +60,8 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_outer_scale: bool,
         hadamard_transform: Optional[HadamardTransform] = None,
         use_dge: bool = False,
+        forward_precision: str = "low",
+        backward_precision: str = "low",
     ):
         weight = unwrap_weight_wrapper(weight)
         # Align weight dtype with activation so saved QDQ tensors share a
@@ -84,7 +86,7 @@ class NVFP4LinearFunction(torch.autograd.Function):
             use_outer_scale=use_outer_scale,
         )
 
-        y = x_dq @ w_dq.T
+        y = x_2d @ weight.T if forward_precision == "bf16" else x_dq @ w_dq.T
 
         # Prepare separate quantized views for the tensors that participate in
         # the backward reduction dimension. This mirrors how pure FP4 GEMMs
@@ -171,7 +173,9 @@ class NVFP4LinearFunction(torch.autograd.Function):
         else:
             x_dq_axis0 = x_dq
 
-        if use_dge:
+        if backward_precision == "bf16":
+            ctx.save_for_backward(x_2d, weight)
+        elif use_dge:
             ctx.save_for_backward(x_dq_axis0, w_dq_axis0, w_raw_fp4, w_raw_scales)
         else:
             ctx.save_for_backward(x_dq_axis0, w_dq_axis0)
@@ -181,17 +185,28 @@ class NVFP4LinearFunction(torch.autograd.Function):
         ctx.use_outer_scale = use_outer_scale
         ctx.hadamard_transform = hadamard_transform
         ctx.use_dge = use_dge
+        ctx.backward_precision = backward_precision
 
         return y.view(*original_shape[:-1], -1)
 
     @staticmethod
     def backward(ctx, grad_output):
+        original_shape = grad_output.shape
+        grad_output = grad_output.reshape(-1, original_shape[-1])
+        if ctx.backward_precision == "bf16":
+            x_2d, weight = ctx.saved_tensors
+            grad_inputs = grad_output @ weight.to(grad_output.dtype)
+            grad_weights = grad_output.T @ x_2d.to(grad_output.dtype)
+            return (
+                grad_inputs.view(*original_shape[:-1], -1),
+                grad_weights,
+                None, None, None, None, None, None, None, None,
+            )[:len(ctx.needs_input_grad)]
+
         if ctx.use_dge:
             x_dq, w_dq, w_raw_fp4, w_raw_scales = ctx.saved_tensors
         else:
             x_dq, w_dq = ctx.saved_tensors
-        original_shape = grad_output.shape
-        grad_output = grad_output.reshape(-1, original_shape[-1])
         # Saved QDQ tensors carry forward's dtype; align them with
         # grad_output to avoid BF16 vs FP32 mismatches under AMP autocast.
         if x_dq.dtype != grad_output.dtype:
@@ -272,6 +287,8 @@ def _to_nvfp4_then_scaled_mm(
     use_outer_scale: bool = False,
     use_hadamard: bool = False,
     use_dge: bool = False,
+    forward_precision: str = "low",
+    backward_precision: str = "low",
 ) -> torch.Tensor:
     """Build the optional Hadamard transform and apply ``NVFP4LinearFunction``.
 
@@ -294,4 +311,6 @@ def _to_nvfp4_then_scaled_mm(
         use_outer_scale,
         hadamard_transform,
         use_dge,
+        forward_precision,
+        backward_precision,
     )

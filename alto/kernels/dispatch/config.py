@@ -8,6 +8,7 @@ import torch
 
 
 TrainingPrecision = Literal["bf16", "mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"]
+DirectionalPrecision = Literal["low", "bf16"]
 
 
 @dataclass(unsafe_hash=True, kw_only=True, slots=True)
@@ -25,6 +26,17 @@ class TrainingOpConfig:
     use_hadamard: bool
     use_sr_grad: bool
     use_dge: bool
+    forward_precision: DirectionalPrecision = "low"
+    """
+    Precision used by the linear forward pass. ``low`` uses ``precision``;
+    ``bf16`` bypasses QDQ for the forward GEMM.
+    """
+    backward_precision: DirectionalPrecision = "low"
+    """
+    Precision used to form input and weight gradients. ``low`` quantizes the
+    backward operands according to ``precision``; ``bf16`` uses raw BF16
+    operands.
+    """
 
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     """

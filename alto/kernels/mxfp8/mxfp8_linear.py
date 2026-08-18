@@ -310,6 +310,8 @@ class MXFP8LinearFunction(torch.autograd.Function):
         use_sr_grad: bool = False,
         use_2dblock_x: bool = False,
         use_2dblock_w: bool = False,
+        forward_precision: str = "low",
+        backward_precision: str = "low",
     ) -> torch.Tensor:
         weight = unwrap_weight_wrapper(weight)
 
@@ -339,17 +341,20 @@ class MXFP8LinearFunction(torch.autograd.Function):
             is_2d_block=use_2dblock_w,
         )
 
-        y = torch.ops.alto.blockwise_mxfp8_gemm(
-            x_lp,
-            x_scales,
-            w_lp,
-            w_scales,
-            trans_b=True,
-            use_2dblock_a=use_2dblock_x,
-            use_2dblock_b=use_2dblock_w,
-            block_size=BLOCK_SIZE_DEFAULT,
-            output_dtype=output_dtype,
-        )
+        if forward_precision == "bf16":
+            y = x_2d @ weight.T
+        else:
+            y = torch.ops.alto.blockwise_mxfp8_gemm(
+                x_lp,
+                x_scales,
+                w_lp,
+                w_scales,
+                trans_b=True,
+                use_2dblock_a=use_2dblock_x,
+                use_2dblock_b=use_2dblock_w,
+                block_size=BLOCK_SIZE_DEFAULT,
+                output_dtype=output_dtype,
+            )
 
         if use_2dblock_x:
             x_m_lp, x_m_scales = x_lp, x_scales
@@ -372,20 +377,34 @@ class MXFP8LinearFunction(torch.autograd.Function):
                 is_2d_block=False,
             )
 
-        ctx.save_for_backward(x_m_lp, x_m_scales, w_m_lp, w_m_scales)
+        if backward_precision == "bf16":
+            ctx.save_for_backward(x_2d, weight)
+        else:
+            ctx.save_for_backward(x_m_lp, x_m_scales, w_m_lp, w_m_scales)
         ctx.use_sr_grad = use_sr_grad
         ctx.use_2dblock_x = use_2dblock_x
         ctx.use_2dblock_w = use_2dblock_w
         ctx.fp8_variant = fp8_variant
         ctx.output_dtype = output_dtype
         ctx.input_shape = original_shape
+        ctx.backward_precision = backward_precision
         return y.view(*original_shape[:-1], -1)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        x_m_lp, x_m_scales, w_m_lp, w_m_scales = ctx.saved_tensors
         original_shape = grad_output.shape
         grad_output_2d = grad_output.reshape(-1, original_shape[-1])
+        if ctx.backward_precision == "bf16":
+            x_2d, weight = ctx.saved_tensors
+            grad_input = grad_output_2d @ weight.to(grad_output_2d.dtype)
+            grad_weight = grad_output_2d.T @ x_2d.to(grad_output_2d.dtype)
+            return (
+                grad_input.view(*ctx.input_shape),
+                grad_weight,
+                None, None, None, None, None, None,
+            )[:len(ctx.needs_input_grad)]
+
+        x_m_lp, x_m_scales, w_m_lp, w_m_scales = ctx.saved_tensors
 
         if ctx.use_2dblock_x:
             grad_lp, grad_scales = torch.ops.alto.convert_to_mxfp8(
@@ -436,7 +455,11 @@ class MXFP8LinearFunction(torch.autograd.Function):
             block_size=BLOCK_SIZE_DEFAULT,
             output_dtype=ctx.output_dtype,
         )
-        return grad_input.view(*ctx.input_shape), grad_weight, None, None, None, None
+        return (
+            grad_input.view(*ctx.input_shape),
+            grad_weight,
+            None, None, None, None, None, None,
+        )[:len(ctx.needs_input_grad)]
 
 
 def _to_mxfp8_then_scaled_mm(
@@ -446,6 +469,8 @@ def _to_mxfp8_then_scaled_mm(
     use_sr_grad: bool = False,
     use_2dblock_x: bool = False,
     use_2dblock_w: bool = False,
+    forward_precision: str = "low",
+    backward_precision: str = "low",
 ) -> torch.Tensor:
     return MXFP8LinearFunction.apply(
         a,
@@ -454,4 +479,6 @@ def _to_mxfp8_then_scaled_mm(
         use_sr_grad,
         use_2dblock_x,
         use_2dblock_w,
+        forward_precision,
+        backward_precision,
     )

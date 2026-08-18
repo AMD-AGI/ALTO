@@ -32,6 +32,9 @@ __all__ = [
     "flux_schnell",
     "flux_schnell_lpt",
     "flux_schnell_lpt_mse_4_6_shifted",
+    "flux_schnell_lpt_mse_4_6_shifted_mlperf",
+    "flux_schnell_lpt_mse_4_6_shifted_forward_bf16",
+    "flux_schnell_lpt_mse_4_6_shifted_backward_bf16",
     "flux_schnell_lpt_mse_4_6_strict",
     "flux_schnell_lpt_precision_schedule",
     "flux_schnell_lpt_distill_off_policy",
@@ -45,6 +48,12 @@ __all__ = [
 
 FLUX_LPT_RECIPE = str(Path(__file__).with_name("configs") / "lpt_recipe.yaml")
 FLUX_LPT_MSE_4_6_SHIFTED_RECIPE = str(Path(__file__).with_name("configs") / "lpt_mse_4_6_shifted_recipe.yaml")
+FLUX_LPT_MSE_4_6_SHIFTED_FORWARD_BF16_RECIPE = str(
+    Path(__file__).with_name("configs") / "lpt_mse_4_6_shifted_forward_bf16_recipe.yaml"
+)
+FLUX_LPT_MSE_4_6_SHIFTED_BACKWARD_BF16_RECIPE = str(
+    Path(__file__).with_name("configs") / "lpt_mse_4_6_shifted_backward_bf16_recipe.yaml"
+)
 FLUX_LPT_MSE_4_6_STRICT_RECIPE = str(Path(__file__).with_name("configs") / "lpt_mse_4_6_strict_recipe.yaml")
 FLUX_LPT_PRECISION_SCHEDULE_RECIPE = str(Path(__file__).with_name("configs") / "lpt_precision_schedule_recipe.yaml")
 FLUX_DISTILL_LPT_RECIPE = str(Path(__file__).with_name("configs") / "distill_lpt_recipe.yaml")
@@ -68,6 +77,18 @@ def _with_lpt(config: FluxTrainer.Config) -> FluxTrainer.Config:
 
 def _with_lpt_mse_4_6_shifted(config: FluxTrainer.Config) -> FluxTrainer.Config:
     return _with_recipe(config, FLUX_LPT_MSE_4_6_SHIFTED_RECIPE)
+
+
+def _with_lpt_mse_4_6_shifted_forward_bf16(
+    config: FluxTrainer.Config,
+) -> FluxTrainer.Config:
+    return _with_recipe(config, FLUX_LPT_MSE_4_6_SHIFTED_FORWARD_BF16_RECIPE)
+
+
+def _with_lpt_mse_4_6_shifted_backward_bf16(
+    config: FluxTrainer.Config,
+) -> FluxTrainer.Config:
+    return _with_recipe(config, FLUX_LPT_MSE_4_6_SHIFTED_BACKWARD_BF16_RECIPE)
 
 
 def _with_lpt_mse_4_6_strict(config: FluxTrainer.Config) -> FluxTrainer.Config:
@@ -189,14 +210,96 @@ def flux_schnell_lpt() -> FluxTrainer.Config:
 
 def flux_schnell_lpt_mse_4_6_shifted() -> FluxTrainer.Config:
     config = _with_lpt_mse_4_6_shifted(flux_schnell())
+
+    config.optimizer.name = "AdamW"
+    config.optimizer.lr = 2.5e-4
+    config.optimizer.beta1 = 0.9
+    config.optimizer.beta2 = 0.95
+    config.optimizer.eps = 1e-8
+    config.optimizer.weight_decay = 0.1
+    config.lr_scheduler.warmup_steps = 3000
+    config.lr_scheduler.decay_ratio = 0.0
+    config.training.max_norm = 1.0
+    config.training.local_batch_size = 32
+    config.training.steps = 60000
+    config.dataloader.classifier_free_guidance_prob = 0.1
+    config.validator.enable = True
+    config.validator.freq = 1024 # NGPU =8 
+    config.validator.steps = -1
+    config.validator.save_img_count = 0
+    config.validator.dataloader.classifier_free_guidance_prob = 0.0
+    config.validation.enable_classifier_free_guidance = False
+    config.validation.denoising_steps = 4
+    config.debug.seed = 10556
+
+    config.validator.dataloader.dataset = "mlperf-coco-validation"
+    config.validator.dataloader.dataset_path = "/dataset/coco"
+    config.validator.dataloader.mlperf_manifest_path = "/dataset/val2014_30k.tsv"
+
+
+    return config
+
+
+def flux_schnell_lpt_mse_4_6_shifted_mlperf() -> FluxTrainer.Config:
+    config = _with_lpt_mse_4_6_shifted(flux_schnell())
+    # Match NVIDIA MLPerf FLUX sample cadence with four GPUs and local batch 32.
+    config.optimizer.name = "AdamW"
+    config.optimizer.lr = 2.5e-4
+    config.optimizer.beta1 = 0.9
+    config.optimizer.beta2 = 0.95
+    config.optimizer.eps = 1e-8
+    config.optimizer.weight_decay = 0.1
+    config.lr_scheduler.warmup_steps = 800
+    config.lr_scheduler.decay_ratio = 0.0
+    config.training.max_norm = 1.0
+    config.training.local_batch_size = 32
+    config.training.steps = 69_632
+    config.dataloader.classifier_free_guidance_prob = 0.1
+    config.validator.enable = True
+    config.validator.freq = 2_048
+    config.validator.steps = 232
+    config.validator.save_img_count = 0
+    config.validator.dataloader.classifier_free_guidance_prob = 0.0
+    config.validation.enable_classifier_free_guidance = False
+    config.validation.denoising_steps = 4
+    config.debug.seed = 10556
+    return config
+
+
+def flux_schnell_lpt_mse_4_6_shifted_forward_bf16() -> FluxTrainer.Config:
+    config = _with_lpt_mse_4_6_shifted_forward_bf16(flux_schnell())
+
+    config.optimizer.name = "AdamW"
+    config.optimizer.lr = 2.5e-4
+    config.optimizer.beta1 = 0.9
+    config.optimizer.beta2 = 0.95
+    config.optimizer.eps = 1e-8
+    config.optimizer.weight_decay = 0.1
+    config.lr_scheduler.warmup_steps = 3000
+    config.lr_scheduler.decay_ratio = 0.0
+    config.training.max_norm = 1.0
+    config.training.local_batch_size = 32
+    config.training.steps = 50000
+    config.dataloader.classifier_free_guidance_prob = 0.1
+    config.validator.enable = True
+    config.validator.freq = 1024 # NGPU =8 
+    config.validator.steps = -1
+    config.validator.save_img_count = 0
+    config.validator.dataloader.classifier_free_guidance_prob = 0.0
+    config.validation.enable_classifier_free_guidance = False
+    config.validation.denoising_steps = 4
+    config.debug.seed = 10556
+    
+    return config
+
+
+def flux_schnell_lpt_mse_4_6_shifted_backward_bf16() -> FluxTrainer.Config:
+    config = _with_lpt_mse_4_6_shifted_backward_bf16(flux_schnell())
     config.optimizer.lr = 2.5e-4
     config.lr_scheduler.warmup_steps = 3000
     config.lr_scheduler.decay_ratio = 0.0
     config.training.steps = 30_000
     config.dataloader.classifier_free_guidance_prob = 0.1
-    # config.validator.enable = True
-    # config.validator.freq = 5461
-    # config.validator.steps = 619
     config.validator.save_img_count = 0
     config.validator.dataloader.classifier_free_guidance_prob = 0.0
     config.validation.enable_classifier_free_guidance = False

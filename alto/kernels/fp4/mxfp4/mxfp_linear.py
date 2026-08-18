@@ -275,6 +275,8 @@ class MXFP4LinearFunction(torch.autograd.Function):
         use_macro_block_scaling,
         hadamard_transform: Optional[HadamardTransform] = None,
         mxfp4_scale_selection: str = "default",
+        forward_precision: str = "low",
+        backward_precision: str = "low",
     ):
         """
         Forward pass for the blockwise FP8 linear operation.
@@ -297,6 +299,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         original_shape = x.shape
         original_dtype = x.dtype
         x = x.reshape(-1, original_shape[-1])  # Ensure x is 2D
+        raw_x = x
 
         if use_macro_block_scaling:
             x_scaled, x_mbs = macro_block_scaling(x, axis=-1, use_2d_block=use_2dblock_x)
@@ -321,7 +324,9 @@ class MXFP4LinearFunction(torch.autograd.Function):
             scale_selection=mxfp4_scale_selection,
         )
 
-        if is_cdna4():
+        if forward_precision == "bf16":
+            y = x @ weight.T
+        elif is_cdna4():
             assert not use_macro_block_scaling, "Macro block scaling is not supported in real MXFP4 kernels"
             y = torch.ops.torchtitan.blockwise_mxfp4_gemm(
                 x_mxfp4,
@@ -405,7 +410,9 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 )
                 if use_macro_block_scaling:
                     x_dq = macro_block_descaling(x_dq, x_mbs, axis=0, use_2d_block=False)
-        if is_cdna4():
+        if backward_precision == "bf16":
+            ctx.save_for_backward(raw_x, weight)
+        elif is_cdna4():
             ctx.save_for_backward(x_mxfp4, x_scale, w_mxfp4, w_scale, x_mbs, w_mbs)
         else:
             ctx.save_for_backward(x_dq, w_dq, w_mxfp4)
@@ -418,6 +425,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         ctx.clip_mode = clip_mode
         ctx.use_macro_block_scaling = use_macro_block_scaling
         ctx.mxfp4_scale_selection = mxfp4_scale_selection
+        ctx.backward_precision = backward_precision
 
         return y.view(*original_shape[:-1], -1)  # Reshape back to original
 
@@ -426,6 +434,16 @@ class MXFP4LinearFunction(torch.autograd.Function):
         original_shape = grad_output.shape
         grad_output = grad_output.reshape(-1, original_shape[-1])  # Ensure grad_output is 2D
         original_dtype = grad_output.dtype
+
+        if ctx.backward_precision == "bf16":
+            x, weight = ctx.saved_tensors
+            grad_inputs = grad_output @ weight.to(grad_output.dtype)
+            grad_weights = grad_output.T @ x.to(grad_output.dtype)
+            return (
+                grad_inputs.view(*original_shape[:-1], -1),
+                grad_weights,
+                None, None, None, None, None, None, None, None, None, None,
+            )[:len(ctx.needs_input_grad)]
 
         if is_cdna4():
             inputs_mxfp4, input_scales, weight_mxfp4, weight_scales, x_mbs, w_mbs = ctx.saved_tensors
@@ -569,7 +587,11 @@ class MXFP4LinearFunction(torch.autograd.Function):
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
-        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None, None
+        return (
+            grad_inputs.view(*original_shape[:-1], -1),
+            grad_weights,
+            None, None, None, None, None, None, None, None, None, None,
+        )[:len(ctx.needs_input_grad)]
 
 
 def _to_mxfp4_then_scaled_mm(
@@ -583,6 +605,8 @@ def _to_mxfp4_then_scaled_mm(
     use_hadamard: bool,
     use_macro_block_scaling: bool = False,
     mxfp4_scale_selection: str = "default",
+    forward_precision: str = "low",
+    backward_precision: str = "low",
 ) -> torch.Tensor:
     if use_hadamard:
         with torch.no_grad():
@@ -600,5 +624,7 @@ def _to_mxfp4_then_scaled_mm(
         use_macro_block_scaling,
         hadamard_transform,
         mxfp4_scale_selection,
+        forward_precision,
+        backward_precision,
     )
     return y

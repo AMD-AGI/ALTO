@@ -268,6 +268,11 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             precision = _effective_precision(config)
             if precision == "bf16":
                 return _run_unwrapped_gemm(func, args, kwargs)
+            if (config.forward_precision, config.backward_precision) != ("low", "low"):
+                raise NotImplementedError(
+                    "Directional precision ablation is supported for Linear only; "
+                    "_grouped_mm requires forward_precision=backward_precision='low'."
+                )
             if precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
                 raise NotImplementedError("MXFP8 _grouped_mm is not supported by this dispatch path.")
 
@@ -336,6 +341,8 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                     use_hadamard=config.use_hadamard,
                     use_macro_block_scaling=config.two_level_scaling == "blockwise",
                     mxfp4_scale_selection=config.mxfp4_scale_selection,
+                    forward_precision=config.forward_precision,
+                    backward_precision=config.backward_precision,
                 )
             elif precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
                 assert not config.use_hadamard and not config.use_dge, (
@@ -348,6 +355,8 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                     use_sr_grad=config.use_sr_grad,
                     use_2dblock_x=config.use_2dblock_x,
                     use_2dblock_w=config.use_2dblock_w,
+                    forward_precision=config.forward_precision,
+                    backward_precision=config.backward_precision,
                 )
             elif precision == "nvfp4":
                 Y = _to_nvfp4_then_scaled_mm(
@@ -359,6 +368,8 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                     use_outer_scale=config.two_level_scaling == "tensorwise",
                     use_hadamard=config.use_hadamard,
                     use_dge=config.use_dge,
+                    forward_precision=config.forward_precision,
+                    backward_precision=config.backward_precision,
                 )
             else:
                 raise ValueError(f"Unsupported scheduled precision: {precision}")
@@ -498,6 +509,8 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                     use_hadamard=config.use_hadamard,
                     use_macro_block_scaling=config.two_level_scaling == "blockwise",
                     mxfp4_scale_selection=config.mxfp4_scale_selection,
+                    forward_precision=config.forward_precision,
+                    backward_precision=config.backward_precision,
                 )
             elif precision in ("mxfp8_e4m3", "mxfp8_e5m2"):
                 assert not config.use_hadamard and not config.use_dge, (
@@ -510,6 +523,8 @@ class NVFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                     use_sr_grad=config.use_sr_grad,
                     use_2dblock_x=config.use_2dblock_x,
                     use_2dblock_w=config.use_2dblock_w,
+                    forward_precision=config.forward_precision,
+                    backward_precision=config.backward_precision,
                 )
             else:
                 raise ValueError(f"Unsupported scheduled precision: {precision}")
@@ -601,6 +616,8 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                     use_hadamard=config.use_hadamard,
                     use_macro_block_scaling=config.two_level_scaling == "blockwise",
                     mxfp4_scale_selection=config.mxfp4_scale_selection,
+                    forward_precision=config.forward_precision,
+                    backward_precision=config.backward_precision,
                 )
             else:
                 raise ValueError(f"Unsupported scheduled precision for MXFP8 wrapper: {precision}")

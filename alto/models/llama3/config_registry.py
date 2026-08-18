@@ -270,11 +270,7 @@ def llama3_1b_mx6_wa() -> Trainer.Config:
     return config
 
 
-LLAMA3_8B_PATH = (
-    "/apps/hanwang2/huggingface/hub/"
-    "models--unsloth--Llama-3.1-8B/snapshots/"
-    "3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
-)
+LLAMA3_8B_PATH = "/workspace/hf_models/llama3-8b"
 
 
 def llama3_8b() -> Trainer.Config:

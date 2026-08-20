@@ -72,17 +72,15 @@ def _calculate_scales(
             max_abs = tl.max(tl.abs(x), axis=-1)
     max_abs = max_abs.to(x.type.element_ty)
 
+    # round even (adaptive)
+    max_abs = max_abs.to(hp_int_dtype, bitcast=True)
     if USE_UOS:
-        scales = tl.ceil(tl.log2(max_abs / 7.25))
-        scales = tl.where(max_abs == 0, 1.0, scales)
-        scales += 127
+        val_to_add = 3 << (hp_mbits - mbits - 3)
     else:
-        # round even (adaptive)
-        max_abs = max_abs.to(hp_int_dtype, bitcast=True)
         val_to_add = 1 << (hp_mbits - mbits - 1)
-        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
-        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
-        scales = max_abs - target_max_pow2
+    mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
+    max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+    scales = max_abs - target_max_pow2
 
     # Today, 2**-127 returns 0 in compile+inductor+triton because it is in the
     # float32 denormal range. For now, manually adjust the fp scale. This is

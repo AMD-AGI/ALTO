@@ -296,21 +296,23 @@ The benefit of de-oscillation shows up specifically in the late-training regime.
 | MXFP4 (1d2d) + RHT + SR                   | 18,432 | +20.0% |
 | MXFP4 (1d2d) + RHT + SR + de-oscillation  | 16,128 | +5.0%  |
 
-**Ablations.** Table 4 isolates individual techniques atop the MXFP4 + RHT + SR base. All ablation rows are drawn from a single sweep in which the shared control (RHT + SR) reaches loss 3.3418; $\Delta$ values are computed relative to this control. Several findings follow directly. **De-oscillation** delivers the largest single improvement ($-0.007$) and achieves the best absolute loss in the ablation. **DGE** and **dynamic clipping** are strongly detrimental ($+0.20$ and $+0.19$, respectively), far worse than omitting the technique. **Static clipping**, **MBS**, and **low-rank compensation** ($r=32$) are neutral to slightly harmful ($\Delta \approx 0$ to $+0.01$).
+**Ablations.** Table 4 isolates individual techniques atop the MXFP4 + RHT + SR base. All ablation rows are drawn from a single sweep in which the shared control (RHT + SR) reaches loss 3.390; $\Delta$ values are computed relative to this control. Several findings follow directly. **De-oscillation** delivers the largest single improvement ($-0.008$) and achieves the best absolute loss in the ablation. **MBS** also improves on the base, though by a smaller margin ($-0.004$). **DGE** and **dynamic clipping** are strongly detrimental ($+0.201$ and $+0.181$, respectively), far worse than omitting the technique. **Static clipping** is neutral ($\Delta = 0.000$), while **low-rank compensation** ($r=32$) is slightly harmful ($+0.007$).
 
-**Table 4.** Ablation of individual techniques (GBS=16, checkpoint 16,128 steps).
+**Table 4.** Ablation of individual techniques (GBS=16, checkpoint 14,592 steps).
 
-| Technique | $\Delta$ loss vs. RHT+SR base | Validation loss |
-|-----------|------------------------------|-----------------|
-| RHT + SR (recommended base) | — | 3.3418 |
-| + DGE | $+0.197$ | 3.5389 |
-| + Static clipping | $+0.005$ | 3.3465 |
-| + Dynamic clipping | $+0.186$ | 3.5281 |
-| + MBS | $\approx 0$ | 3.3419 |
-| + Low-rank compensation ($r=32$) | $+0.011$ | 3.3527 |
-| + De-oscillation | **$-0.007$** | **3.3350** |
+| Technique | Validation loss | $\Delta$ loss vs. RHT+SR base |
+|-----------|-----------------|------------------------------|
+| MXFP4 (1d2d) |  3.438 | +0.048 |
+| MXFP4 (1d2d) + RHT + SR (base) | 3.390 | — |
+| + DGE | 3.591 | +0.201 |
+| + Static clipping | 3.390 | 0.000 |
+| + Dynamic clipping | 3.571 | +0.181 |
+| + MBS | 3.386 | $-0.004$ |
+| + Low-rank compensation ($r=32$) | 3.397 | +0.007 |
+| + De-oscillation | **3.382** | **$-0.008$** |
 
-**Summary.** The recommended ALTO recipe for GPT-OSS-20B MXFP4 training is **1d2d + RHT + SR + de-oscillation**. At GBS=16, this configuration approaches BF16 validation loss within 0.007 at 16k steps under simulated MXFP4 execution, and reaches the 3.34 target with only a +5.0% step overhead over BF16, versus +20.0% for the other FP4 recipes (Table 3). Techniques that improve synthetic operator SNR (MBS, static clipping) do not translate to better convergence at this scale, while de-oscillation provides a consistent late-training benefit ($\Delta = -0.007$) with only additional optimizer-state memory. Low-rank compensation at $r=32$ is neutral to slightly harmful at this batch scale ($\Delta = +0.011$).
+**Summary.** The recommended ALTO recipe for GPT-OSS-20B MXFP4 training is **1d2d + RHT + SR + de-oscillation**. At GBS=16, this configuration approaches BF16 validation loss within 0.007 at 16k steps under simulated MXFP4 execution, and reaches the 3.34 target with only a +5.0% step overhead over BF16, versus +20.0% for the other FP4 recipes (Table 3). Techniques that improve synthetic operator SNR (static clipping, low-rank compensation) do not translate to better convergence at this scale, while de-oscillation provides a consistent late-training benefit
+($\Delta = -0.008$) with only additional optimizer-state memory.
 
 ### 4.3 Technique Evaluation and Recipe Selection
 
@@ -326,9 +328,9 @@ In our ablations (Table 4), de-oscillation delivers the largest improvement of a
 
 **Outlier clipping.** Both modes degrade operator-level SNR (Section 4.1). Static clipping is roughly neutral on validation loss, while dynamic clipping causes a large regression (Table 4).
 
-**Macro-block scaling.** MBS yields the largest operator-level SNR gains of any technique (Section 4.1) but is neutral on validation loss (Table 4).
+**Macro-block scaling.** MBS yields the largest operator-level SNR gains of any technique (Section 4.1) and translates into a small validation-loss improvement as well (Table 4).
 
-**Operator–end-to-end gap.** Higher synthetic operator SNR is generally expected to benefit end-to-end training, but the correspondence is not guaranteed. In our experiments this link breaks down: **MBS** and **static clipping** raise operator SNR yet only marginally affect, or fail to improve, validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful. This indicates that operator-level SNR is a useful but imperfect proxy for end-to-end quality at GPT-OSS-20B scale. **De-oscillation** provides the most reliable late-training benefit among the techniques evaluated.
+**Operator–end-to-end gap.** Higher synthetic operator SNR is generally expected to benefit end-to-end training, but the correspondence is not guaranteed. In our experiments this link breaks down: **MBS** and **static clipping** raise operator SNR yet only marginally affect validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful. This indicates that operator-level SNR is a useful but imperfect proxy for end-to-end quality at GPT-OSS-20B scale. **De-oscillation** provides the most reliable late-training benefit among the techniques evaluated.
 
 **Preferred recipe.** Weighing final validation loss (Figure 4), steps-to-target (Table 3), and compute/memory cost, the technique combination we prefer for GPT-OSS-20B FP4 training is **MXFP4 with 1d2d hybrid block quantization + RHT + SR + weight de-oscillation**. This stack delivers the best FP4 accuracy at GBS=16, keeps the steps-to-target overhead low relative to BF16 (Table 3), and adds only optimizer-state memory (no extra GEMMs). The remaining techniques of Sections 3.5–3.8 are not included in the preferred recipe.
 
@@ -346,7 +348,7 @@ In our ablations (Table 4), de-oscillation delivers the largest improvement of a
 
 We have described an ALTO recipe for training GPT-OSS-20B under MXFP4 on the MLPerf Small MoE benchmark. **2D block quantization, RHT, and SR** are adopted from NVIDIA et al. [arXiv:2509.25149] and form a strong baseline; at GBS=16 and 16,128 steps, this stack reaches validation loss 3.3418 versus 3.3283 for BF16 (+0.014). **Weight de-oscillation**, adapted from OsciReset in TetraJet-v2 [arXiv:2510.27527], closes half of the remaining gap, reaching a final loss **3.3350** (+0.007 vs. BF16) with only modest additional optimizer-state memory and no extra GEMMs. It also sharply reduces the steps-to-target overhead: reaching the 3.34 quality target costs only **+5.0%** more steps than BF16 at GBS=16 (down from **+20.0%** for plain MXFP4).
 
-Our ablations reveal that higher synthetic operator SNR does not always translate into better end-to-end training: **MBS** and **static clipping** raise operator SNR but do not improve validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful at scale. **Low-rank compensation** at $r=32$ is neutral to slightly harmful at GBS=16 and trails **de-oscillation** ($\Delta = -0.007$) in both accuracy and compute efficiency. De-oscillation recovers most of the loss gap, supporting its use as the late-training stabilizer in the recommended recipe: **1d2d + RHT + SR + de-oscillation**.
+Our ablations reveal that higher synthetic operator SNR does not always translate into better end-to-end training: **MBS** and **static clipping** raise operator SNR but do not improve validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful at scale. **Low-rank compensation** at $r=32$ is neutral to slightly harmful at GBS=16 and trails **de-oscillation** ($\Delta = -0.008$) in both accuracy and compute efficiency. De-oscillation recovers most of the loss gap, supporting its use as the late-training stabilizer in the recommended recipe: **1d2d + RHT + SR + de-oscillation**.
 
 Future work will fuse quantization and transforms into a single kernel pipeline, enable FP4 dispatch in expert parallelism, and pursue audited MLPerf Training submission on native FP4 hardware.
 

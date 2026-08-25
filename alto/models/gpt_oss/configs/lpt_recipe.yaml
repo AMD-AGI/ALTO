@@ -20,7 +20,9 @@ training_stage:
       # NVFP4 requires tensorwise scaling or you will get overflow issues
       two_level_scaling: none
 
+      use_uos: true
+
       # weight de-oscillation, disabled by default
-      # deosc_step: 2000
-      # deosc_period: 200
-      # deosc_ratio: 4.0
+      deosc_step: 2000
+      deosc_period: 200
+      deosc_ratio: 4.0

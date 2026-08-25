@@ -70,7 +70,7 @@ def gpt_oss_20b() -> Trainer.Config:
 def gpt_oss_20b_pretrain() -> Trainer.Config:
     config = gpt_oss_20b_orig()
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-lr4e-4-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-std0.008-nobalance-lr4e-4-outputs"
     config.profiler.enable_profiling = False
     config.training.steps = 1200000
     config.training.local_batch_size = 1
@@ -105,7 +105,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-uos-lr4e-4-bitrefactor-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-uos-deosc_2000_200_4.0-std0.008-nobalance-lr4e-4-bitrefactor-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)

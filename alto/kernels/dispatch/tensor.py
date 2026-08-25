@@ -123,12 +123,17 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
     def __torch_dispatch__(cls, func, types, args, kwargs={}):
         # unwrap args/kwargs and extract config
         config = None
+        # DCP restores a serialized wrapper into a parameter built from the
+        # current recipe via ``destination.copy_(source)``. Copying the raw
+        # payload is config-independent, and the returned wrapper must retain
+        # the destination (first argument) configuration.
+        is_checkpoint_copy = func == torch.ops.aten.copy_.default
 
         def unwrap(t):
             nonlocal config
             if config is None:
                 config = t.config
-            else:
+            elif not is_checkpoint_copy:
                 assert t.config == config, (
                     f"All TrainingWeightWrapperBaseTensor instances must have the same config, but found {t.config} and {config}"
                 )

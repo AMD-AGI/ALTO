@@ -217,11 +217,13 @@ def flux_schnell_lpt_mse_4_6_shifted() -> FluxTrainer.Config:
     config.optimizer.beta2 = 0.95
     config.optimizer.eps = 1e-8
     config.optimizer.weight_decay = 0.1
-    config.lr_scheduler.warmup_steps = 3000
+    config.lr_scheduler.warmup_steps = 2000
+    # config.lr_scheduler.warmup_steps = 0
     config.lr_scheduler.decay_ratio = 0.0
     config.training.max_norm = 1.0
     config.training.local_batch_size = 32
-    config.training.steps = 60000
+    # config.training.steps = 60000
+    config.training.steps = 45000
     config.dataloader.classifier_free_guidance_prob = 0.1
     config.validator.enable = True
     config.validator.freq = 1024 # NGPU =8 

@@ -15,7 +15,7 @@ import pytest
 import torch
 
 import alto.kernels.dispatch.tensor as dispatch_tensor
-from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.kernels.dispatch.config import PrecisionScheduleEntry, TrainingOpConfig
 from alto.kernels.dispatch.tensor import NVFP4TrainingWeightWrapperTensor
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import ALIGN_SIZE_M
 
@@ -43,6 +43,29 @@ def device() -> torch.device:
 def _make_wrapper(config: TrainingOpConfig, shape=(32, 32), device="cuda"):
     w = torch.randn(*shape, dtype=torch.bfloat16, device=device)
     return NVFP4TrainingWeightWrapperTensor(w, config)
+
+
+def test_copy_allows_checkpoint_wrapper_with_updated_schedule():
+    """Checkpoint loading copies raw weights into wrappers built from the new recipe."""
+    saved_config = _make_config()
+    active_config = _make_config(
+        precision_schedule=(
+            PrecisionScheduleEntry(precision="bf16", start_step=1, end_step=15_000),
+        )
+    )
+    checkpoint_weight = NVFP4TrainingWeightWrapperTensor(
+        torch.full((2, 2), 3.0), saved_config
+    )
+    active_weight = NVFP4TrainingWeightWrapperTensor(
+        torch.zeros((2, 2)), active_config
+    )
+
+    result = active_weight.copy_(checkpoint_weight)
+
+    torch.testing.assert_close(active_weight._data, checkpoint_weight._data)
+    assert active_weight.config == active_config
+    assert isinstance(result, NVFP4TrainingWeightWrapperTensor)
+    assert result.config == active_config
 
 
 # ---------------------------------------------------------------------------

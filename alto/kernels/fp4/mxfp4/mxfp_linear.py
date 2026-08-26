@@ -320,6 +320,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
             is_2d_block=use_2dblock_w,
             use_uos=use_uos,
         )
+        w_dq = None
 
         if is_cdna4():
             assert not use_macro_block_scaling, "Macro block scaling is not supported in real MXFP4 kernels"
@@ -356,11 +357,21 @@ class MXFP4LinearFunction(torch.autograd.Function):
             y = x_dq @ w_dq.T
 
         if not use_2dblock_w:
+            if w_dq is None:
+                w_dq = torch.ops.torchtitan.convert_from_mxfp4(
+                    w_mxfp4,
+                    w_scale,
+                    original_dtype,
+                    axis=-1,
+                    is_2d_block=use_2dblock_w,
+                )
+                if use_macro_block_scaling:
+                    w_dq = macro_block_descaling(w_dq, w_mbs, axis=-1, use_2d_block=use_2dblock_w)
             if use_macro_block_scaling:
-                w_scaled, w_mbs = macro_block_scaling(weight, axis=0, use_2d_block=False)
+                w_scaled, w_mbs = macro_block_scaling(w_dq, axis=0, use_2d_block=False)
             else:
-                w_scaled = weight
-                w_mbs = weight.new_empty([])
+                w_scaled = w_dq
+                w_mbs = w_dq.new_empty([])
 
             w_mxfp4, w_scale = torch.ops.torchtitan.convert_to_mxfp4(
                 w_scaled,

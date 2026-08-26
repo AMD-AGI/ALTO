@@ -30,8 +30,6 @@ class HadamardFactory:
     block_size: int = 32
     randomized: bool = True
     dtype: torch.dtype = torch.float32
-    seed: Optional[int] = None
-    generator: torch.Generator = torch.Generator()
 
     @classmethod
     def configure(
@@ -55,9 +53,6 @@ class HadamardFactory:
             cls.randomized = randomized
         if dtype is not None:
             cls.dtype = dtype
-        if seed is not None:
-            cls.seed = seed
-            cls.generator.manual_seed(seed)
 
     @classmethod
     def create_transform(
@@ -75,7 +70,7 @@ class HadamardFactory:
         """
 
         weight = cls._create_weight(device)
-        perm = cls._create_permutation(weight) if cls.randomized else None
+        perm = cls._create_permutation(weight, device) if cls.randomized else None
         return HadamardTransform(weight, perm)
 
     @classmethod
@@ -86,12 +81,12 @@ class HadamardFactory:
         if not cls.randomized:
             data = deterministic_hadamard_matrix(cls.block_size, cls.dtype, device)
         else:
-            data = random_hadamard_matrix(cls.block_size, cls.dtype, device, cls.generator)
+            data = random_hadamard_matrix(cls.block_size, cls.dtype, device)
         return data
 
     @classmethod
-    def _create_permutation(cls, weight: Tensor) -> Tensor:
-        data = torch.randperm(weight.size(0), generator=cls.generator)
+    def _create_permutation(cls, weight: Tensor, device: torch.device) -> Tensor:
+        data = torch.randperm(weight.size(0), device=device)
         return data
 
 

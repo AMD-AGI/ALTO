@@ -650,6 +650,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             is_2d_block=use_2dblock_w,
             use_uos=use_uos,
         )
+        w_dq = None
 
         if is_cdna4():
             assert not use_macro_block_scaling, "Macro block scaling is not supported in real MXFP4 kernels"
@@ -682,20 +683,33 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             if use_macro_block_scaling:
                 w_dq = macro_block_descaling(w_dq, expert_weight_mbs, axis=quant_axis_w, use_2d_block=use_2dblock_w)
                 x_dq = macro_block_descaling(x_dq, input_mbs, axis=-1, use_2d_block=use_2dblock_x)
+
             if not trans_weights:
                 w_dq = w_dq.transpose(-2, -1)
-            #w_dq = w_dq.contiguous()
-            #x_dq = x_dq.contiguous()
             res = cg_grouped_gemm_forward(x_dq, w_dq, expert_indices)
 
         if not use_2dblock_w:
+            if w_dq is None:
+                w_dq = torch.ops.torchtitan.convert_from_mxfp4(
+                    expert_weights_mxfp4,
+                    expert_weight_scales,
+                    original_dtype,
+                    axis=quant_axis_w,
+                    is_2d_block=use_2dblock_w,
+                )
+                if use_macro_block_scaling:
+                    w_dq = macro_block_descaling(w_dq, expert_weight_mbs, axis=quant_axis_w, use_2d_block=use_2dblock_w)
+                if not trans_weights:
+                    w_dq = w_dq.transpose(-2, -1)
+
+            w_dq_t = w_dq.transpose(-2, -1) if not trans_weights else w_dq
             if use_macro_block_scaling:
-                expert_weights_scaled, expert_weight_mbs = macro_block_scaling(expert_weights,
+                expert_weights_scaled, expert_weight_mbs = macro_block_scaling(w_dq_t,
                                                                                axis=requant_axis_w,
                                                                                use_2d_block=False)
             else:
-                expert_weights_scaled = expert_weights
-                expert_weight_mbs = expert_weights.new_empty([])
+                expert_weights_scaled = w_dq_t
+                expert_weight_mbs = w_dq_t.new_empty([])
             expert_weights_mxfp4, expert_weight_scales = torch.ops.torchtitan.convert_to_mxfp4(
                 expert_weights_scaled,
                 axis=requant_axis_w,
@@ -714,7 +728,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                     w_dq = macro_block_descaling(w_dq, expert_weight_mbs, axis=requant_axis_w, use_2d_block=False)
                 if not trans_weights:
                     w_dq = w_dq.transpose(-2, -1)
-                #w_dq = w_dq.contiguous()
+
         if not use_2dblock_x:
             if hadamard_transform is not None:
                 inputs = hadamard_transform(inputs, left_mul=True)
@@ -741,7 +755,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 )
                 if use_macro_block_scaling:
                     x_dq = macro_block_descaling(x_dq, input_mbs, axis=0, use_2d_block=False)
-                #x_dq = x_dq.contiguous()
+
         # Save for backward
         if is_cdna4():
             ctx.save_for_backward(inputs_mxfp4, input_scales, expert_weights_mxfp4, expert_weight_scales,
@@ -806,7 +820,6 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 )
                 if ctx.use_macro_block_scaling:
                     grad_output_dq = macro_block_descaling(grad_output_dq, grad_output_mbs, axis=-1, use_2d_block=True)
-                #grad_output_dq = grad_output_dq.contiguous()
                 grad_output_m_dq = grad_output_dq
         else:
             if ctx.use_macro_block_scaling:
@@ -859,8 +872,6 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                                                              grad_output_mbs_m,
                                                              axis=0,
                                                              use_2d_block=False)
-                #grad_output_m_dq = grad_output_m_dq.contiguous()
-                #grad_output_dq = grad_output_dq.contiguous()
         # Compute gradients
         if is_cdna4():
             grad_inputs = torch.ops.torchtitan.mxfp4_grouped_gemm_backward_inputs(

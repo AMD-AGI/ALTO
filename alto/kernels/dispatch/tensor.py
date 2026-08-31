@@ -103,7 +103,7 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
             nonlocal config
             if config is None:
                 config = t.config
-            else:
+            elif func.__name__ in gemm_ops or func.__name__ == "_grouped_mm":
                 assert t.config == config, (
                     f"All TrainingWeightWrapperBaseTensor instances must have the same config, but found {t.config} and {config}"
                 )

@@ -198,7 +198,10 @@ class LowPrecisionTrainingModifier(Modifier):
         from torchtitan.models.common.linear import Linear
 
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(parent, ALIGN_SIZE_M)
+            if not hasattr(parent.token_dispatcher, "pad_multiple"):
+                swap_token_dispatcher(parent, ALIGN_SIZE_M)
+            else:
+                assert parent.token_dispatcher.pad_multiple % ALIGN_SIZE_M == 0
 
         def is_match(
             name: str,

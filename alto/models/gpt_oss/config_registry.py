@@ -47,7 +47,8 @@ __all__ = [
     "gpt_oss_20b_mxfp4_base",
     "gpt_oss_20b_mxfp4_had_2dw_sr",
     "gpt_oss_20b_mxfp4_3rht_2dw_sr",
-    "gpt_oss_20b_mxfp4_3rht_2dw_sr_uos"
+    "gpt_oss_20b_mxfp4_3rht_2dw_sr_uos",
+    "gpt_oss_20b_mxfp4_3rht_2dw_sr_1d"
 ]
 
 
@@ -180,7 +181,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.optimizer.eps = 1e-5 # set by mlperf
     config.lr_scheduler.min_lr_factor = 0.1 # set by mlperf
     config.lr_scheduler.warmup_steps = 128 # can be edited for mlperf submission
-    config.lr_scheduler.decay_ratio = 1 - 128 / config.training.steps
+    config.lr_scheduler.total_steps = 1200000
+    config.lr_scheduler.decay_ratio = 1 - 128 / config.lr_scheduler.total_steps
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
@@ -363,6 +365,15 @@ def gpt_oss_20b_mxfp4_3rht_2dw_sr() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-mxfp4-base"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp4_3rht_2dw_sr.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_mxfp4_3rht_2dw_sr_1d() -> Trainer.Config:
+    """baseline MXFP4 quantization."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-mxfp4-base"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp4_3rht_2dw_sr_1d.yaml",),
     ],)
     return config
 

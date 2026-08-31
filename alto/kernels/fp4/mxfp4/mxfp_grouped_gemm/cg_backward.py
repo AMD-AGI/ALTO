@@ -634,16 +634,25 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             requant_axis_w = -1
 
         expert_weights = unwrap_weight_wrapper(expert_weights)
+
+        # Forward GEMM rotation: Q(XH) @ Q(WH)^T
+        if hadamard_transform is not None and not use_2dblock_x and not use_2dblock_w:
+            inputs_fwd = hadamard_transform(inputs)
+            expert_weights_fwd = hadamard_transform(expert_weights)
+        else:
+            inputs_fwd = inputs
+            expert_weights_fwd = expert_weights
+
         if use_macro_block_scaling:
-            inputs_scaled, input_mbs = macro_block_scaling(inputs, axis=-1, use_2d_block=use_2dblock_x)
-            expert_weights_scaled, expert_weight_mbs = macro_block_scaling(expert_weights,
+            inputs_scaled, input_mbs = macro_block_scaling(inputs_fwd, axis=-1, use_2d_block=use_2dblock_x)
+            expert_weights_scaled, expert_weight_mbs = macro_block_scaling(expert_weights_fwd,
                                                                            axis=quant_axis_w,
                                                                            use_2d_block=use_2dblock_w)
         else:
-            inputs_scaled = inputs
-            input_mbs = inputs.new_empty([])
-            expert_weights_scaled = expert_weights
-            expert_weight_mbs = expert_weights.new_empty([])
+            inputs_scaled = inputs_fwd
+            input_mbs = inputs_fwd.new_empty([])
+            expert_weights_scaled = expert_weights_fwd
+            expert_weight_mbs = expert_weights_fwd.new_empty([])
         inputs_mxfp4, input_scales = torch.ops.torchtitan.convert_to_mxfp4(
             inputs_scaled,
             axis=-1,
@@ -695,13 +704,15 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             res = cg_grouped_gemm_forward(x_dq, w_dq, expert_indices)
 
         if not use_2dblock_w:
+            # dgrad weight rotation: Q(HW) for dgrad path
+            w_for_dgrad = hadamard_transform(expert_weights, left_mul=True) if hadamard_transform is not None else expert_weights
             if use_macro_block_scaling:
-                expert_weights_scaled, expert_weight_mbs = macro_block_scaling(expert_weights,
+                expert_weights_scaled, expert_weight_mbs = macro_block_scaling(w_for_dgrad,
                                                                                axis=requant_axis_w,
                                                                                use_2d_block=False)
             else:
-                expert_weights_scaled = expert_weights
-                expert_weight_mbs = expert_weights.new_empty([])
+                expert_weights_scaled = w_for_dgrad
+                expert_weight_mbs = w_for_dgrad.new_empty([])
             expert_weights_mxfp4, expert_weight_scales = torch.ops.torchtitan.convert_to_mxfp4(
                 expert_weights_scaled,
                 axis=requant_axis_w,
@@ -815,11 +826,16 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 #grad_output_dq = grad_output_dq.contiguous()
                 grad_output_m_dq = grad_output_dq
         else:
-            if ctx.use_macro_block_scaling:
-                grad_output_scaled, grad_output_mbs = macro_block_scaling(grad_output, axis=-1, use_2d_block=False)
+            # dgrad grad_output rotation: Q(GH^T) for dgrad path (1D quant only)
+            if ctx.hadamard_transform is not None and not ctx.use_2dblock_w:
+                grad_output_dgrad = ctx.hadamard_transform(grad_output, inverse=True)
             else:
-                grad_output_scaled = grad_output
-                grad_output_mbs = grad_output.new_empty([])
+                grad_output_dgrad = grad_output
+            if ctx.use_macro_block_scaling:
+                grad_output_scaled, grad_output_mbs = macro_block_scaling(grad_output_dgrad, axis=-1, use_2d_block=False)
+            else:
+                grad_output_scaled = grad_output_dgrad
+                grad_output_mbs = grad_output_dgrad.new_empty([])
             grad_output_mxfp4, grad_output_scales = torch.ops.torchtitan.convert_to_mxfp4(
                 grad_output_scaled,
                 axis=-1,
@@ -827,6 +843,7 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
                 is_2d_block=False,
                 blockscale_selection=ctx.blockscale_selection,
             )
+            # wgrad grad_output rotation: Q(HG) for wgrad path (existing)
             if ctx.hadamard_transform is not None:
                 grad_output = ctx.hadamard_transform(grad_output, left_mul=True)
             if ctx.use_macro_block_scaling:

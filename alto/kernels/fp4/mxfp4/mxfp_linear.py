@@ -300,14 +300,22 @@ class MXFP4LinearFunction(torch.autograd.Function):
         original_dtype = x.dtype
         x = x.reshape(-1, original_shape[-1])  # Ensure x is 2D
 
-        if use_macro_block_scaling:
-            x_scaled, x_mbs = macro_block_scaling(x, axis=-1, use_2d_block=use_2dblock_x)
-            w_scaled, w_mbs = macro_block_scaling(weight, axis=-1, use_2d_block=use_2dblock_w)
+        # Forward GEMM rotation: Q(XH) @ Q(WH)^T
+        if hadamard_transform is not None and not use_2dblock_x and not use_2dblock_w:
+            x_fwd = hadamard_transform(x)
+            w_fwd = hadamard_transform(weight)
         else:
-            x_scaled = x
-            x_mbs = x.new_empty([])
-            w_scaled = weight
-            w_mbs = weight.new_empty([])
+            x_fwd = x
+            w_fwd = weight
+
+        if use_macro_block_scaling:
+            x_scaled, x_mbs = macro_block_scaling(x_fwd, axis=-1, use_2d_block=use_2dblock_x)
+            w_scaled, w_mbs = macro_block_scaling(w_fwd, axis=-1, use_2d_block=use_2dblock_w)
+        else:
+            x_scaled = x_fwd
+            x_mbs = x_fwd.new_empty([])
+            w_scaled = w_fwd
+            w_mbs = w_fwd.new_empty([])
 
         x_mxfp4, x_scale = torch.ops.torchtitan.convert_to_mxfp4(
             x_scaled,
@@ -358,11 +366,13 @@ class MXFP4LinearFunction(torch.autograd.Function):
             y = x_dq @ w_dq.T
 
         if not use_2dblock_w:
+            # dgrad weight rotation: Q(HW) for dgrad path
+            w_for_dgrad = hadamard_transform(weight, left_mul=True) if hadamard_transform is not None else weight
             if use_macro_block_scaling:
-                w_scaled, w_mbs = macro_block_scaling(weight, axis=0, use_2d_block=False)
+                w_scaled, w_mbs = macro_block_scaling(w_for_dgrad, axis=0, use_2d_block=False)
             else:
-                w_scaled = weight
-                w_mbs = weight.new_empty([])
+                w_scaled = w_for_dgrad
+                w_mbs = w_for_dgrad.new_empty([])
 
             w_mxfp4, w_scale = torch.ops.torchtitan.convert_to_mxfp4(
                 w_scaled,
@@ -475,11 +485,16 @@ class MXFP4LinearFunction(torch.autograd.Function):
                     grad_output_dq = macro_block_descaling(grad_output_dq, grad_output_mbs, axis=-1, use_2d_block=True)
                 grad_output_m_dq = grad_output_dq
         else:
-            if ctx.use_macro_block_scaling:
-                grad_output_scaled, grad_output_mbs = macro_block_scaling(grad_output, axis=-1, use_2d_block=False)
+            # dgrad grad_output rotation: Q(GH^T) for dgrad path (1D quant only)
+            if ctx.hadamard_transform is not None and not ctx.use_2dblock_w:
+                grad_output_dgrad = ctx.hadamard_transform(grad_output, inverse=True)
             else:
-                grad_output_scaled = grad_output
-                grad_output_mbs = grad_output.new_empty([])
+                grad_output_dgrad = grad_output
+            if ctx.use_macro_block_scaling:
+                grad_output_scaled, grad_output_mbs = macro_block_scaling(grad_output_dgrad, axis=-1, use_2d_block=False)
+            else:
+                grad_output_scaled = grad_output_dgrad
+                grad_output_mbs = grad_output_dgrad.new_empty([])
             grad_output_mxfp4, grad_output_scales = torch.ops.torchtitan.convert_to_mxfp4(
                 grad_output_scaled,
                 axis=-1,
@@ -488,6 +503,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 blockscale_selection=ctx.blockscale_selection,
             )
 
+            # wgrad grad_output rotation: Q(HG) for wgrad path (existing)
             if ctx.hadamard_transform is not None:
                 grad_output = ctx.hadamard_transform(grad_output, left_mul=True)
             if ctx.use_macro_block_scaling:

@@ -42,12 +42,12 @@ class LowPrecisionTrainingModifier(Modifier):
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     mxfp4_scale_selection: Literal["default", "mse_4_6_shifted", "mse_4_6_strict"] = "default"
     precision_schedule: list[dict[str, Any]] = Field(default_factory=list)
-    forward_precision: Literal["low", "bf16"] = "low"
+    forward_precision: Literal["low", "bf16", "mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"] = "low"
     """
     Precision used by the Linear forward path. ``low`` uses the configured
     scheme; ``bf16`` bypasses quantization for the forward GEMM.
     """
-    backward_precision: Literal["low", "bf16"] = "low"
+    backward_precision: Literal["low", "bf16", "mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"] = "low"
     """
     Precision used by the Linear backward path. ``low`` uses the configured
     scheme; ``bf16`` computes input and weight gradients in BF16.
@@ -120,6 +120,11 @@ class LowPrecisionTrainingModifier(Modifier):
         if precision not in ("bf16", "mxfp4", "mxfp8_e4m3", "mxfp8_e5m2", "nvfp4"):
             raise ValueError(f"Unsupported scheduled precision: {precision}")
         return precision
+
+    @field_validator("forward_precision", "backward_precision", mode="before")
+    @classmethod
+    def normalize_directional_precision(cls, value: str) -> str:
+        return value if value == "low" else cls._normalize_precision_name(str(value))
 
     @field_validator("precision_schedule", mode="before")
     def validate_precision_schedule(cls, value: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -203,6 +208,28 @@ class LowPrecisionTrainingModifier(Modifier):
             scheduled_precisions = {entry["precision"] for entry in self.precision_schedule}
             if "nvfp4" in scheduled_precisions:
                 raise ValueError("MXFP8 wrapper does not support scheduled nvfp4. Use mxfp4/nvfp4 as base scheme.")
+        return self
+
+    @model_validator(mode="after")
+    def validate_directional_mxfp_scheme(self):
+        fp8 = {"mxfp8_e4m3", "mxfp8_e5m2"}
+        if isinstance(self.scheme, dict):
+            return self
+        forward = self.scheme if self.forward_precision == "low" else self.forward_precision
+        backward = self.scheme if self.backward_precision == "low" else self.backward_precision
+        mixed = (forward == "mxfp4" and backward in fp8) or (forward in fp8 and backward == "mxfp4")
+        if not mixed:
+            return self
+        if self.scheme != forward:
+            raise ValueError("scheme must equal forward_precision for directional MXFP training.")
+        if self.precision_schedule:
+            raise ValueError("Directional MXFP training does not support precision_schedule.")
+        if self.use_hadamard or self.use_dge:
+            raise ValueError("Directional MXFP training does not support Hadamard or DGE.")
+        if self.two_level_scaling != "none" or self.clip_mode != "none":
+            raise ValueError("Directional MXFP training does not support clipping or two-level scaling.")
+        if self.mxfp4_scale_selection != "default":
+            raise ValueError("Directional MXFP training uses the default MXFP4 scale selection.")
         return self
 
     @property

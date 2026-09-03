@@ -22,6 +22,7 @@ from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,
 )
 from alto.kernels.mxfp8.mxfp8_linear import _to_mxfp8_then_scaled_mm
+from alto.kernels.mxfp_directional_linear import directional_mxfp_linear
 from .config import TrainingOpConfig
 
 aten = torch.ops.aten
@@ -60,6 +61,17 @@ def _effective_precision(config: TrainingOpConfig) -> str:
         ):
             return entry.precision
     return config.precision
+
+
+def _directional_format(config: TrainingOpConfig, value: str) -> str:
+    return config.precision if value == "low" else value
+
+
+def _is_directional_mxfp_mix(config: TrainingOpConfig) -> bool:
+    forward = _directional_format(config, config.forward_precision)
+    backward = _directional_format(config, config.backward_precision)
+    fp8 = {"mxfp8_e4m3", "mxfp8_e5m2"}
+    return (forward == "mxfp4" and backward in fp8) or (forward in fp8 and backward == "mxfp4")
 
 
 def _unwrap_training_weight_wrappers(args, kwargs):
@@ -334,7 +346,15 @@ class MXFP4TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
             #             f"A.shape: {A.shape} B.shape: {B.shape} bias.shape: {bias.shape if bias is not None else None}")
 
             W = B if trans_b else B.T
-            if precision == "mxfp4":
+            if _is_directional_mxfp_mix(config):
+                Y = directional_mxfp_linear(
+                    A, W,
+                    forward_scheme=_directional_format(config, config.forward_precision),
+                    backward_scheme=_directional_format(config, config.backward_precision),
+                    use_2dblock_x=config.use_2dblock_x, use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                )
+            elif precision == "mxfp4":
                 Y = _to_mxfp4_then_scaled_mm(
                     A,
                     W,
@@ -597,7 +617,15 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                 return _run_unwrapped_gemm(func, args, kwargs)
 
             W = B if trans_b else B.T
-            if precision in cls._PRECISION_TO_FP8_VARIANT:
+            if _is_directional_mxfp_mix(config):
+                Y = directional_mxfp_linear(
+                    A, W,
+                    forward_scheme=_directional_format(config, config.forward_precision),
+                    backward_scheme=_directional_format(config, config.backward_precision),
+                    use_2dblock_x=config.use_2dblock_x, use_2dblock_w=config.use_2dblock_w,
+                    use_sr_grad=config.use_sr_grad,
+                )
+            elif precision in cls._PRECISION_TO_FP8_VARIANT:
                 assert not config.use_hadamard and not config.use_dge, (
                     "MXFP8 dispatch does not support Hadamard or DGE options."
                 )
@@ -608,6 +636,8 @@ class MXFP8TrainingWeightWrapperTensor(TrainingWeightWrapperBaseTensor):
                     use_sr_grad=config.use_sr_grad,
                     use_2dblock_x=config.use_2dblock_x,
                     use_2dblock_w=config.use_2dblock_w,
+                    forward_precision=config.forward_precision,
+                    backward_precision=config.backward_precision,
                 )
             elif precision == "mxfp4":
                 Y = _to_mxfp4_then_scaled_mm(

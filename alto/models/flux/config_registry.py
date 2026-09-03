@@ -35,6 +35,8 @@ __all__ = [
     "flux_schnell_lpt_mse_4_6_shifted_mlperf",
     "flux_schnell_lpt_mse_4_6_shifted_forward_bf16",
     "flux_schnell_lpt_mse_4_6_shifted_backward_bf16",
+    "flux_schnell_lpt_mxfp4_forward_mxfp8_backward",
+    "flux_schnell_lpt_mxfp8_forward_mxfp4_backward",
     "flux_schnell_lpt_mse_4_6_strict",
     "flux_schnell_lpt_precision_schedule",
     "flux_schnell_lpt_distill_off_policy",
@@ -53,6 +55,12 @@ FLUX_LPT_MSE_4_6_SHIFTED_FORWARD_BF16_RECIPE = str(
 )
 FLUX_LPT_MSE_4_6_SHIFTED_BACKWARD_BF16_RECIPE = str(
     Path(__file__).with_name("configs") / "lpt_mse_4_6_shifted_backward_bf16_recipe.yaml"
+)
+FLUX_LPT_MXFP8_FORWARD_MXFP4_BACKWARD_RECIPE = str(
+    Path(__file__).with_name("configs") / "lpt_mxfp8_forward_mxfp4_backward_recipe.yaml"
+)
+FLUX_LPT_MXFP4_FORWARD_MXFP8_BACKWARD_RECIPE = str(
+    Path(__file__).with_name("configs") / "lpt_mxfp4_forward_mxfp8_backward_recipe.yaml"
 )
 FLUX_LPT_MSE_4_6_STRICT_RECIPE = str(Path(__file__).with_name("configs") / "lpt_mse_4_6_strict_recipe.yaml")
 FLUX_LPT_PRECISION_SCHEDULE_RECIPE = str(Path(__file__).with_name("configs") / "lpt_precision_schedule_recipe.yaml")
@@ -89,6 +97,14 @@ def _with_lpt_mse_4_6_shifted_backward_bf16(
     config: FluxTrainer.Config,
 ) -> FluxTrainer.Config:
     return _with_recipe(config, FLUX_LPT_MSE_4_6_SHIFTED_BACKWARD_BF16_RECIPE)
+
+
+def _with_lpt_mxfp8_forward_mxfp4_backward(config: FluxTrainer.Config) -> FluxTrainer.Config:
+    return _with_recipe(config, FLUX_LPT_MXFP8_FORWARD_MXFP4_BACKWARD_RECIPE)
+
+
+def _with_lpt_mxfp4_forward_mxfp8_backward(config: FluxTrainer.Config) -> FluxTrainer.Config:
+    return _with_recipe(config, FLUX_LPT_MXFP4_FORWARD_MXFP8_BACKWARD_RECIPE)
 
 
 def _with_lpt_mse_4_6_strict(config: FluxTrainer.Config) -> FluxTrainer.Config:
@@ -308,6 +324,14 @@ def flux_schnell_lpt_mse_4_6_shifted_backward_bf16() -> FluxTrainer.Config:
     config.validation.enable_classifier_free_guidance = False
     config.validation.denoising_steps = 4
     return config
+
+
+def flux_schnell_lpt_mxfp8_forward_mxfp4_backward() -> FluxTrainer.Config:
+    return _with_lpt_mxfp8_forward_mxfp4_backward(flux_schnell())
+
+
+def flux_schnell_lpt_mxfp4_forward_mxfp8_backward() -> FluxTrainer.Config:
+    return _with_lpt_mxfp4_forward_mxfp8_backward(flux_schnell())
 
 
 def flux_schnell_lpt_mse_4_6_strict() -> FluxTrainer.Config:

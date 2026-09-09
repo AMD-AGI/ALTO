@@ -4,7 +4,7 @@
 
 ## Abstract
 
-Training large language models (LLMs) in sub-8-bit arithmetic promises substantial gains in memory bandwidth and compute throughput, yet FP4 formats introduce quantization error severe enough to destabilize optimization if left unaddressed. We present [ALTO](https://github.com/AMD-AGI/ALTO), an open-source training recipe for **GPT-OSS-20B**, a 20-billion-parameter mixture-of-experts (MoE) model, on the **MLPerf Small MoE** benchmark under the **MXFP4** microscaling format. The recipe combines established techniques from NVIDIA et al. [arXiv:2509.25149] (hybrid 1D/2D block quantization, randomized Hadamard transforms, and stochastic rounding) with a simplified weight de-oscillation scheme adapted from TetraJet-v2 [arXiv:2510.27527]. On C4 validation at global batch size 16, **MXFP4 + RHT + SR + de-oscillation** reaches a validation loss of 3.3350 at 16,128 steps, only 0.007 above the BF16 baseline (3.3283), closing roughly **50%** of the gap left by MXFP4 without de-oscillation (3.3418). Measured by steps to reach the MLPerf quality target (validation loss 3.34), de-oscillation cuts the FP4 convergence overhead relative to BF16 from **+20.0%** to **+5.0%**. We also report negative end-to-end results from differential gradient estimation, outlier clipping, and macro-block scaling, despite each showing operator-level SNR gains. All experiments use simulated MXFP4 kernels on AMD MI300 hardware and wall-clock speed has not been optimized.
+Training large language models (LLMs) in sub-8-bit arithmetic promises substantial gains in memory bandwidth and compute throughput, yet FP4 formats introduce quantization error severe enough to destabilize optimization if left unaddressed. We present [ALTO](https://github.com/AMD-AGI/ALTO), an open-source training recipe for **GPT-OSS-20B**, a 20-billion-parameter mixture-of-experts (MoE) model, on the **MLPerf Small MoE** benchmark under the **MXFP4** microscaling format. The recipe combines established techniques from Abecassis, Felix et al. [arXiv:2509.25149] (hybrid 1D/2D block quantization, randomized Hadamard transforms, and stochastic rounding) with a simplified weight de-oscillation scheme adapted from TetraJet-v2 [arXiv:2510.27527]. On C4 validation at global batch size 16, **MXFP4 + RHT + SR + de-oscillation** reaches a validation loss of 3.3350 at 16,128 steps, only 0.007 above the BF16 baseline (3.3283), closing roughly **50%** of the gap left by MXFP4 without de-oscillation (3.3418). Measured by steps to reach the MLPerf quality target (validation loss 3.34), de-oscillation cuts the FP4 convergence overhead relative to BF16 from **+20.0%** to **+5.0%**. We also report negative end-to-end results from differential gradient estimation, outlier clipping, and macro-block scaling, despite each showing operator-level SNR gains. All experiments use simulated MXFP4 kernels on AMD MI300 hardware and wall-clock speed has not been optimized.
 
 ---
 
@@ -91,13 +91,13 @@ where $\mathcal{Q}_{\mathrm{E2M1}}$ rounds to the nearest representable E2M1 val
   <img src="./flow.png" alt="Compute flow of an MXFP4 linear layer" style="width:70%;height:auto;" />
 </p>
 
-Sections 3.1–3.3 describe techniques adopted from NVIDIA et al. [arXiv:2509.25149] and integrated in ALTO. Section 3.4 introduces our weight de-oscillation method, adapted from the OsciReset algorithm in TetraJet-v2 [arXiv:2510.27527]. Sections 3.5–3.8 cover additional methods explored but not retained in the recommended recipe.
+Sections 3.1–3.3 describe techniques adopted from Abecassis, Felix et al. [arXiv:2509.25149] and integrated in ALTO. Section 3.4 introduces our weight de-oscillation method, adapted from the OsciReset algorithm in TetraJet-v2 [arXiv:2510.27527]. Sections 3.5–3.8 cover additional methods explored but not retained in the recommended recipe.
 
 ### 3.1 Hybrid 1D/2D Block Quantization
 
-**Problem.** The MX specification defines block scaling along contiguous 1D blocks only: each UE8M0 scale is shared by 32 consecutive elements along a single axis. For inference, quantizing each operand once along its contraction axis suffices. Training is more demanding. Consider a linear layer with weight $\mathbf{W} \in \mathbb{R}^{N \times K}$ and forward pass $\mathbf{O} = \mathbf{X}\cdot\mathbf{W}^{\top}$. The forward GEMM contracts along $K$, so $\mathbf{W}$ is naturally quantized with scales aligned to that axis; the backward pass $\mathrm{d} \mathbf{X} = \mathrm{d}\mathbf{O}\cdot\mathbf{W}$ accesses $\mathbf{W}$ along $N$. Under 1D MX blocking, forward and backward demand quantization along different axes. Quantizing $\mathbf{W}$ in 1D therefore requires two separate quantizations along the two axes, which doubles quantization overhead and still leaves the two quantized views inconsistent. Activations present a separate concern: outlier redistribution via RHT (Section 3.2) requires 1D segments and is incompatible with 2D activation blocking.
+The MX specification defines block scaling along contiguous 1D blocks only: each UE8M0 scale is shared by 32 consecutive elements along a single axis. For inference, quantizing each operand once along its contraction axis suffices; training imposes additional constraints. Consider a linear layer with weight $\mathbf{W} \in \mathbb{R}^{N \times K}$ and forward pass $\mathbf{O} = \mathbf{X}\cdot\mathbf{W}^{\top}$. The forward GEMM contracts along $K$, so $\mathbf{W}$ is naturally quantized with scales aligned to that axis; the backward pass $\mathrm{d} \mathbf{X} = \mathrm{d}\mathbf{O}\cdot\mathbf{W}$ accesses $\mathbf{W}$ along $N$. Under 1D MX blocking, forward and backward therefore require quantization along different axes. A strictly 1D weight layout necessitates two separate quantizations, doubling overhead while still leaving the forward and backward views inconsistent. Activations present a further constraint: outlier redistribution via Randomized Hadamard Transform (RHT, Section 3.2) operates on 1D segments and is incompatible with 2D activation blocking.
 
-**Solution.** We adopt a **1D–2D hybrid** layout (denoted *1d2d*) that respects the MX spec for activations while extending it for weights, following NVIDIA et al. [arXiv:2509.25149]:
+To reconcile these requirements, we adopt a **1D–2D hybrid** layout (denoted *1d2d*) that respects the MX spec for activations while extending it for weights, following Abecassis, Felix et al. [arXiv:2509.25149]:
 
 | Operand | Block geometry | Rationale |
 |---------|---------------|-----------|
@@ -110,9 +110,7 @@ For MoE grouped GEMM, expert weights $\mathbf{W} \in \mathbb{R}^{E \times N \tim
 
 ### 3.2 Randomized Hadamard Transform
 
-**Problem.** A small number of large-magnitude activations (outliers) inflate the per-block scale, compressing the remaining elements and degrading signal fidelity.
-
-**Solution.** Following NVIDIA et al. [arXiv:2509.25149], we apply a **randomized Hadamard transform** (RHT) on the weight gradient path. Let $\mathbf{H} \in \mathbb{R}^{32 \times 32}$ be a Hadamard matrix constructed via Sylvester's recursion, further randomized by random sign flips and column permutations. In the weight-gradient GEMM, activations are transformed as $\mathbf{X}' \leftarrow \mathbf{H}\mathbf{X}$; the output gradient is transformed similarly $\mathrm{d}\mathbf{O}' \leftarrow \mathbf{H}\mathrm{d}\mathbf{O}$. Because $\mathbf{H}$ is orthogonal (up to scaling), the exact weight gradient satisfies
+A small number of large-magnitude activations (outliers) can inflate the per-block scale, compressing the remaining elements and degrading signal fidelity. Following Abecassis, Felix et al. [arXiv:2509.25149], we apply a **randomized Hadamard transform** (RHT) on the weight gradient path to redistribute outliers before quantization. Let $\mathbf{H} \in \mathbb{R}^{32 \times 32}$ be a Hadamard matrix constructed via Sylvester's recursion, further randomized by random sign flips and column permutations. In the weight-gradient GEMM, activations are transformed as $\mathbf{X}' \leftarrow \mathbf{H}\mathbf{X}$; the output gradient is transformed similarly $\mathrm{d}\mathbf{O}' \leftarrow \mathbf{H}\mathrm{d}\mathbf{O}$. Because $\mathbf{H}$ is orthogonal (up to scaling), the exact weight gradient satisfies
 
 $$
 \mathrm{d}\mathbf{W} = \left(\mathbf{H}\mathrm{d}\mathbf{O}\right)^{\top} \left(\mathbf{H}\mathbf{X}\right) = \mathrm{d}\mathbf{O}^{\top}\mathbf{H}^{\top}\mathbf{H}\mathbf{X} = \mathrm{d}\mathbf{O}^{\top}\mathbf{X}
@@ -122,15 +120,13 @@ Because $\mathbf{H}$ is orthogonal (up to scaling), the transform redistributes 
 
 ### 3.3 Stochastic Rounding on Gradients
 
-**Problem.** Deterministic round-to-nearest-even quantization of gradients introduces a systematic bias: small gradient components are disproportionately rounded to zero, attenuating effective learning rates in FP4.
-
-**Solution.** As in NVIDIA et al. [arXiv:2509.25149], we employ **stochastic rounding** (SR) during gradient quantization in the backward pass. Each element is rounded up or down with probability proportional to its fractional distance from the two adjacent representable values, yielding an unbiased estimator of the pre-quantization gradient in expectation. On CDNA4, stochastic rounding is accelerated through inline assembly (`v_cvt_scalef32_sr_pk_fp4_*`). Forward-pass quantization of weights and activations remains deterministic.
+Deterministic round-to-nearest-even quantization of gradients introduces a systematic bias: small gradient components are disproportionately rounded to zero, attenuating effective learning rates in FP4. As in Abecassis, Felix et al. [arXiv:2509.25149], we employ **stochastic rounding** (SR) during gradient quantization in the backward pass to mitigate this effect. Each element is rounded up or down with probability proportional to its fractional distance from the two adjacent representable values, yielding an unbiased estimator of the pre-quantization gradient in expectation. On CDNA4, stochastic rounding is accelerated through inline assembly (`v_cvt_scalef32_sr_pk_fp4_*`). Forward-pass quantization of weights and activations remains deterministic.
 
 ### 3.4 Weight De-Oscillation
 
-**Problem.** Weight oscillation arises from two complementary mechanisms. First, when a master weight $w$ resides near a quantization bin boundary, infinitesimal AdamW updates can cause $Q(w)$ to alternate between adjacent bins while the FP trajectory remains smooth. Second, outlier elements with disproportionately large magnitude within a block can drive the block scale and repeatedly push $Q(w)$ across bin boundaries as gradients and neighboring values fluctuate, even when $w$ itself does not sit at a boundary. In both cases, the weight seen by the GEMM oscillates, a pathology analyzed in TetraJet-v2 [arXiv:2510.27527].
+Weight oscillation arises from two complementary mechanisms. First, when a master weight $w$ resides near a quantization bin boundary, infinitesimal AdamW updates can cause $Q(w)$ to alternate between adjacent bins while the FP trajectory remains smooth. Second, outlier elements with disproportionately large magnitude within a block can drive the block scale and repeatedly push $Q(w)$ across bin boundaries as gradients and neighboring values fluctuate, even when $w$ itself does not sit at a boundary. In both cases, the weight seen by the GEMM oscillates, a pathology analyzed in TetraJet-v2 [arXiv:2510.27527].
 
-**Solution.** We implement a weight de-oscillation method adapted from TetraJet-v2 [arXiv:2510.27527]. Over a window of $P$ optimizer steps (default $P=200$), we accumulate per-element L1 travel distances:
+We implement a weight de-oscillation method adapted from TetraJet-v2 [arXiv:2510.27527] to suppress this behavior. Over a window of $P$ optimizer steps (default $P=200$), we accumulate per-element L1 travel distances:
 
 $$
 d_w = \sum_{t=1}^{P} |w_t - w_{t-1}|, \qquad
@@ -159,9 +155,9 @@ Our implementation shares the same oscillation criterion as the OsciReset method
 
 ### 3.5 Differential Gradient Estimation (DGE)
 
-**Problem.** The straight-through estimator (STE) back-propagates through FP4 weight quantization as if the quantizer were the identity, discarding all information about local sensitivity within each representable bin. This yields a biased gradient that misrepresents how a weight perturbation actually moves the quantized value. Wang, Ruizhe et al. [arXiv:2501.17116] address this with a **differentiable gradient estimator** (DGE) that approximates the gradient of the quantization mapping with a smooth function whose magnitude reflects local sensitivity within each bin. But their estimator is not continuous across bin boundaries, introducing discontinuities in the gradient field.
+The straight-through estimator (STE) back-propagates through FP4 weight quantization as if the quantizer were the identity, discarding all information about local sensitivity within each representable bin. This yields a biased gradient that misrepresents how a weight perturbation actually moves the quantized value. Wang, Ruizhe et al. [arXiv:2501.17116] address this with a **differentiable gradient estimator** (DGE) that approximates the gradient of the quantization mapping with a smooth function whose magnitude reflects local sensitivity within each bin; however, their estimator is not continuous across bin boundaries, introducing discontinuities in the gradient field.
 
-**Solution.** We adopt the DGE concept but use a corrected formula: ALTO uses a piecewise power-law surrogate that is continuous between segments. For a value $x$ lying in a bin of width $\delta$ with midpoint $m$, and smoothing parameter $k=5$, we define
+We adopt the DGE concept but use a corrected formula: ALTO employs a piecewise power-law surrogate that is continuous between segments. For a value $x$ lying in a bin of width $\delta$ with midpoint $m$, and smoothing parameter $k=5$, we define
 
 $$
 f(x) = \left(\frac{\delta}{2}\right)^{1 - 1/k}\cdot\mathrm{sgn}(x - m)\cdot|x - m|^{1/k} + m,
@@ -188,18 +184,14 @@ For MXFP4, bin widths $\delta$ and midpoints $m$ are determined by the E2M1 repr
 
 ### 3.6 Outlier Clipping
 
-**Problem.** A few large-magnitude elements inflate the per-block scale, consuming representable range and compressing or saturating the remaining elements, which lowers effective precision for the bulk of the distribution.
-
-**Solution.** We cap outliers before quantization to reclaim precision for the majority of elements. Two clipping modes are supported:
+A few large-magnitude elements can inflate the per-block scale, consuming representable range and compressing or saturating the remaining elements, thereby lowering effective precision for the bulk of the distribution. We cap outliers before quantization to reclaim precision for the majority of elements. Two clipping modes are supported:
 
 - **Static clipping** scales inputs by $3/4$ before quantization and by $4/3$ after dequantization, with a compensating factor of $16/9$ on the weight-gradient path to preserve gradient consistency.
 - **Dynamic clipping** follows [arXiv:2502.05003] (*QuEST*): a per-block clipping threshold is estimated from the block standard deviation, $\hat{m} = (2.922/6)\,\mathrm{std}(\mathbf{x}_{\mathrm{block}})$, and requires co-use with RHT in our implementation.
 
 ### 3.7 Macro-Block Scaling
 
-**Problem.** A single UE8M0 scale shared by each 32-element MX block is a coarse granularity: when a block contains an outlier, the shared scale is dominated by that element and the remaining values lose precision, so outlier-induced saturation is only partially mitigated by standard MX block scaling.
-
-**Solution.** Chhugani, Jatin et al. [arXiv:2603.08713] proposes **Macro Block Scaling (MBS)** as a two-level scheme for MXFP4: a coarse macro-scale is applied before the standard 32-element MX block quantization, allocating higher-precision scaling at a larger granularity to better preserve outliers. Our configuration applies MBS with 128×128 blocks on weights and 1×128 blocks on activations. Within each macro-block, the scale is derived so that the block maximum maps to the largest E2M1 representable magnitude 6.0:
+A single UE8M0 scale shared by each 32-element MX block is a coarse granularity: when a block contains an outlier, the shared scale is dominated by that element and the remaining values lose precision, so outlier-induced saturation is only partially mitigated by standard MX block scaling. Chhugani, Jatin et al. [arXiv:2603.08713] propose **Macro Block Scaling (MBS)** as a two-level scheme for MXFP4, in which a coarse macro-scale is applied before the standard 32-element MX block quantization, allocating higher-precision scaling at a larger granularity to better preserve outliers. Our configuration applies MBS with 128×128 blocks on weights and 1×128 blocks on activations. Within each macro-block, the scale is derived so that the block maximum maps to the largest E2M1 representable magnitude 6.0:
 
 $$
 s_{\mathrm{macro}} = \frac{6}{\max_{i \in \mathrm{block}} |x_i|}.
@@ -209,9 +201,7 @@ The macro-scale is encoded as a shared mantissa: only the upper 8 mantissa bits 
 
 ### 3.8 Low-Rank Outlier Compensation
 
-**Problem.** FP4 saturation clips the largest-magnitude components of a layer's computation, discarding information carried by a few outlier-dominated directions that a single low-precision GEMM cannot represent.
-
-**Solution.** Following the outlier-compensation paradigm, ALTO can decompose a linear layer into a full MXFP4 GEMM plus a low-rank branch to preserve high magnitude outliers:
+FP4 saturation clips the largest-magnitude components of a layer's computation, discarding information carried by a few outlier-dominated directions that a single low-precision GEMM cannot represent. Following the outlier-compensation paradigm, ALTO can decompose a linear layer into a full MXFP4 GEMM plus a low-rank branch to preserve high-magnitude outliers:
 
 $$
 \mathbf{O} = \mathbf{X}\mathbf{W}^{\top} + \bigl((\mathbf{X}\mathbf{V}) \odot \boldsymbol{\sigma}\bigr)\mathbf{U}^{\top},
@@ -324,6 +314,8 @@ This section consolidates end-to-end findings for the recommended stack (Section
 
 In our ablations (Table 4), de-oscillation delivers the largest improvement of any technique tested, whereas low-rank compensation at $r=32$ is slightly harmful. We therefore adopt **de-oscillation** as the late-training stabilizer.
 
+**Weight de-oscillation vs. M+Adam.** We also evaluated **M+Adam** [Anima-Lab/M-Adam-Low-precision-training], an Adam variant that decomposes each weight into mantissa and exponent components and updates both with coupled Adam-style steps, thereby reducing quantization-induced oscillation at the optimizer level. Under our MXFP4 + RHT + SR recipe at GBS=16, M+Adam achieves the same steps-to-convergence as weight de-oscillation (16,128 steps to reach validation loss 3.34; Table 3). The two approaches are therefore comparable in convergence speed. However, the MLPerf Training closed division requires the optimizer to be exactly Adam (or AdamW); M+Adam does not satisfy this constraint. We therefore prefer **weight de-oscillation** for closed-division MLPerf submission, where it can be applied as a post-step hook on standard AdamW without modifying the optimizer itself. For open-division submission, where optimizer choice is unrestricted, we prefer **M+Adam** as a cleaner, optimizer-native alternative that achieves equivalent convergence without auxiliary de-oscillation state.
+
 **Differential gradient estimation.** Operator-level tests show only a marginal SNR improvement on the weight gradient, but validation loss degrades severely (Table 4), confirming that the modified DGE formula (Section 3.5) does not help at GPT-OSS-20B scale.
 
 **Outlier clipping.** Both modes degrade operator-level SNR (Section 4.1). Static clipping is roughly neutral on validation loss, while dynamic clipping causes a large regression (Table 4).
@@ -332,7 +324,7 @@ In our ablations (Table 4), de-oscillation delivers the largest improvement of a
 
 **Operator–end-to-end gap.** Higher synthetic operator SNR is generally expected to benefit end-to-end training, but the correspondence is not guaranteed. In our experiments this link breaks down: **MBS** and **static clipping** raise operator SNR yet only marginally affect validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful. This indicates that operator-level SNR is a useful but imperfect proxy for end-to-end quality at GPT-OSS-20B scale. **De-oscillation** provides the most reliable late-training benefit among the techniques evaluated.
 
-**Preferred recipe.** Weighing final validation loss (Figure 4), steps-to-target (Table 3), and compute/memory cost, the technique combination we prefer for GPT-OSS-20B FP4 training is **MXFP4 with 1d2d hybrid block quantization + RHT + SR + weight de-oscillation**. This stack delivers the best FP4 accuracy at GBS=16, keeps the steps-to-target overhead low relative to BF16 (Table 3), and adds only optimizer-state memory (no extra GEMMs). The remaining techniques of Sections 3.5–3.8 are not included in the preferred recipe.
+**Preferred recipe.** Weighing final validation loss (Figure 4), steps-to-target (Table 3), and compute/memory cost, the preferred quantization stack for GPT-OSS-20B FP4 training is **MXFP4 with 1d2d hybrid block quantization + RHT + SR**. For the late-training stabilizer, we recommend **weight de-oscillation** in closed-division settings (MLPerf-compliant AdamW) and **M+Adam** in open-division settings; both reach the 3.34 quality target in 16,128 steps at GBS=16. The remaining techniques of Sections 3.5–3.8 are not included in the preferred recipe.
 
 ---
 
@@ -346,7 +338,7 @@ In our ablations (Table 4), de-oscillation delivers the largest improvement of a
 
 ## 6. Conclusion
 
-We have described an ALTO recipe for training GPT-OSS-20B under MXFP4 on the MLPerf Small MoE benchmark. **2D block quantization, RHT, and SR** are adopted from NVIDIA et al. [arXiv:2509.25149] and form a strong baseline; at GBS=16 and 16,128 steps, this stack reaches validation loss 3.3418 versus 3.3283 for BF16 (+0.014). **Weight de-oscillation**, adapted from OsciReset in TetraJet-v2 [arXiv:2510.27527], closes half of the remaining gap, reaching a final loss **3.3350** (+0.007 vs. BF16) with only modest additional optimizer-state memory and no extra GEMMs. It also sharply reduces the steps-to-target overhead: reaching the 3.34 quality target costs only **+5.0%** more steps than BF16 at GBS=16 (down from **+20.0%** for plain MXFP4).
+We have described an ALTO recipe for training GPT-OSS-20B under MXFP4 on the MLPerf Small MoE benchmark. **2D block quantization, RHT, and SR** are adopted from Abecassis, Felix et al. [arXiv:2509.25149] and form a strong baseline; at GBS=16 and 16,128 steps, this stack reaches validation loss 3.3418 versus 3.3283 for BF16 (+0.014). **Weight de-oscillation**, adapted from OsciReset in TetraJet-v2 [arXiv:2510.27527], closes half of the remaining gap, reaching a final loss **3.3350** (+0.007 vs. BF16) with only modest additional optimizer-state memory and no extra GEMMs. It also sharply reduces the steps-to-target overhead: reaching the 3.34 quality target costs only **+5.0%** more steps than BF16 at GBS=16 (down from **+20.0%** for plain MXFP4).
 
 Our ablations reveal that higher synthetic operator SNR does not always translate into better end-to-end training: **MBS** and **static clipping** raise operator SNR but do not improve validation loss at GBS=16, while **DGE** and **dynamic clipping** are actively harmful at scale. **Low-rank compensation** at $r=32$ is neutral to slightly harmful at GBS=16 and trails **de-oscillation** ($\Delta = -0.008$) in both accuracy and compute efficiency. De-oscillation recovers most of the loss gap, supporting its use as the late-training stabilizer in the recommended recipe: **1d2d + RHT + SR + de-oscillation**.
 

@@ -4,7 +4,10 @@ training_stage:
       scheme: "mxfp4"
       targets: ["Linear", "GptOssGroupedExperts"]
       # targets: ["Linear"]
-      ignore: ["lm_head", "re:.*\\.router\\.gate"]
+      #ignore: ["lm_head", "re:.*\\.router\\.gate"]
+      #ignore: ["lm_head", "re:.*\\.router\\.gate", "re:layers\\.0\\.*", "re:layers\\.22\\.*", "re:layers\\.23\\.*"]
+      #ignore: ["Linear", "re:.*\\.router\\.gate", "re:layers\\.\\d+\\.attention\\.*"]
+      ignore: ["lm_head", "re:.*\\.router\\.gate", "re:layers\\.0\\.*", "re:layers\\.22\\.*", "re:layers\\.23\\.*", "re:layers\\.\\d+\\.attention\\.*"]
       use_2dblock_x: false
       use_2dblock_w: true
       use_hadamard: true
@@ -23,6 +26,15 @@ training_stage:
       use_uos: true
 
       # weight de-oscillation, disabled by default
-      deosc_step: 2000
-      deosc_period: 200
-      deosc_ratio: 4.0
+      deosc_step: 1000
+      deosc_period: 100
+      deosc_ratio: 3.0
+
+  lpt_fp8_modifiers:
+    LowPrecisionTrainingModifier:
+      scheme: "mxfp8_e4m3"
+      targets: ["re:layers\\.0\\.*.*\\.inner_experts", "re:layers\\.22\\.*.*\\.inner_experts", "re:layers\\.23\\.*.*\\.inner_experts", "re:layers\\.\\d+\\.attention\\.*\\.(qkv_linear\\.wqkv|wo)"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: false
+      use_sr_grad: false

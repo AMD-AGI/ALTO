@@ -35,7 +35,8 @@ class LowPrecisionTrainingModifier(Modifier):
     use_hadamard: bool = False
     use_sr_grad: bool = False
     use_dge: bool = False
-    attention_backward: Literal["mxfp8", "bf16"] = "mxfp8"
+    attention_forward: Literal["mxfp8", "bf16"] = "mxfp8"
+    attention_backward: Literal["mxfp8", "mxfp8_high_precision_dp", "bf16"] = "mxfp8"
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     
@@ -157,6 +158,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_hadamard=self.use_hadamard,
                     use_sr_grad=self.use_sr_grad,
                     use_dge=self.use_dge,
+                    attention_forward=self.attention_forward,
                     attention_backward=self.attention_backward,
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,

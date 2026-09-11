@@ -1218,6 +1218,7 @@ def _attn_bwd_dkdv_inner(
     ks_hd,
     vt_fp8,
     vs_hd,
+    vt_hp,
     dk,
     dv,
     q_scale_base,
@@ -1252,6 +1253,7 @@ def _attn_bwd_dkdv_inner(
     CAUSAL: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """Accumulate dk, dv over query blocks for one key block (A1, dot_scaled).
 
@@ -1295,9 +1297,13 @@ def _attn_bwd_dkdv_inner(
             p = tl.math.exp(qk - l_i[:, None])
 
         do = tl.load(do_ptrs, mask=do_mask, other=0.0)
-        # dot b: dp = do @ vᵀ, reduction = head_dim_v. dO is fresh -> quantize here.
-        do_fp8_hd, dos_hd = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
-        dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", vt_fp8, vs_hd, "e4m3", out_dtype=tl.float32)
+        # dot b: dp = do @ vᵀ, reduction = head_dim_v. The high-precision dP
+        # experiment isolates this dot: original bf16 dO/V, fp32 accumulate.
+        if HIGH_PRECISION_DP:
+            dp = tl.dot(do, vt_hp, out_dtype=tl.float32)
+        else:
+            do_fp8_hd, dos_hd = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+            dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", vt_fp8, vs_hd, "e4m3", out_dtype=tl.float32)
 
         d_ptrs = d_offset + offs_m * stride_ldm
         Di = tl.load(d_ptrs, mask=mask_m, other=0.0)
@@ -1324,6 +1330,7 @@ def _bwd_kernel_dkdv(
     Q,
     K,
     V,
+    V_hp,
     Q_scale,
     K_scale,
     V_scale,
@@ -1345,6 +1352,10 @@ def _bwd_kernel_dkdv(
     stride_vh,
     stride_vn,
     stride_vk,
+    stride_vhpz,
+    stride_vhph,
+    stride_vhpn,
+    stride_vhpk,
     stride_doz,
     stride_doh,
     stride_dom,
@@ -1383,6 +1394,7 @@ def _bwd_kernel_dkdv(
     IS_VARLEN: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """One program per (batch*head_k, key block). Parallelizes dk/dv over keys.
 
@@ -1420,6 +1432,7 @@ def _bwd_kernel_dkdv(
     q_offset = Q + off_z * stride_qz + off_h_q * stride_qh + q_start * stride_qm
     k_offset = K + off_z * stride_kz + off_h_k * stride_kh + k_start * stride_kn
     v_offset = V + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
+    v_hp_offset = V_hp + off_z * stride_vhpz + off_h_k * stride_vhph + k_start * stride_vhpn
     do_offset = DO + off_z * stride_doz + off_h_q * stride_doh + q_start * stride_dom
     q_scale_base = Q_scale + off_z * stride_qsz + off_h_q * stride_qsh + q_scale_start * stride_qsm
     k_scale_base = K_scale + off_z * stride_ksz + off_h_k * stride_ksh + k_scale_start * stride_ksn
@@ -1446,6 +1459,7 @@ def _bwd_kernel_dkdv(
 
     k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d_qk[None, :] * stride_kk
     v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d_v[None, :] * stride_vk
+    v_hp_ptrs = v_hp_offset + offs_n[:, None] * stride_vhpn + offs_d_v[None, :] * stride_vhpk
     # Saved e4m3 k/v reused directly; transpose to [head_dim, BLOCK_N] for the
     # QK / dP dots (a/b). Scales are rebuilt from the saved compact 2D scale.
     k_fp8 = tl.load(k_ptrs, mask=mask_n[:, None] & mask_d_qk[None, :], other=0.0)
@@ -1456,6 +1470,7 @@ def _bwd_kernel_dkdv(
                            SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_V, QUANT_BLOCK_SIZE)
     kt_fp8 = tl.trans(k_fp8)
     vt_fp8 = tl.trans(v_fp8)
+    vt_hp = tl.trans(tl.load(v_hp_ptrs, mask=mask_n[:, None] & mask_d_v[None, :], other=0.0))
 
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL_QK], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL_V], dtype=tl.float32)
@@ -1466,6 +1481,7 @@ def _bwd_kernel_dkdv(
             ks_hd,
             vt_fp8,
             vs_hd,
+            vt_hp,
             dk,
             dv,
             q_scale_base,
@@ -1500,6 +1516,7 @@ def _bwd_kernel_dkdv(
             CAUSAL,
             QUANT_BLOCK_SIZE,
             USE_ASM,
+            HIGH_PRECISION_DP,
         )
         q_offset += stride_qh
         do_offset += stride_doh
@@ -1522,6 +1539,8 @@ def _attn_bwd_dq_inner(
     qs_hd,
     do_fp8_hd,
     dos_hd,
+    do,
+    v_hp_offset,
     k_scale_base,
     v_scale_base,
     stride_ksn,
@@ -1541,6 +1560,8 @@ def _attn_bwd_dq_inner(
     stride_kk,
     stride_vn,
     stride_vk,
+    stride_vhpn,
+    stride_vhpk,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL_QK: tl.constexpr,
@@ -1557,6 +1578,7 @@ def _attn_bwd_dq_inner(
     CAUSAL: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """Accumulate dq over key blocks for one query block (A1, dot_scaled).
 
@@ -1577,6 +1599,7 @@ def _attn_bwd_dq_inner(
 
         k_ptrs = k_offset + offs_n[:, None] * stride_kn + offs_d_qk[None, :] * stride_kk
         v_ptrs = v_offset + offs_n[:, None] * stride_vn + offs_d_v[None, :] * stride_vk
+        v_hp_ptrs = v_hp_offset + offs_n[:, None] * stride_vhpn + offs_d_v[None, :] * stride_vhpk
         # Saved e4m3 k/v, reused directly.
         k = tl.load(k_ptrs, mask=mask_k, other=0.0)
         v = tl.load(v_ptrs, mask=mask_v, other=0.0)
@@ -1598,10 +1621,14 @@ def _attn_bwd_dq_inner(
             qk *= sm_scale
             p = tl.math.exp(qk - l_i[:, None])
 
-        # dot f: dp = do @ vᵀ, reduction = head_dim_v. Reuse v's saved head_dim scale.
-        vs_f = _load_scale_hd(v_scale_base, offs_n, stride_vsn, stride_vsk, N_CTX_K,
-                              SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_V, QUANT_BLOCK_SIZE)
-        dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", tl.trans(v), vs_f, "e4m3", out_dtype=tl.float32)
+        # dot f: the same isolated dP experiment as dot b above.
+        if HIGH_PRECISION_DP:
+            v_hp = tl.load(v_hp_ptrs, mask=mask_v, other=0.0)
+            dp = tl.dot(do, tl.trans(v_hp), out_dtype=tl.float32)
+        else:
+            vs_f = _load_scale_hd(v_scale_base, offs_n, stride_vsn, stride_vsk, N_CTX_K,
+                                  SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_V, QUANT_BLOCK_SIZE)
+            dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", tl.trans(v), vs_f, "e4m3", out_dtype=tl.float32)
         ds = p * (dp - Di[:, None])
 
         # dot g: dq += ds @ k, reduction = seqlen_k (BLOCK_N). dS fresh (1D along
@@ -1619,6 +1646,7 @@ def _bwd_kernel_dq(
     Q,
     K,
     V,
+    V_hp,
     Q_scale,
     K_scale,
     V_scale,
@@ -1639,6 +1667,10 @@ def _bwd_kernel_dq(
     stride_vh,
     stride_vn,
     stride_vk,
+    stride_vhpz,
+    stride_vhph,
+    stride_vhpn,
+    stride_vhpk,
     stride_doz,
     stride_doh,
     stride_dom,
@@ -1677,6 +1709,7 @@ def _bwd_kernel_dq(
     IS_VARLEN: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """One program per (batch*head_q, query block). Parallelizes dq over queries.
 
@@ -1713,6 +1746,7 @@ def _bwd_kernel_dq(
     q_offset = Q + off_z * stride_qz + off_h_q * stride_qh + q_start * stride_qm
     k_offset = K + off_z * stride_kz + off_h_k * stride_kh + k_start * stride_kn
     v_offset = V + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
+    v_hp_offset = V_hp + off_z * stride_vhpz + off_h_k * stride_vhph + k_start * stride_vhpn
     do_offset = DO + off_z * stride_doz + off_h_q * stride_doh + q_start * stride_dom
     q_scale_base = Q_scale + off_z * stride_qsz + off_h_q * stride_qsh + q_scale_start * stride_qsm
     k_scale_base = K_scale + off_z * stride_ksz + off_h_k * stride_ksh + k_scale_start * stride_ksn
@@ -1756,6 +1790,8 @@ def _bwd_kernel_dq(
         qs_hd,
         do_fp8_hd,
         dos_hd,
+        do,
+        v_hp_offset,
         k_scale_base,
         v_scale_base,
         stride_ksn,
@@ -1775,6 +1811,8 @@ def _bwd_kernel_dq(
         stride_kk,
         stride_vn,
         stride_vk,
+        stride_vhpn,
+        stride_vhpk,
         BLOCK_M,
         BLOCK_N,
         BLOCK_DMODEL_QK,
@@ -1791,6 +1829,7 @@ def _bwd_kernel_dq(
         CAUSAL,
         QUANT_BLOCK_SIZE,
         USE_ASM,
+        HIGH_PRECISION_DP,
     )
 
     dq *= sm_scale
@@ -1804,6 +1843,7 @@ def attention_mxfp8_backward_triton_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    v_hp: torch.Tensor,
     o: torch.Tensor,
     softmax_lse: torch.Tensor,
     q_scale: torch.Tensor,
@@ -1817,6 +1857,7 @@ def attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    high_precision_dp: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """MXFP8 flash-attention backward (stage-2 / A1, ``tl.dot_scaled``).
 
@@ -1834,6 +1875,7 @@ def attention_mxfp8_backward_triton_impl(
     q = q.contiguous()
     k = k.contiguous()
     v = v.contiguous()
+    v_hp = v_hp.contiguous()
     q_scale = q_scale.contiguous()
     k_scale = k_scale.contiguous()
     v_scale = v_scale.contiguous()
@@ -1855,6 +1897,7 @@ def attention_mxfp8_backward_triton_impl(
     stride_qz, stride_qh, stride_qm, stride_qk = get_strides_from_layout(q, layout)
     stride_kz, stride_kh, stride_kn, stride_kk = get_strides_from_layout(k, layout)
     stride_vz, stride_vh, stride_vn, stride_vk = get_strides_from_layout(v, layout)
+    stride_vhpz, stride_vhph, stride_vhpn, stride_vhpk = get_strides_from_layout(v_hp, layout)
     stride_oz, stride_oh, stride_om, stride_ok = get_strides_from_layout(o, layout)
     stride_doz, stride_doh, stride_dom, stride_dok = get_strides_from_layout(do, layout)
     # Compact 2D-block scale strides ([.., seqlen/32, head_dim/32]); reused by the
@@ -1911,6 +1954,7 @@ def attention_mxfp8_backward_triton_impl(
         q,
         k,
         v,
+        v_hp,
         q_scale,
         k_scale,
         v_scale,
@@ -1931,6 +1975,10 @@ def attention_mxfp8_backward_triton_impl(
         stride_vh,
         stride_vn,
         stride_vk,
+        stride_vhpz,
+        stride_vhph,
+        stride_vhpn,
+        stride_vhpk,
         stride_doz,
         stride_doh,
         stride_dom,
@@ -1969,6 +2017,7 @@ def attention_mxfp8_backward_triton_impl(
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        HIGH_PRECISION_DP=high_precision_dp,
         num_warps=4,
         num_stages=1,
     )
@@ -1977,6 +2026,7 @@ def attention_mxfp8_backward_triton_impl(
         q,
         k,
         v,
+        v_hp,
         q_scale,
         k_scale,
         v_scale,
@@ -1998,6 +2048,10 @@ def attention_mxfp8_backward_triton_impl(
         stride_vh,
         stride_vn,
         stride_vk,
+        stride_vhpz,
+        stride_vhph,
+        stride_vhpn,
+        stride_vhpk,
         stride_doz,
         stride_doh,
         stride_dom,
@@ -2036,6 +2090,7 @@ def attention_mxfp8_backward_triton_impl(
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        HIGH_PRECISION_DP=high_precision_dp,
         num_warps=4,
         num_stages=1,
     )
@@ -2049,6 +2104,7 @@ def fake_attention_mxfp8_backward_triton_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    v_hp: torch.Tensor,
     o: torch.Tensor,
     softmax_lse: torch.Tensor,
     q_scale: torch.Tensor,
@@ -2062,6 +2118,7 @@ def fake_attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    high_precision_dp: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.empty_like(q, dtype=bwd_torch_dtype)
     dk = torch.empty_like(k, dtype=bwd_torch_dtype)
@@ -2104,9 +2161,11 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         return_scores: bool,
         use_exp2: bool,
         layout: str,
+        forward_precision: str,
         backward_precision: str,
     ):
         use_bf16_backward = backward_precision == "bf16"
+        use_high_precision_dp = backward_precision == "mxfp8_high_precision_dp"
         assert not use_bf16_backward or layout == "bhsd", \
             "bf16 attention backward only supports the bhsd layout."
         q_bf16, k_bf16, v_bf16 = q, k, v
@@ -2136,13 +2195,33 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             use_exp2=use_exp2,
         )
 
+        if forward_precision == "bf16":
+            visible_output = torch.nn.functional.scaled_dot_product_attention(
+                q_bf16,
+                k_bf16,
+                v_bf16,
+                is_causal=causal,
+                scale=sm_scale,
+                enable_gqa=q_bf16.shape[1] != k_bf16.shape[1],
+            )
+        else:
+            visible_output = output
+
+        # MXFP8 backward needs MXFP8 LSE to reconstruct P, while delta must use
+        # the output that produced the user-visible upstream gradient.
+        backward_output = visible_output if forward_precision == "bf16" else output
         # The bf16 backward is a deliberate straight-through approximation: the
         # returned output stays mxfp8 while the gradients come from bf16 SDPA.
         if use_bf16_backward:
             ctx.save_for_backward(q_bf16, k_bf16, v_bf16, alibi_slopes, bias)
         else:
-            ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale)
+            saved_tensors = (q, k, v, backward_output, softmax_lse, alibi_slopes, bias,
+                             q_scale, k_scale, v_scale)
+            if use_high_precision_dp:
+                saved_tensors += (v_bf16,)
+            ctx.save_for_backward(*saved_tensors)
         ctx.use_bf16_backward = use_bf16_backward
+        ctx.use_high_precision_dp = use_high_precision_dp
         ctx.sm_scale = sm_scale
         ctx.causal = causal
         ctx.dropout_p = dropout_p
@@ -2153,7 +2232,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         ctx.max_seqlens_q = max_seqlens_q
         ctx.max_seqlens_k = max_seqlens_k
 
-        return output, softmax_lse, exp_scores
+        return visible_output, softmax_lse, exp_scores
 
     @staticmethod
     def backward(ctx, *grad_outputs):
@@ -2161,20 +2240,22 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         if ctx.use_bf16_backward:
             q, k, v, alibi_slopes, bias = ctx.saved_tensors
         else:
-            q, k, v, o, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors
+            q, k, v, o, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors[:10]
         assert bias is None, "MXFP8 attention backward does not support bias yet."
         assert alibi_slopes is None, "MXFP8 attention backward does not support alibi yet."
         assert ctx.dropout_p == 0.0, "MXFP8 attention backward does not support dropout yet."
 
         if ctx.use_bf16_backward:
             dq, dk, dv = _sdpa_backward(q, k, v, do, ctx.sm_scale, ctx.causal)
-            return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
+            return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
+        v_dp = ctx.saved_tensors[10] if ctx.use_high_precision_dp else v
         dq, dk, dv = torch.ops.alto.attention_mxfp8_backward_triton_impl(
             do,
             q,
             k,
             v,
+            v_dp,
             o,
             softmax_lse,
             q_scale,
@@ -2188,8 +2269,9 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             max_seqlen_q=ctx.max_seqlens_q,
             max_seqlen_k=ctx.max_seqlens_k,
             use_exp2=ctx.use_exp2,
+            high_precision_dp=ctx.use_high_precision_dp,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 @attention_mxfp8_forward_triton_impl.register_fake
@@ -2261,6 +2343,7 @@ def triton_attention_mxfp8(
     return_scores: bool,
     use_exp2: bool,
     layout: str,
+    forward_precision: str = "mxfp8",
     backward_precision: str = "mxfp8",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return _triton_attention_mxfp8.apply(
@@ -2279,5 +2362,6 @@ def triton_attention_mxfp8(
         return_scores,
         use_exp2,
         layout,
+        forward_precision,
         backward_precision,
     )

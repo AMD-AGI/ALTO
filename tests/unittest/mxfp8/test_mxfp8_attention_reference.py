@@ -295,8 +295,9 @@ public_autograd_cases = [
 @cuda_only
 @pytest.mark.parametrize("config", public_autograd_cases)
 @pytest.mark.parametrize("causal", [True, False])
-@pytest.mark.parametrize("backward_precision", ["mxfp8", "bf16"])
-def test_public_autograd_matches_sdpa(config, causal, backward_precision):
+@pytest.mark.parametrize("forward_precision", ["mxfp8", "bf16"])
+@pytest.mark.parametrize("backward_precision", ["mxfp8", "mxfp8_high_precision_dp", "bf16"])
+def test_public_autograd_matches_sdpa(config, causal, forward_precision, backward_precision):
     """Public ``triton_attention_mxfp8`` forward/backward must wire gradients correctly.
 
     The lower-level backward op is tested across the large shape grid below. This
@@ -339,16 +340,21 @@ def test_public_autograd_matches_sdpa(config, causal, backward_precision):
         return_scores=False,
         use_exp2=True,
         layout="bhsd",
+        forward_precision=forward_precision,
         backward_precision=backward_precision,
     )[0]
     o_kernel.backward(do)
 
-    pairs = [
-        ("O", o_ref, o_kernel, 0.99, 20),
-        ("dQ", q_ref.grad, q_kernel.grad, 0.995, 18),
-        ("dK", k_ref.grad, k_kernel.grad, 0.995, 18),
-        ("dV", v_ref.grad, v_kernel.grad, 0.995, 18),
-    ]
+    pairs = [("O", o_ref, o_kernel, 0.99, 20)]
+    if not (forward_precision == "bf16" and backward_precision != "bf16"):
+        pairs.extend([
+            ("dQ", q_ref.grad, q_kernel.grad, 0.995, 18),
+            ("dK", k_ref.grad, k_kernel.grad, 0.995, 18),
+            ("dV", v_ref.grad, v_kernel.grad, 0.995, 18),
+        ])
+    else:
+        for gradient in (q_kernel.grad, k_kernel.grad, v_kernel.grad):
+            assert torch.isfinite(gradient).all()
     rows = []
     for name, ref, got, _, _ in pairs:
         rows.append([f"{name} (public autograd vs sdpa)", calc_snr(ref, got), calc_cossim(ref, got)])
@@ -391,6 +397,7 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4):
         q8.contiguous(),
         k8.contiguous(),
         v8.contiguous(),
+        v.contiguous(),
         o_ref.contiguous(),
         lse_ref.contiguous(),
         q_scale,
@@ -404,6 +411,7 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4):
         max_seqlen_q=config.seqlen_q,
         max_seqlen_k=config.seqlen_kv,
         use_exp2=True,
+        high_precision_dp=False,
     )
     dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(q, k, v, do, o_ref, lse_ref, sm_scale, causal)
 

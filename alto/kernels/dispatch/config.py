@@ -30,7 +30,10 @@ class TrainingOpConfig:
     use_sr_grad: bool
     use_dge: bool
 
-    attention_backward: Literal["mxfp8", "bf16"] = "mxfp8"
+    attention_forward: Literal["mxfp8", "bf16"] = "mxfp8"
+    """Precision used for the user-visible MXFP8 attention forward output."""
+
+    attention_backward: Literal["mxfp8", "mxfp8_high_precision_dp", "bf16"] = "mxfp8"
     """Precision used by the MXFP8 attention backward path."""
 
     clip_mode: Literal["none", "static", "dynamic"] = "none"

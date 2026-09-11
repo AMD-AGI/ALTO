@@ -29,6 +29,8 @@ __all__ = [
     "llama3_8b_mxfp8_linear_attn",
     "llama3_8b_light_mxfp8_linear",
     "llama3_8b_light_mxfp8_attn",
+    "llama3_8b_light_bf16_fwd_mxfp8_bwd_attn",
+    "llama3_8b_light_bf16_fwd_mxfp8_high_precision_dp_bwd_attn",
     "llama3_8b_light_mxfp8_linear_attn",
     "llama3_8b_opt",
     "llama3_8b_lpt",
@@ -320,6 +322,32 @@ def llama3_8b_light_mxfp8_attn() -> Trainer.Config:
         converters=[
             ModelOptConverter.Config(
                 recipe="./alto/models/llama3/configs/mxfp8_attn_recipe.yaml",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_light_bf16_fwd_mxfp8_bwd_attn() -> Trainer.Config:
+    config = llama3_8b()
+    config.dump_folder = "llama3_8b-c4-bf16-fwd-mxfp8-bwd-attn-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/bf16_fwd_mxfp8_bwd_attn_recipe.yaml",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_light_bf16_fwd_mxfp8_high_precision_dp_bwd_attn() -> Trainer.Config:
+    config = llama3_8b()
+    config.dump_folder = "llama3_8b-c4-bf16-fwd-mxfp8-high-precision-dp-bwd-attn-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/bf16_fwd_mxfp8_high_precision_dp_bwd_attn_recipe.yaml",
             ),
         ],
     )

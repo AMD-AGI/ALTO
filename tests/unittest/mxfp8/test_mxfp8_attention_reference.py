@@ -295,7 +295,8 @@ public_autograd_cases = [
 @cuda_only
 @pytest.mark.parametrize("config", public_autograd_cases)
 @pytest.mark.parametrize("causal", [True, False])
-def test_public_autograd_matches_sdpa(config, causal):
+@pytest.mark.parametrize("backward_precision", ["mxfp8", "bf16"])
+def test_public_autograd_matches_sdpa(config, causal, backward_precision):
     """Public ``triton_attention_mxfp8`` forward/backward must wire gradients correctly.
 
     The lower-level backward op is tested across the large shape grid below. This
@@ -338,6 +339,7 @@ def test_public_autograd_matches_sdpa(config, causal):
         return_scores=False,
         use_exp2=True,
         layout="bhsd",
+        backward_precision=backward_precision,
     )[0]
     o_kernel.backward(do)
 

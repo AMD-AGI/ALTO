@@ -30,6 +30,9 @@ class TrainingOpConfig:
     use_sr_grad: bool
     use_dge: bool
 
+    attention_backward: Literal["mxfp8", "bf16"] = "mxfp8"
+    """Precision used by the MXFP8 attention backward path."""
+
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     """
     clipping mode applied in MXFP4/NVFP4 quantization.

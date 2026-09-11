@@ -2069,6 +2069,20 @@ def fake_attention_mxfp8_backward_triton_impl(
     return dq, dk, dv
 
 
+def _sdpa_backward(q, k, v, do, sm_scale, causal):
+    with torch.enable_grad():
+        q, k, v = (tensor.detach().requires_grad_(True) for tensor in (q, k, v))
+        o = torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=causal,
+            scale=sm_scale,
+            enable_gqa=q.shape[1] != k.shape[1],
+        )
+    return torch.autograd.grad(o, (q, k, v), do)
+
+
 @torch.compiler.allow_in_graph
 class _triton_attention_mxfp8(torch.autograd.Function):
 
@@ -2090,7 +2104,13 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         return_scores: bool,
         use_exp2: bool,
         layout: str,
+        backward_precision: str,
     ):
+        use_bf16_backward = backward_precision == "bf16"
+        assert not use_bf16_backward or layout == "bhsd", \
+            "bf16 attention backward only supports the bhsd layout."
+        q_bf16, k_bf16, v_bf16 = q, k, v
+
         q, q_scale = torch.ops.alto.convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
         k, k_scale = torch.ops.alto.convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
         v, v_scale = torch.ops.alto.convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
@@ -2116,7 +2136,13 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             use_exp2=use_exp2,
         )
 
-        ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale)
+        # The bf16 backward is a deliberate straight-through approximation: the
+        # returned output stays mxfp8 while the gradients come from bf16 SDPA.
+        if use_bf16_backward:
+            ctx.save_for_backward(q_bf16, k_bf16, v_bf16, alibi_slopes, bias)
+        else:
+            ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale)
+        ctx.use_bf16_backward = use_bf16_backward
         ctx.sm_scale = sm_scale
         ctx.causal = causal
         ctx.dropout_p = dropout_p
@@ -2132,10 +2158,17 @@ class _triton_attention_mxfp8(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *grad_outputs):
         do = grad_outputs[0]
-        q, k, v, o, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors
+        if ctx.use_bf16_backward:
+            q, k, v, alibi_slopes, bias = ctx.saved_tensors
+        else:
+            q, k, v, o, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors
         assert bias is None, "MXFP8 attention backward does not support bias yet."
         assert alibi_slopes is None, "MXFP8 attention backward does not support alibi yet."
         assert ctx.dropout_p == 0.0, "MXFP8 attention backward does not support dropout yet."
+
+        if ctx.use_bf16_backward:
+            dq, dk, dv = _sdpa_backward(q, k, v, do, ctx.sm_scale, ctx.causal)
+            return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
         dq, dk, dv = torch.ops.alto.attention_mxfp8_backward_triton_impl(
             do,
@@ -2156,7 +2189,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             max_seqlen_k=ctx.max_seqlens_k,
             use_exp2=ctx.use_exp2,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 @attention_mxfp8_forward_triton_impl.register_fake
@@ -2228,6 +2261,7 @@ def triton_attention_mxfp8(
     return_scores: bool,
     use_exp2: bool,
     layout: str,
+    backward_precision: str = "mxfp8",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return _triton_attention_mxfp8.apply(
         q,
@@ -2245,4 +2279,5 @@ def triton_attention_mxfp8(
         return_scores,
         use_exp2,
         layout,
+        backward_precision,
     )

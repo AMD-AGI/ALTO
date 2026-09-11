@@ -66,5 +66,6 @@ class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
             return_scores=False,
             use_exp2=True,
             layout="bhsd",
+            backward_precision=self.config.attention_backward,
         )[0]
         return o

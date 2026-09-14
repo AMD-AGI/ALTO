@@ -10,4 +10,4 @@ pruning_stage:
       admm_iterations: 16
       dampening_frac: 0.01
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["lm_head"]

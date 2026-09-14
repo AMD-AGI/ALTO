@@ -6,4 +6,5 @@ cd $SCRIPT_DIR/../..
 NGPU=2 \
 MODULE=gpt_oss \
 CONFIG=gpt_oss_debugmodel_lpt \
-./examples/run.sh
+./examples/run.sh \
+  --parallelism.expert_parallel_degree 2

@@ -11,7 +11,7 @@
 
 from abc import abstractmethod
 from functools import partial
-from typing import Any, Generator, Literal
+from typing import Any, Generator, Literal, TYPE_CHECKING
 import gc
 import re
 
@@ -30,6 +30,8 @@ from alto.utils.pytorch.module import (
     get_prunable_layers,
     match_targets,
 )
+if TYPE_CHECKING:
+    from torchtitan.protocols.model import BaseModel
 
 LAYER_OBSERVER_BASE_NAME = "pruning"
 PruningDim = Literal["attn", "mlp", "attn+mlp", "mlp+attn", "layer", "sublayer", "hidden_dim"]
@@ -231,6 +233,9 @@ class PruningModifierBase(Modifier):
         return True
 
     def on_convert(self, model: Module, **kwargs) -> bool:
+        return True
+
+    def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         return True
 
     # ---- sequential helpers -------------------------------------------

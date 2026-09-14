@@ -153,7 +153,7 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
                 w = torch.nn.functional.pad(w, (0, 0, 0, 32 - original_rows % 32))
 
             data_lp, scales = convert_to_mxfp4(
-                w, axis=axis, is_2d_block=is_2d_block,
+                w, axis=axis, is_2d_block=is_2d_block, use_uos=cfg.use_uos
             )
             dequantized = convert_from_mxfp4(
                 data_lp,

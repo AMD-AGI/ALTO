@@ -6,7 +6,7 @@ quantization_stage:
     AWQModifier:
       sequential_granularity: "sublayer"
       n_grid: 20
-      ignore: ["output"]
+      ignore: ["lm_head"]
       mappings:
         - smooth_layer: "re:.*attention_norm"
           balance_layers:

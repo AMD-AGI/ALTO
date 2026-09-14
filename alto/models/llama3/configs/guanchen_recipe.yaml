@@ -4,7 +4,7 @@
 #       sparsity: 0.5
 #       mask_structure: "2:4"
 #       targets: ["Linear"]
-#       ignore: ["output"]
+#       ignore: ["lm_head"]
 
 # sparsity_stage:
 #   sparsity_modifiers:
@@ -12,7 +12,7 @@
 #       sparsity: 0.5
 #       mask_structure: "2:4"
 #       targets: ["Linear"]
-#       ignore: ["output"]
+#       ignore: ["lm_head"]
 
 # sparsity_stage:
 #   sparsity_modifiers:
@@ -20,7 +20,7 @@
 #       sparsity: 0.5
 #       mask_structure: "2:4"
 #       targets: ["Linear"]
-#       ignore: ["output"]
+#       ignore: ["lm_head"]
 
 # sparsity_stage:
 #   sparsity_modifiers:
@@ -28,7 +28,7 @@
 #       sparsity: 0.5
 #       mask_structure: "2:4"
 #       targets: ["Linear"]
-#       ignore: ["output"]
+#       ignore: ["lm_head"]
 
 pruning_stage:
   pruning_modifiers:

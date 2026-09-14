@@ -288,6 +288,7 @@ def convert_to_mxfp4_pytorch(
     axis: int = -1,
     is_2d_block: bool = False,
     clip_mode: Literal["none", "static", "dynamic"] = "none",
+    use_uos: bool = False,
 ):
     assert data_hp.dtype in [torch.float32, torch.bfloat16]
     if data_hp.dtype == torch.float32:
@@ -325,12 +326,17 @@ def convert_to_mxfp4_pytorch(
     else:
         max_abs = torch.amax(torch.abs(max_abs), dim=-1)
 
-    # round even (adaptive)
-    max_abs = max_abs.view(hp_int_dtype)
-    val_to_add = 1 << (hp_mbits - mbits - 1)
-    mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
-    max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
-    scales = max_abs - target_max_pow2
+    if use_uos:
+        scales = torch.ceil(torch.log2(max_abs / 7.25))
+        scales = torch.where(max_abs == 0, 1.0, scales)
+        scales += 127
+    else:
+        # round even (adaptive)
+        max_abs = max_abs.view(hp_int_dtype)
+        val_to_add = 1 << (hp_mbits - mbits - 1)
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2
 
     # Today, 2**-127 returns 0 in compile+inductor+triton because it is in the
     # float32 denormal range. For now, manually adjust the fp scale. This is

@@ -60,17 +60,6 @@ def patch_finfo():
     torch.finfo = orig_finfo_func
 
 
-def hot_fix_for_tied_word_embeddings(model: torch.nn.Module, compressor: ModelCompressor):
-    if not getattr(model.config, "enable_weight_tying", False):
-        return
-    # in the current impl, lm_head is not a linear layer,
-    # so we need to add it to the ignore list manually
-    if compressor.quantization_config is not None:
-        compressor.quantization_config.ignore.append("lm_head")
-    if compressor.sparsity_config is not None:
-        compressor.sparsity_config.ignore.append("lm_head")
-
-
 def get_model_compressor(
     model: torch.nn.Module,
     state_dict: dict[str, torch.Tensor],
@@ -205,7 +194,6 @@ def convert_to_hf(
                     compressor.quantization_config.ignore)
             if compressor.sparsity_config is not None:
                 compressor.sparsity_config.ignore = sd_adapter.map_ignore_list_to_hf(compressor.sparsity_config.ignore)
-            hot_fix_for_tied_word_embeddings(model, compressor)
 
             state_dict = compressor.compress(model)
             compressor.update_config(output_dir)

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import torch
+from torch.distributed.tensor import DTensor, Partial
 from alto.utils.pytorch.module import TransformerConv1D
 from .base import Observer, register_observer
 
@@ -25,7 +26,10 @@ class PerChannelNormObserver(Observer):
     def make_empty_row_scalars(self) -> torch.Tensor:
         weight = self.module().weight
         num_columns = weight.shape[1]
-        return torch.zeros(num_columns, device=self.device)
+        S = torch.zeros(num_columns, device=self.device)
+        if isinstance(weight, DTensor):
+            S = DTensor.from_local(S, device_mesh=weight.device_mesh, placements=(Partial("avg"),))
+        return S
 
     def get_current_min_max(self, observed: torch.Tensor):
         pass
@@ -38,6 +42,13 @@ class PerChannelNormObserver(Observer):
             return x_orig
 
         with torch.no_grad():
+            S = self.stats
+            if isinstance(S, DTensor):
+                S = S.to_local()
+
+            # TODO: support TP
+            assert not isinstance(x_orig, DTensor), "TP is not supported for per_channel_norm observer"
+
             module = self.module()
             inp = x_orig.detach()
             if inp.dim() == 2:
@@ -62,11 +73,11 @@ class PerChannelNormObserver(Observer):
                 inp = inp.permute([1, 0, 2])
                 inp = inp.flatten(1)
 
-            self.stats *= self.num_samples / (self.num_samples + num_added)
+            S *= self.num_samples / (self.num_samples + num_added)
             self.num_samples += num_added
 
             inp = inp.type(PRECISION)
-            self.stats += torch.norm(inp, p=2, dim=1)**2 / self.num_samples
+            S += torch.norm(inp, p=2, dim=1)**2 / self.num_samples
 
         return x_orig
 

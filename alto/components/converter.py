@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 import torch
@@ -14,6 +15,9 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 from alto.config import Recipe
+
+if TYPE_CHECKING:
+    from torchtitan.models.base import BaseModel
 
 
 class ModelOptConverter(ModelConverter, Configurable):
@@ -45,6 +49,10 @@ class ModelOptConverter(ModelConverter, Configurable):
 
         for modifier in self.recipe.modifiers:
             modifier.convert(model)
+            
+    def convert_config(self, model_config: "BaseModel.Config"):
+        for modifier in self.recipe.modifiers:
+            modifier.convert_config(model_config)
 
     def pre_step(self, model_parts: list[nn.Module], **kwargs):
         for modifier in self.recipe.modifiers:

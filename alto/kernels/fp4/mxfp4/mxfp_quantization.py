@@ -33,6 +33,7 @@ def _calculate_scales(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_2D_BLOCK: tl.constexpr = False,
     USE_DYNAMIC_CLIP: tl.constexpr = False,
+    USE_UOS: tl.constexpr = False,
 ):
     if x.type.element_ty == tl.float32:
         hp_int_dtype = tl.int32
@@ -71,12 +72,17 @@ def _calculate_scales(
             max_abs = tl.max(tl.abs(x), axis=-1)
     max_abs = max_abs.to(x.type.element_ty)
 
-    # round even (adaptive)
-    max_abs = max_abs.to(hp_int_dtype, bitcast=True)
-    val_to_add = 1 << (hp_mbits - mbits - 1)
-    mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
-    max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
-    scales = max_abs - target_max_pow2
+    if USE_UOS:
+        scales = tl.ceil(tl.log2(max_abs / 7.25))
+        scales = tl.where(max_abs == 0, 1.0, scales)
+        scales += 127
+    else:
+        # round even (adaptive)
+        max_abs = max_abs.to(hp_int_dtype, bitcast=True)
+        val_to_add = 1 << (hp_mbits - mbits - 1)
+        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
+        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+        scales = max_abs - target_max_pow2
 
     # Today, 2**-127 returns 0 in compile+inductor+triton because it is in the
     # float32 denormal range. For now, manually adjust the fp scale. This is
@@ -269,6 +275,7 @@ def _convert_to_mxfp4_kernel(
     USE_ASM: tl.constexpr,
     USE_STATIC_CLIP: tl.constexpr,
     USE_DYNAMIC_CLIP: tl.constexpr,
+    USE_UOS: tl.constexpr,
 ):
     """
     Quantizes the input tensor `x_ptr` and stores the result in `y_ptr` and the scaling factor in `s_ptr`.
@@ -308,6 +315,7 @@ def _convert_to_mxfp4_kernel(
         QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=IS_2D_BLOCK,
         USE_DYNAMIC_CLIP=USE_DYNAMIC_CLIP,
+        USE_UOS=USE_UOS,
     )
 
     if USE_STATIC_CLIP:
@@ -410,6 +418,7 @@ def convert_to_mxfp4(
     philox_seed: Optional[int] = None,
     philox_offset: Optional[int] = None,
     clip_mode: str = "none",
+    use_uos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     torch._check(data_hp.shape[axis] % block_size == 0)
     assert not is_2d_block or data_hp.size(-2) % block_size == 0
@@ -469,6 +478,7 @@ def convert_to_mxfp4(
         USE_ASM=use_asm,
         USE_STATIC_CLIP=use_static_clip,
         USE_DYNAMIC_CLIP=use_dynamic_clip,
+        USE_UOS=use_uos,
     )
 
     return data_lp.reshape(new_shape).transpose(axis, -1), scales.reshape(scales_shape).transpose(axis, -1)
@@ -544,6 +554,7 @@ def _fake_convert_to_mxfp4(
     use_sr: bool = False,
     use_asm: Optional[bool] = None,
     use_static_clip: bool = False,
+    use_uos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     data_hp = data_hp.transpose(axis, -1)
     orig_shape = data_hp.shape

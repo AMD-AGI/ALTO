@@ -3,15 +3,15 @@
 # SPDX-License-Identifier: MIT
 
 import torch
-from torchtitan.models.common.attention import (ScaledDotProductAttentionWrapper)
+from torchtitan.models.common.attention import (ScaledDotProductAttention)
 
 from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
 from .config import TrainingOpConfig
 
-__all__ = ["LPScaledDotProductAttentionWrapper"]
+__all__ = ["LPScaledDotProductAttention"]
 
 
-class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
+class LPScaledDotProductAttention(ScaledDotProductAttention):
 
     def __init__(self, config: TrainingOpConfig):
         super().__init__()
@@ -25,17 +25,30 @@ class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
 
     def _get_name(self) -> str:
         return f"{self.__class__.__name__}[{self.config}]"
-
+    
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
+        attention_masks: None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
         is_causal: bool = True,
-    ):
+        **kwargs,
+    ) -> torch.Tensor:
+        if attention_masks is not None:
+            raise ValueError(
+                "ScaledDotProductAttention does not support attention_masks; it "
+                "only supports causal/non-causal attention via is_causal."
+            )
+        # Transpose to (B, N, L, H) for SDPA
+        q, k, v = (
+            q_BLNH.transpose(1, 2),
+            k_BLNH.transpose(1, 2),
+            v_BLNH.transpose(1, 2),
+        )
         batch, num_head_q, seqlen_q, head_dim_qk = q.shape
         batch_k, num_head_kv, seqlen_kv, head_dim_qk_k = k.shape
         batch_v, num_head_kv_v, seqlen_kv_v, head_dim_v = v.shape
@@ -64,4 +77,5 @@ class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
             use_exp2=True,
             layout="bhsd",
         )[0]
-        return o
+        # Transpose back to (B, L, N, H)
+        return o.transpose(1, 2)

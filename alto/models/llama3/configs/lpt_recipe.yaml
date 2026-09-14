@@ -3,7 +3,7 @@ training_stage:
     LowPrecisionTrainingModifier:
       scheme: "mxfp4"
       targets: ["Linear"]
-      ignore: ["output"]
+      ignore: ["lm_head"]
       use_2dblock_x: false
       use_2dblock_w: true
       use_hadamard: true

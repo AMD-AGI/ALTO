@@ -9,12 +9,15 @@
 
 # modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/modifiers/modifier.py
 
+from typing import TYPE_CHECKING
 from abc import abstractmethod
 from pydantic import ConfigDict
 import torch
 from torch.nn import Module
 from torchtitan.tools.logging import logger
 from alto.modifiers.utils import HooksMixin
+if TYPE_CHECKING:
+    from torchtitan.protocols.model import BaseModel
 
 __all__ = ["Modifier"]
 
@@ -52,6 +55,9 @@ class Modifier(HooksMixin):
 
     def convert(self, model: Module, **kwargs) -> bool:
         return self.on_convert(model, **kwargs)
+    
+    def convert_config(self, model_config: "BaseModel.Config") -> bool:
+        return self.on_convert_config(model_config)
 
     def initialize(self, model_parts: list[Module], **kwargs):
         if self.initialized_:
@@ -100,6 +106,10 @@ class Modifier(HooksMixin):
 
     @abstractmethod
     def on_convert(self, model: Module, **kwargs) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         raise NotImplementedError
 
     def _infer_sequential_targets(self, model: torch.nn.Module) -> str | list[str]:

@@ -8,4 +8,4 @@ pruning_stage:
       pruning_dimension: "layer"
       targets:
         - "re:.*\\.wq$"
-      ignore: ["output"]
+      ignore: ["lm_head"]

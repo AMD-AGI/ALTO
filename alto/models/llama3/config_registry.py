@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.trainer import Trainer
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.models.llama3.config_registry import (
@@ -54,12 +54,12 @@ __all__ = [
 
 def llama3_debugmodel() -> Trainer.Config:
     config = llama3_debugmodel_orig()
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 4
     config.training.global_batch_size = 16
     config.training.seq_len = 2048
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.debug.seed = 1234
     return config
 
@@ -85,13 +85,13 @@ def llama3_1b() -> Trainer.Config:
     config = llama3_1b_orig()
     config.hf_assets_path = "/group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B"
     config.metrics.log_freq = 1
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.global_batch_size = 10
     config.training.seq_len = 8192
     config.dataloader.dataset = "c4_test"
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = True
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/group/archive_dataset_6_nobkup/archive_modelzoo/sequence_learning/weights/nlp-pretrained-model/meta-llama/Llama-3.2-1B"
@@ -107,7 +107,7 @@ def llama3_1b() -> Trainer.Config:
 def llama3_1b_opt() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/recipe.yaml",),
     ],)
@@ -128,12 +128,12 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.dump_folder = "llama3_8b-mi308-pretrain-subset-gbs384-lr1e-4-outputs"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 5000
     config.training.local_batch_size = 2
     config.training.global_batch_size = 384
     config.training.seq_len = 8192
-    config.optimizer.lr = 1e-4
+    config.optimizer.param_groups[0].optimizer_kwargs["lr"] = 1e-4
     config.lr_scheduler.min_lr_factor = 0.0
     config.lr_scheduler.warmup_steps = 500
     config.lr_scheduler.decay_ratio = 0.9
@@ -141,9 +141,8 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.dataloader.dataset = "megatron"
     config.dataloader.dataset_path = "/workspace/workspace/megatron_dataset/data/c4-train.en_6_text_document.idx"
     config.parallelism.expert_parallel_degree = 1
-    config.parallelism.expert_tensor_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = False
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/huggingface/hub/models--unsloth--Llama-3.1-8B/snapshots/3f0d51f8e5640f98f1a96ea9044a0e55c0a83814"
@@ -177,7 +176,7 @@ def llama3_8b_lpt() -> Trainer.Config:
 def llama3_1b_gptq() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/gptq_recipe.yaml",),
     ],)
@@ -187,7 +186,7 @@ def llama3_1b_gptq() -> Trainer.Config:
 def llama3_1b_awq() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/awq_recipe.yaml",),
     ],)
@@ -197,7 +196,7 @@ def llama3_1b_awq() -> Trainer.Config:
 def llama3_1b_mx9_wa() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/mx9_wa_recipe.yaml",),
     ],)
@@ -207,7 +206,7 @@ def llama3_1b_mx9_wa() -> Trainer.Config:
 def llama3_1b_mx6_wa() -> Trainer.Config:
     config = llama3_1b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/mx6_wa_recipe.yaml",),
     ],)
@@ -221,13 +220,13 @@ def llama3_8b() -> Trainer.Config:
     config = llama3_8b_orig()
     config.hf_assets_path = LLAMA3_8B_PATH
     config.metrics.log_freq = 1
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.global_batch_size = 8
     config.training.seq_len = 2048
     config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4_test")
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = True
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = LLAMA3_8B_PATH
@@ -243,7 +242,7 @@ def llama3_8b() -> Trainer.Config:
 def llama3_8b_gptq() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/gptq_recipe.yaml",),
@@ -254,7 +253,7 @@ def llama3_8b_gptq() -> Trainer.Config:
 def llama3_8b_rtn() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/rtn_recipe.yaml",),
     ],)
@@ -264,7 +263,7 @@ def llama3_8b_rtn() -> Trainer.Config:
 def llama3_8b_awq() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/awq_recipe.yaml",),
     ],)
@@ -279,7 +278,7 @@ def llama3_8b_awq() -> Trainer.Config:
 def llama3_8b_wanda() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/wanda_recipe.yaml",),
     ],)
@@ -289,7 +288,7 @@ def llama3_8b_wanda() -> Trainer.Config:
 def llama3_8b_sparsegpt() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/sparsegpt_recipe.yaml",),
@@ -300,7 +299,7 @@ def llama3_8b_sparsegpt() -> Trainer.Config:
 def llama3_8b_magnitude() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/magnitude_recipe.yaml",),
     ],)
@@ -310,7 +309,7 @@ def llama3_8b_magnitude() -> Trainer.Config:
 def llama3_8b_admm() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/admm_recipe.yaml",),
@@ -321,7 +320,7 @@ def llama3_8b_admm() -> Trainer.Config:
 def llama3_8b_alps() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/alps_recipe.yaml",),
@@ -337,7 +336,7 @@ def llama3_8b_alps() -> Trainer.Config:
 def llama3_8b_wanda_structured() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/wanda_structured_recipe.yaml",),
     ],)
@@ -347,7 +346,7 @@ def llama3_8b_wanda_structured() -> Trainer.Config:
 def llama3_8b_obs() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/obs_recipe.yaml",),
@@ -358,7 +357,7 @@ def llama3_8b_obs() -> Trainer.Config:
 def llama3_8b_admm_structured() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.training.global_batch_size = 128
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/admm_structured_recipe.yaml",),
@@ -369,7 +368,7 @@ def llama3_8b_admm_structured() -> Trainer.Config:
 def llama3_8b_cosine_similarity() -> Trainer.Config:
     config = llama3_8b()
     config.training.steps = 1
-    config.optimizer = OptimizersContainer.Config(lr=0.0)
+    config.optimizer = default_adamw(lr=0.0)
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/llama3/configs/cosine_similarity_recipe.yaml",),
     ],)
@@ -385,13 +384,13 @@ def instella_3b() -> Trainer.Config:
     config = instella_3b_orig()
     config.hf_assets_path = "/group/ossmodelzoo/hanwang2/huggingface/hub/models--amd--Instella-3B-Stage1/snapshots/cb33253ab0a5b9f2ea0b98f3edd818d46454580e"
     config.metrics.log_freq = 1
-    config.profiling.enable_profiling = False
+    config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.local_batch_size = 1
     config.training.global_batch_size = 10
     config.training.seq_len = 4096
     config.dataloader.dataset = "c4_test"
-    config.activation_checkpoint.mode = "none"
+    config.activation_checkpoint = None
     config.checkpoint.enable = True
     config.checkpoint.interval = 10
     config.checkpoint.initial_load_path = "/group/ossmodelzoo/hanwang2/huggingface/hub/models--amd--Instella-3B-Stage1/snapshots/cb33253ab0a5b9f2ea0b98f3edd818d46454580e"

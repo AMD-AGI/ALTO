@@ -70,10 +70,10 @@ def gpt_oss_20b() -> Trainer.Config:
 def gpt_oss_20b_pretrain() -> Trainer.Config:
     config = gpt_oss_20b_orig()
     config.hf_assets_path = "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/"
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-bf16-std0.008all-nobalance-lr8e-4decay0.1-reducebf16-outputs"
+    config.dump_folder = "/perf_apps/hanwang2/results/gpt_oss_20b-megatron-mi355-gbs32-bf16-lr8e-4-outputs"
     config.profiler.enable_profiling = False
     config.training.steps = 1200000
-    config.training.local_batch_size = 1
+    config.training.local_batch_size = 4
     config.training.global_batch_size = 32
     config.training.seq_len = 8192
     config.optimizer.param_groups[0].optimizer_kwargs["lr"] = 8e-4
@@ -106,7 +106,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-mxfp4gemm_1d2d-hadamard-sr-uos-deosc_1000_100_3.0-std0.008scaledvanilla-nobalance-lr8e-4-mxfp8qkvo12-bitrefactor-outputs"
+    config.dump_folder = "/perf_apps/hanwang2/results/gpt_oss_20b-megatron-mi355-gbs32-mxfp4gemm_1d2d-hadamard-sr-uos-deosc_768_100_4.0-lr8e-4-mxfp8qkvo-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
     ],)

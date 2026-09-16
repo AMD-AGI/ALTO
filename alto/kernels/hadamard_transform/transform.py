@@ -70,8 +70,10 @@ class HadamardFactory:
         """
 
         weight = cls._create_weight(device)
-        perm = cls._create_permutation(weight, device) if cls.randomized else None
-        return HadamardTransform(weight, perm)
+        if cls.randomized:
+            perm = cls._create_permutation(weight, device)
+            weight = weight[self.perm][:, self.perm]
+        return HadamardTransform(weight)
 
     @classmethod
     def _create_weight(
@@ -101,10 +103,8 @@ class HadamardTransform:
     def __init__(
         self,
         weight: Tensor,
-        perm: Optional[Tensor],
     ):
         self.weight = weight
-        self.perm = perm
         self._scale = torch.tensor(weight.size(0), dtype=torch.float64, device=weight.device).sqrt()
 
     def __call__(self, value: Tensor, inverse: bool = False, left_mul: bool = False) -> Tensor:
@@ -118,9 +118,6 @@ class HadamardTransform:
         :return: Transformed tensor
         """
         weight = self.weight
-
-        if self.perm is not None:
-            weight = weight[self.perm][:, self.perm]
 
         if inverse:
             weight = weight.T

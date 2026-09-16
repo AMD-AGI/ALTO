@@ -389,6 +389,7 @@ def mxfp8_attention_backward_reference_stage2(
     sm_scale: float,
     causal: bool,
     block_size: int = BLOCK_SIZE_DEFAULT,
+    high_precision_dp: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pure-PyTorch golden reference for the **Stage-2 (A1)** MXFP8 backward.
 
@@ -416,6 +417,10 @@ def mxfp8_attention_backward_reference_stage2(
         dK = dSᵀ @ Q      reduction seqlen_q   : dS 1D along sq ; Q 2D reuse
         dQ = dS @ K       reduction seqlen_k   : dS 1D along sk ; K 2D reuse
 
+    ``high_precision_dp`` models the dP-only ablation switch: the dP dot alone
+    consumes the unquantized dO and V, every other dot is unchanged — in
+    particular dV still reads its own 1D-quantized dO.
+
     Same top-left causal mask as the other references (matches SDPA on bhsd), so
     causal tests must keep ``seqlen_q == seqlen_k``. Args mirror
     ``mxfp8_attention_backward_reference``; ``o`` / ``softmax_lse`` must be the
@@ -433,9 +438,11 @@ def mxfp8_attention_backward_reference_stage2(
     q_dq = _mxfp8_qdq(q, axis=-1, is_2d_block=True, block_size=block_size).to(torch.float32)
     k_dq = _mxfp8_qdq(k, axis=-1, is_2d_block=True, block_size=block_size).to(torch.float32)
     v_dq = _mxfp8_qdq(v, axis=-1, is_2d_block=True, block_size=block_size).to(torch.float32)
+    v_f = v.to(torch.float32)
     if n_rep > 1:
         k_dq = k_dq.repeat_interleave(n_rep, dim=1)
         v_dq = v_dq.repeat_interleave(n_rep, dim=1)
+        v_f = v_f.repeat_interleave(n_rep, dim=1)
 
     do_f = do.to(torch.float32)
     o_f = o.to(torch.float32)
@@ -452,8 +459,11 @@ def mxfp8_attention_backward_reference_stage2(
     p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
 
     # dP = dO @ Vᵀ (reduction head_dim_v): dO 1D along head_dim_v, V 2D reuse.
-    do_hd = qdq(do_f, axis=-1)
-    dp = torch.matmul(do_hd, v_dq.transpose(-1, -2))
+    if high_precision_dp:
+        dp = torch.matmul(do_f, v_f.transpose(-1, -2))
+    else:
+        do_hd = qdq(do_f, axis=-1)
+        dp = torch.matmul(do_hd, v_dq.transpose(-1, -2))
     delta = (o_f * do_f).sum(dim=-1)
     ds = p * (dp - delta[..., None])  # fp32 elementwise
 

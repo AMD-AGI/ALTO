@@ -295,7 +295,8 @@ public_autograd_cases = [
 @cuda_only
 @pytest.mark.parametrize("config", public_autograd_cases)
 @pytest.mark.parametrize("causal", [True, False])
-def test_public_autograd_matches_sdpa(config, causal):
+@pytest.mark.parametrize("high_precision_dp", [False, True])
+def test_public_autograd_matches_sdpa(config, causal, high_precision_dp):
     """Public ``triton_attention_mxfp8`` forward/backward must wire gradients correctly.
 
     The lower-level backward op is tested across the large shape grid below. This
@@ -338,6 +339,7 @@ def test_public_autograd_matches_sdpa(config, causal):
         return_scores=False,
         use_exp2=True,
         layout="bhsd",
+        high_precision_dp=high_precision_dp,
     )[0]
     o_kernel.backward(do)
 
@@ -368,7 +370,7 @@ def test_public_autograd_matches_sdpa(config, causal):
 #   Stage-2 reference (same full quantization both sides -> gap = port bugs).
 # ---------------------------------------------------------------------------
 
-def _check_backward_kernel_vs_reference(config, causal, batch=4):
+def _check_backward_kernel_vs_reference(config, causal, batch=4, high_precision_dp=False):
     from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
 
     device = "cuda"
@@ -402,8 +404,11 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4):
         max_seqlen_q=config.seqlen_q,
         max_seqlen_k=config.seqlen_kv,
         use_exp2=True,
+        v_hp=v.contiguous() if high_precision_dp else None,
+        high_precision_dp=high_precision_dp,
     )
-    dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(q, k, v, do, o_ref, lse_ref, sm_scale, causal)
+    dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(
+        q, k, v, do, o_ref, lse_ref, sm_scale, causal, high_precision_dp=high_precision_dp)
 
     rows = []
     pairs = [("dQ", dq_r, dq_k), ("dK", dk_r, dk_k), ("dV", dv_r, dv_k)]
@@ -423,9 +428,10 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4):
 @cuda_only
 @pytest.mark.parametrize("config", test_cases)
 @pytest.mark.parametrize("causal", [True, False])
-def test_backward_kernel_matches_reference(config, causal):
+@pytest.mark.parametrize("high_precision_dp", [False, True])
+def test_backward_kernel_matches_reference(config, causal, high_precision_dp):
     """A1 backward kernel vs Stage-2 golden reference — isolates port bugs. CDNA4-only."""
-    _check_backward_kernel_vs_reference(config, causal)
+    _check_backward_kernel_vs_reference(config, causal, high_precision_dp=high_precision_dp)
 
 
 @cuda_only
@@ -433,3 +439,58 @@ def test_backward_kernel_matches_reference(config, causal):
 def test_backward_kernel_matches_reference_non_square(config):
     """Backward kernel on seqlen_q != seqlen_k, the only shape family causal rejects."""
     _check_backward_kernel_vs_reference(config, causal=False, batch=2)
+
+
+# ---------------------------------------------------------------------------
+# dP high-precision ablation — containment
+#   The switch must move dQ/dK (they consume dS, which consumes dP) and leave
+#   dV bit-identical (dV = Pᵀ @ dO never touches dP). Anything else means the
+#   ablation is measuring more than dP and its results are uninterpretable.
+# ---------------------------------------------------------------------------
+
+@cuda_only
+@pytest.mark.parametrize("config", public_autograd_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_high_precision_dp_touches_only_dp(config, causal):
+    """dP switch changes dQ/dK and leaves dV bit-identical."""
+    from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
+
+    device = "cuda"
+    q, k, v = _make_qkv_bhsd(2, config, device, torch.bfloat16)
+    do = _make_do_bhsd(2, config, device, torch.bfloat16)
+    sm_scale = config.head_dim_qk**(-0.5)
+
+    o_ref, lse_ref = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal)
+    q8, q_scale = convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    k8, k_scale = convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    v8, v_scale = convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+
+    def run(high_precision_dp):
+        return torch.ops.alto.attention_mxfp8_backward_triton_impl(
+            do.contiguous(),
+            q8.contiguous(),
+            k8.contiguous(),
+            v8.contiguous(),
+            o_ref.contiguous(),
+            lse_ref.contiguous(),
+            q_scale,
+            k_scale,
+            v_scale,
+            sm_scale=sm_scale,
+            causal=causal,
+            layout="bhsd",
+            cu_seqlens_q=0,
+            cu_seqlens_k=0,
+            max_seqlen_q=config.seqlen_q,
+            max_seqlen_k=config.seqlen_kv,
+            use_exp2=True,
+            v_hp=v.contiguous() if high_precision_dp else None,
+            high_precision_dp=high_precision_dp,
+        )
+
+    dq_lp, dk_lp, dv_lp = run(False)
+    dq_hp, dk_hp, dv_hp = run(True)
+
+    torch.testing.assert_close(dv_lp, dv_hp, rtol=0, atol=0)
+    assert not torch.equal(dq_lp, dq_hp), "dP switch left dQ untouched — it is not wired in."
+    assert not torch.equal(dk_lp, dk_hp), "dP switch left dK untouched — it is not wired in."

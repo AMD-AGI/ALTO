@@ -1218,6 +1218,7 @@ def _attn_bwd_dkdv_inner(
     ks_hd,
     vt_fp8,
     vs_hd,
+    vt_hp,
     dk,
     dv,
     q_scale_base,
@@ -1252,6 +1253,7 @@ def _attn_bwd_dkdv_inner(
     CAUSAL: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """Accumulate dk, dv over query blocks for one key block (A1, dot_scaled).
 
@@ -1262,6 +1264,10 @@ def _attn_bwd_dkdv_inner(
     no re-quantization: dot a reads its head_dim-grouped scale, dot d reads the
     same 2D block scale re-indexed along seqlen. Only dO/P/dS are quantized fresh
     (plan §9.5 dots a/b/c/d).
+
+    ``HIGH_PRECISION_DP`` swaps dot b alone onto bf16 operands (``vt_hp`` plus the
+    unquantized ``do`` tile) with fp32 accumulate. Dots a/c/d keep their e4m3
+    operands, so dV still consumes its own freshly quantized dO.
     """
     for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
         offs_m = start_m + tl.arange(0, BLOCK_M)
@@ -1296,8 +1302,11 @@ def _attn_bwd_dkdv_inner(
 
         do = tl.load(do_ptrs, mask=do_mask, other=0.0)
         # dot b: dp = do @ vᵀ, reduction = head_dim_v. dO is fresh -> quantize here.
-        do_fp8_hd, dos_hd = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
-        dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", vt_fp8, vs_hd, "e4m3", out_dtype=tl.float32)
+        if HIGH_PRECISION_DP:
+            dp = tl.dot(do, vt_hp, out_dtype=tl.float32)
+        else:
+            do_fp8_hd, dos_hd = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+            dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", vt_fp8, vs_hd, "e4m3", out_dtype=tl.float32)
 
         d_ptrs = d_offset + offs_m * stride_ldm
         Di = tl.load(d_ptrs, mask=mask_m, other=0.0)
@@ -1324,6 +1333,7 @@ def _bwd_kernel_dkdv(
     Q,
     K,
     V,
+    V_hp,
     Q_scale,
     K_scale,
     V_scale,
@@ -1383,12 +1393,16 @@ def _bwd_kernel_dkdv(
     IS_VARLEN: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """One program per (batch*head_k, key block). Parallelizes dk/dv over keys.
 
     A1: q/k/v arrive as the forward's saved e4m3 with compact 2D-block scales;
     the kernel reuses them (no re-quant), rebuilding each dot's scale tile from
     the saved scale. Only dO/P/dS are quantized fresh (see ``_attn_bwd_dkdv_inner``).
+
+    ``V_hp`` is the pre-quantization bf16 V, laid out exactly like ``V``. With
+    ``HIGH_PRECISION_DP`` off the caller aliases it onto ``V`` and it is never read.
     """
     SCALE_BLOCK_DMODEL_QK: tl.constexpr = BLOCK_DMODEL_QK // QUANT_BLOCK_SIZE
     SCALE_BLOCK_DMODEL_V: tl.constexpr = BLOCK_DMODEL_V // QUANT_BLOCK_SIZE
@@ -1457,6 +1471,15 @@ def _bwd_kernel_dkdv(
     kt_fp8 = tl.trans(k_fp8)
     vt_fp8 = tl.trans(v_fp8)
 
+    # dot b's own bf16 V tile. The e4m3 vt_fp8 above is left untouched so dots
+    # a/c/d keep the exact operands they had before this switch existed.
+    if HIGH_PRECISION_DP:
+        v_hp_offset = V_hp + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
+        v_hp_ptrs = v_hp_offset + offs_n[:, None] * stride_vn + offs_d_v[None, :] * stride_vk
+        vt_hp = tl.trans(tl.load(v_hp_ptrs, mask=mask_n[:, None] & mask_d_v[None, :], other=0.0))
+    else:
+        vt_hp = vt_fp8
+
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL_QK], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL_V], dtype=tl.float32)
 
@@ -1466,6 +1489,7 @@ def _bwd_kernel_dkdv(
             ks_hd,
             vt_fp8,
             vs_hd,
+            vt_hp,
             dk,
             dv,
             q_scale_base,
@@ -1500,6 +1524,7 @@ def _bwd_kernel_dkdv(
             CAUSAL,
             QUANT_BLOCK_SIZE,
             USE_ASM,
+            HIGH_PRECISION_DP,
         )
         q_offset += stride_qh
         do_offset += stride_doh
@@ -1522,6 +1547,7 @@ def _attn_bwd_dq_inner(
     qs_hd,
     do_fp8_hd,
     dos_hd,
+    do_hp,
     k_scale_base,
     v_scale_base,
     stride_ksn,
@@ -1537,6 +1563,7 @@ def _attn_bwd_dq_inner(
     mask_d_v,
     k_offset,
     v_offset,
+    v_hp_offset,
     stride_kn,
     stride_kk,
     stride_vn,
@@ -1557,6 +1584,7 @@ def _attn_bwd_dq_inner(
     CAUSAL: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """Accumulate dq over key blocks for one query block (A1, dot_scaled).
 
@@ -1565,6 +1593,10 @@ def _attn_bwd_dq_inner(
     the fresh-quantized dO. k/v are the saved e4m3 reused with no re-quant: dots
     e/f read their head_dim scale, dot g reads k's 2D block scale re-indexed along
     seqlen. Only dS is quantized fresh (plan §9.5 dots e/f/g).
+
+    ``HIGH_PRECISION_DP`` swaps dot f alone onto the bf16 ``do_hp`` tile and a
+    bf16 V tile read from ``v_hp_offset``, with fp32 accumulate. Dots e/g keep
+    their e4m3 operands.
     """
     if USE_EXP2:
         l_i *= RCP_LN2
@@ -1599,9 +1631,14 @@ def _attn_bwd_dq_inner(
             p = tl.math.exp(qk - l_i[:, None])
 
         # dot f: dp = do @ vᵀ, reduction = head_dim_v. Reuse v's saved head_dim scale.
-        vs_f = _load_scale_hd(v_scale_base, offs_n, stride_vsn, stride_vsk, N_CTX_K,
-                              SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_V, QUANT_BLOCK_SIZE)
-        dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", tl.trans(v), vs_f, "e4m3", out_dtype=tl.float32)
+        if HIGH_PRECISION_DP:
+            v_hp_ptrs = v_hp_offset + offs_n[:, None] * stride_vn + offs_d_v[None, :] * stride_vk
+            v_hp = tl.load(v_hp_ptrs, mask=mask_v, other=0.0)
+            dp = tl.dot(do_hp, tl.trans(v_hp), out_dtype=tl.float32)
+        else:
+            vs_f = _load_scale_hd(v_scale_base, offs_n, stride_vsn, stride_vsk, N_CTX_K,
+                                  SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_V, QUANT_BLOCK_SIZE)
+            dp = tl.dot_scaled(do_fp8_hd, dos_hd, "e4m3", tl.trans(v), vs_f, "e4m3", out_dtype=tl.float32)
         ds = p * (dp - Di[:, None])
 
         # dot g: dq += ds @ k, reduction = seqlen_k (BLOCK_N). dS fresh (1D along
@@ -1619,6 +1656,7 @@ def _bwd_kernel_dq(
     Q,
     K,
     V,
+    V_hp,
     Q_scale,
     K_scale,
     V_scale,
@@ -1677,11 +1715,15 @@ def _bwd_kernel_dq(
     IS_VARLEN: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    HIGH_PRECISION_DP: tl.constexpr,
 ):
     """One program per (batch*head_q, query block). Parallelizes dq over queries.
 
     A1: q/k/v are the forward's saved e4m3 + compact 2D-block scales, reused with
     no re-quant. Only dO (fresh input) and dS are quantized in-kernel.
+
+    ``V_hp`` is the pre-quantization bf16 V, laid out exactly like ``V``. With
+    ``HIGH_PRECISION_DP`` off the caller aliases it onto ``V`` and it is never read.
     """
     SCALE_BLOCK_DMODEL_QK: tl.constexpr = BLOCK_DMODEL_QK // QUANT_BLOCK_SIZE
     SCALE_BLOCK_DMODEL_V: tl.constexpr = BLOCK_DMODEL_V // QUANT_BLOCK_SIZE
@@ -1713,6 +1755,7 @@ def _bwd_kernel_dq(
     q_offset = Q + off_z * stride_qz + off_h_q * stride_qh + q_start * stride_qm
     k_offset = K + off_z * stride_kz + off_h_k * stride_kh + k_start * stride_kn
     v_offset = V + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
+    v_hp_offset = V_hp + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
     do_offset = DO + off_z * stride_doz + off_h_q * stride_doh + q_start * stride_dom
     q_scale_base = Q_scale + off_z * stride_qsz + off_h_q * stride_qsh + q_scale_start * stride_qsm
     k_scale_base = K_scale + off_z * stride_ksz + off_h_k * stride_ksh + k_scale_start * stride_ksn
@@ -1756,6 +1799,7 @@ def _bwd_kernel_dq(
         qs_hd,
         do_fp8_hd,
         dos_hd,
+        do,
         k_scale_base,
         v_scale_base,
         stride_ksn,
@@ -1771,6 +1815,7 @@ def _bwd_kernel_dq(
         mask_d_v,
         k_offset,
         v_offset,
+        v_hp_offset,
         stride_kn,
         stride_kk,
         stride_vn,
@@ -1791,6 +1836,7 @@ def _bwd_kernel_dq(
         CAUSAL,
         QUANT_BLOCK_SIZE,
         USE_ASM,
+        HIGH_PRECISION_DP,
     )
 
     dq *= sm_scale
@@ -1817,6 +1863,8 @@ def attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    v_hp: Optional[torch.Tensor] = None,
+    high_precision_dp: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """MXFP8 flash-attention backward (stage-2 / A1, ``tl.dot_scaled``).
 
@@ -1829,6 +1877,11 @@ def attention_mxfp8_backward_triton_impl(
     along each dot's reduction axis), then fed to ``tl.dot_scaled`` (plan §9.5).
     Matches ``mxfp8_attention_backward_reference_stage2``.
 
+    ``high_precision_dp`` is the dP-only ablation switch: dot b / dot f run as a
+    bf16 GEMM with fp32 accumulate on the unquantized dO and ``v_hp`` (the
+    pre-quantization V). Every other dot keeps its e4m3 operands, including the
+    dV path's own freshly quantized dO.
+
     Requires CDNA4 (native ``tl.dot_scaled``).
     """
     q = q.contiguous()
@@ -1837,6 +1890,18 @@ def attention_mxfp8_backward_triton_impl(
     q_scale = q_scale.contiguous()
     k_scale = k_scale.contiguous()
     v_scale = v_scale.contiguous()
+
+    if high_precision_dp:
+        assert v_hp is not None, "high_precision_dp requires the pre-quantization v_hp tensor."
+        assert v_hp.shape == v.shape, f"v_hp shape {tuple(v_hp.shape)} must match v {tuple(v.shape)}."
+        assert v_hp.dtype == do.dtype, (
+            f"high_precision_dp feeds v_hp and dO to the same tl.dot, which needs one dtype: "
+            f"got v_hp={v_hp.dtype}, dO={do.dtype}.")
+        v_hp = v_hp.contiguous()
+    else:
+        # HIGH_PRECISION_DP is a constexpr, so the bf16 load is never traced.
+        # Aliasing onto v keeps the launch arity constant.
+        v_hp = v
 
     if not do.is_contiguous():
         do = do.contiguous()
@@ -1911,6 +1976,7 @@ def attention_mxfp8_backward_triton_impl(
         q,
         k,
         v,
+        v_hp,
         q_scale,
         k_scale,
         v_scale,
@@ -1969,6 +2035,7 @@ def attention_mxfp8_backward_triton_impl(
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        HIGH_PRECISION_DP=high_precision_dp,
         num_warps=4,
         num_stages=1,
     )
@@ -1977,6 +2044,7 @@ def attention_mxfp8_backward_triton_impl(
         q,
         k,
         v,
+        v_hp,
         q_scale,
         k_scale,
         v_scale,
@@ -2036,6 +2104,7 @@ def attention_mxfp8_backward_triton_impl(
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        HIGH_PRECISION_DP=high_precision_dp,
         num_warps=4,
         num_stages=1,
     )
@@ -2062,6 +2131,8 @@ def fake_attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    v_hp: Optional[torch.Tensor] = None,
+    high_precision_dp: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.empty_like(q, dtype=bwd_torch_dtype)
     dk = torch.empty_like(k, dtype=bwd_torch_dtype)
@@ -2090,7 +2161,9 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         return_scores: bool,
         use_exp2: bool,
         layout: str,
+        high_precision_dp: bool,
     ):
+        v_hp = v if high_precision_dp else None
         q, q_scale = torch.ops.alto.convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
         k, k_scale = torch.ops.alto.convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
         v, v_scale = torch.ops.alto.convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
@@ -2116,7 +2189,8 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             use_exp2=use_exp2,
         )
 
-        ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale)
+        ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale, v_hp)
+        ctx.high_precision_dp = high_precision_dp
         ctx.sm_scale = sm_scale
         ctx.causal = causal
         ctx.dropout_p = dropout_p
@@ -2132,7 +2206,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *grad_outputs):
         do = grad_outputs[0]
-        q, k, v, o, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors
+        q, k, v, o, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale, v_hp = ctx.saved_tensors
         assert bias is None, "MXFP8 attention backward does not support bias yet."
         assert alibi_slopes is None, "MXFP8 attention backward does not support alibi yet."
         assert ctx.dropout_p == 0.0, "MXFP8 attention backward does not support dropout yet."
@@ -2155,8 +2229,10 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             max_seqlen_q=ctx.max_seqlens_q,
             max_seqlen_k=ctx.max_seqlens_k,
             use_exp2=ctx.use_exp2,
+            v_hp=v_hp,
+            high_precision_dp=ctx.high_precision_dp,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 @attention_mxfp8_forward_triton_impl.register_fake
@@ -2228,6 +2304,7 @@ def triton_attention_mxfp8(
     return_scores: bool,
     use_exp2: bool,
     layout: str,
+    high_precision_dp: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return _triton_attention_mxfp8.apply(
         q,
@@ -2245,4 +2322,5 @@ def triton_attention_mxfp8(
         return_scores,
         use_exp2,
         layout,
+        high_precision_dp,
     )

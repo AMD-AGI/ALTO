@@ -48,5 +48,15 @@ class TrainingOpConfig:
       * NVFP4: not implemented
     """
 
+    attention_high_precision_dp: bool = False
+    """
+    Ablation switch for the MXFP8 attention backward: run ``dP = dO @ Vᵀ`` as a
+    bf16 GEMM with fp32 accumulate instead of ``tl.dot_scaled`` on e4m3 operands.
+
+    Isolates dP as an error source. Every other backward dot keeps its e4m3
+    operands, including the freshly quantized dO that dV consumes, so turning
+    this on changes dP and nothing else. MXFP8 attention only.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

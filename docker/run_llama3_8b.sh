@@ -29,6 +29,9 @@ case "${MODE}" in
     attn)
         TRAIN_COMMAND='NGPU=8 MODULE=llama3 CONFIG=llama3_8b_light_mxfp8_attn WANDB_RUN_NAME=llama3-8b-mxfp8-attn ./examples/run.sh'
         ;;
+    attn-hpdp)
+        TRAIN_COMMAND='NGPU=8 MODULE=llama3 CONFIG=llama3_8b_light_mxfp8_attn_high_precision_dp WANDB_RUN_NAME=llama3-8b-mxfp8-attn-hpdp ./examples/run.sh'
+        ;;
     linear-attn)
         TRAIN_COMMAND='NGPU=8 MODULE=llama3 CONFIG=llama3_8b_light_mxfp8_linear_attn WANDB_RUN_NAME=llama3-8b-mxfp8-linear-attn ./examples/run.sh'
         ;;
@@ -42,7 +45,7 @@ case "${MODE}" in
         exit 0
         ;;
     *)
-        echo "Usage: $0 {shell|smoke|bf16|bf16-gbs4|attn|linear-attn|linear|suite}" >&2
+        echo "Usage: $0 {shell|smoke|bf16|bf16-gbs4|attn|attn-hpdp|linear-attn|linear|suite}" >&2
         exit 2
         ;;
 esac

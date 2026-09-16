@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+from functools import partial
+
 import torch
 from torchtitan.models.common.attention import (ScaledDotProductAttentionWrapper)
 
@@ -20,9 +22,14 @@ class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
         self.attn_func = None
 
         if isinstance(config, TrainingOpConfig) and config.precision == "mxfp4":
+            if config.attention_high_precision_dp:
+                raise ValueError("attention_high_precision_dp is implemented for mxfp8_e4m3 only.")
             self.attn_func = triton_attention_mxfp4
         elif isinstance(config, TrainingOpConfig) and config.precision == "mxfp8_e4m3":
-            self.attn_func = triton_attention_mxfp8
+            self.attn_func = partial(
+                triton_attention_mxfp8,
+                high_precision_dp=config.attention_high_precision_dp,
+            )
         else:
             raise ValueError(f"Unsupported SDPA config: {config}")
 

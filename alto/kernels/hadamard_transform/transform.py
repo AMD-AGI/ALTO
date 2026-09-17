@@ -72,7 +72,7 @@ class HadamardFactory:
         weight = cls._create_weight(device)
         if cls.randomized:
             perm = cls._create_permutation(weight, device)
-            weight = weight[self.perm][:, self.perm]
+            weight = weight[perm][:, perm]
         return HadamardTransform(weight)
 
     @classmethod

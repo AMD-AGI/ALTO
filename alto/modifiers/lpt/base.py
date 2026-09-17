@@ -34,6 +34,7 @@ class LowPrecisionTrainingModifier(Modifier):
     use_2dblock_w: bool = True
     use_hadamard: bool = False
     hadamard_type: Literal["default", "3rht"] = "default"
+    hadamard_refresh: Literal["fixed", "step", "layer"] = "step"
     use_sr_grad: bool = False
     use_dge: bool = False
     full_precision_backward: bool = False
@@ -247,7 +248,11 @@ class LowPrecisionTrainingModifier(Modifier):
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
         if self.use_hadamard:
             from alto.kernels.hadamard_transform import HadamardFactory
-            HadamardFactory.refresh()
+            if self.hadamard_refresh == "step":
+                HadamardFactory.refresh()
+            elif self.hadamard_refresh == "layer":
+                HadamardFactory.refresh(disable_cache=True)
+            # "fixed": do nothing — reuse the same H from step 1
 
         trainer = kwargs.get("trainer", None)
 

@@ -25,8 +25,10 @@ __all__ = [
     "gpt_oss_20b_lpt_1dw",
     "gpt_oss_20b_lpt_no2dw",
     "gpt_oss_20b_adahop",
+    "gpt_oss_20b_adahop_gw",
     "gpt_oss_20b_adahop_hadamard",
     "gpt_oss_20b_pretrain_c4_megatron",
+    "gpt_oss_20b_pretrain_c4_megatron_profile",
     "gpt_oss_20b_lpt_c4",
     "gpt_oss_20b_grad_clip_lpt",
     "gpt_oss_debugmodel_grad_clip_lpt",
@@ -46,9 +48,11 @@ __all__ = [
     "gpt_oss_20b_lpt_madam_stable",
     "gpt_oss_20b_mxfp4_base",
     "gpt_oss_20b_mxfp4_had_2dw_sr",
+    "gpt_oss_20b_mxfp4_had_fixed_2dw_sr",
+    "gpt_oss_20b_mxfp4_had_layer_2dw_sr",
     "gpt_oss_20b_mxfp4_3rht_2dw_sr",
     "gpt_oss_20b_mxfp4_3rht_2dw_sr_uos",
-    "gpt_oss_20b_mxfp4_3rht_2dw_sr_1d"
+    "gpt_oss_20b_mxfp4_3rht_1dw_sr"
 ]
 
 
@@ -181,8 +185,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     config.optimizer.eps = 1e-5 # set by mlperf
     config.lr_scheduler.min_lr_factor = 0.1 # set by mlperf
     config.lr_scheduler.warmup_steps = 128 # can be edited for mlperf submission
-    config.lr_scheduler.total_steps = 1200000
-    config.lr_scheduler.decay_ratio = 1 - 128 / config.lr_scheduler.total_steps
+    #config.lr_scheduler.total_steps = 1200000
+    config.lr_scheduler.decay_ratio = 1 - 128 / config.training.steps #config.lr_scheduler.total_steps
     config.lr_scheduler.decay_type = "cosine"
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
@@ -206,6 +210,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 def gpt_oss_20b_pretrain_c4_megatron() -> Trainer.Config:
     """gpt_oss_20b_pretrain using HuggingFace C4 dataset (bf16 baseline)."""
     config = gpt_oss_20b_pretrain()
+    config.activation_checkpoint.mode = "selective"
+    config.activation_checkpoint.selective_ac_option = "op"
     config.dump_folder = "gpt_oss_20b-pretrain-subset-bf16-c4-outputs"
     config.dataloader.dataset = "megatron"
     config.dataloader.dataset_path = "/data/c4-train.en_6_text_document.idx"
@@ -219,7 +225,16 @@ def gpt_oss_20b_pretrain_c4_megatron() -> Trainer.Config:
     config.checkpoint.last_save_model_only = False   # save full ckpt at final step (model+optim+dataloader) so training can resume
     return config
 
-def gpt_oss_20b_adahop() -> Trainer.Config:
+def gpt_oss_20b_pretrain_c4_megatron_profile() -> Trainer.Config:
+    config = gpt_oss_20b_pretrain_c4_megatron()
+    config.profiling.enable_profiling = True
+    config.profiling.profile_freq = 10        # one cycle every 100 steps
+    config.profiling.profiler_warmup = 3       # 3 warmup steps before capture
+    config.profiling.profiler_active = 1       # capture 1 step per cycle
+    config.profiling.enable_memory_snapshot = True  # optional: CUDA memory snapshots
+    return config
+
+def gpt_oss_20b_adahop_old() -> Trainer.Config:
     config = gpt_oss_20b_pretrain()
     config.training.global_batch_size = 16
     config.parallelism.expert_tensor_parallel_degree = 1
@@ -261,6 +276,7 @@ def gpt_oss_20b_adahop_hadamard() -> Trainer.Config:
     
 def gpt_oss_20b_lpt() -> Trainer.Config:
     config = gpt_oss_20b_pretrain_c4_megatron()
+    config.comm.train_timeout_seconds = 1000
     config.dump_folder = "gpt_oss_20b-mi300-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-rank32-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
@@ -359,6 +375,24 @@ def gpt_oss_20b_mxfp4_had_2dw_sr() -> Trainer.Config:
     ],)
     return config
 
+def gpt_oss_20b_mxfp4_had_fixed_2dw_sr() -> Trainer.Config:
+    """baseline MXFP4 quantization."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-mxfp4-base"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp4_had_2dw_sr.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_mxfp4_had_layer_2dw_sr() -> Trainer.Config:
+    """baseline MXFP4 quantization."""
+    config = gpt_oss_20b_lpt()
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-mxfp4-base"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp4_had_2dw_sr.yaml",),
+    ],)
+    return config
+
 def gpt_oss_20b_mxfp4_3rht_2dw_sr() -> Trainer.Config:
     """baseline MXFP4 quantization."""
     config = gpt_oss_20b_lpt()
@@ -368,12 +402,32 @@ def gpt_oss_20b_mxfp4_3rht_2dw_sr() -> Trainer.Config:
     ],)
     return config
 
-def gpt_oss_20b_mxfp4_3rht_2dw_sr_1d() -> Trainer.Config:
+def gpt_oss_20b_mxfp4_3rht_1dw_sr() -> Trainer.Config:
     """baseline MXFP4 quantization."""
     config = gpt_oss_20b_lpt()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-mxfp4-base"
     config.model_converters = ModelConvertersContainer.Config(converters=[
-        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp4_3rht_2dw_sr_1d.yaml",),
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp4_3rht_1dw_sr.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_adahop() -> Trainer.Config:
+    config = gpt_oss_20b_lpt()
+    config.activation_checkpoint.mode = "none"
+    #config.activation_checkpoint.selective_ac_option = "op"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop.yaml",),
+    ],)
+    return config
+
+def gpt_oss_20b_adahop_gw() -> Trainer.Config:
+    config = gpt_oss_20b_lpt()
+    config.activation_checkpoint.mode = "none"
+    #config.activation_checkpoint.selective_ac_option = "op"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4-adahop-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_adahop_gw.yaml",),
     ],)
     return config
 

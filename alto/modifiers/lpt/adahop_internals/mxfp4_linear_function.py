@@ -43,6 +43,11 @@ from .transform_mode import TransformMode, assert_mode_supported
 HadamardTransformType = "HadamardTransform"  # type-hint placeholder; avoid hard import
 
 
+def _get_hadamard_seed() -> int:
+    from alto.kernels.hadamard_transform import HadamardFactory
+    return HadamardFactory._step_seed
+
+
 def _blockwise_mxfp4_gemm_or_dequant(
     a_mxfp4: torch.Tensor,
     a_scale: torch.Tensor,
@@ -228,7 +233,7 @@ def _forward_y(
         )
         assert hadamard_transform is not None
         x_clean, x_outlier_compact, x_outlier_indices = prepare_outlier_clean_row(x, k=OUTLIER_K)
-        x_clean_mxfp4, x_clean_scale = iht_quantization(x_clean, left_mul=False)
+        x_clean_mxfp4, x_clean_scale = iht_quantization(x_clean, left_mul=False, hadamard_seed=_get_hadamard_seed())
         return inner_outlier_extract_left_cdna4(
             x_clean_mxfp4,
             x_clean_scale,
@@ -254,7 +259,7 @@ def _forward_y(
         )
         assert hadamard_transform is not None
         w_clean, w_outlier_compact, w_outlier_indices = prepare_outlier_clean_row(weight, k=OUTLIER_K)
-        w_clean_mxfp4, w_clean_scale = iht_quantization(w_clean, left_mul=False)
+        w_clean_mxfp4, w_clean_scale = iht_quantization(w_clean, left_mul=False, hadamard_seed=_get_hadamard_seed())
         return inner_outlier_extract_right_cdna4(
             x,
             w_clean_mxfp4,
@@ -273,20 +278,29 @@ def _forward_y(
         assert hadamard_transform is not None
         x_for_y = hadamard_transform(x, left_mul=False)
         w_for_y = hadamard_transform(weight, left_mul=False)
+        x_mxfp4, x_scale = torch.ops.torchtitan.convert_to_mxfp4(
+            x_for_y, axis=-1, is_2d_block=False,
+        )
+        w_mxfp4, w_scale = torch.ops.torchtitan.convert_to_mxfp4(
+            w_for_y, axis=-1, is_2d_block=False,
+        )
     elif mode == "outer_hadamard":
         assert hadamard_transform is not None
         x_for_y = hadamard_transform(x, left_mul=True)
         w_for_y = hadamard_transform(weight, left_mul=True)
+        x_mxfp4, x_scale = torch.ops.torchtitan.convert_to_mxfp4(
+            x_for_y, axis=-1, is_2d_block=False,
+        )
+        w_mxfp4, w_scale = torch.ops.torchtitan.convert_to_mxfp4(
+            w_for_y, axis=-1, is_2d_block=False,
+        )
     else:  # "none"
-        x_for_y = x
-        w_for_y = weight
-
-    x_mxfp4, x_scale = torch.ops.torchtitan.convert_to_mxfp4(
-        x_for_y, axis=-1, is_2d_block=False,
-    )
-    w_mxfp4, w_scale = torch.ops.torchtitan.convert_to_mxfp4(
-        w_for_y, axis=-1, is_2d_block=False,
-    )
+        x_mxfp4, x_scale = torch.ops.torchtitan.convert_to_mxfp4(
+            x, axis=-1, is_2d_block=False,
+        )
+        w_mxfp4, w_scale = torch.ops.torchtitan.convert_to_mxfp4(
+            weight, axis=-1, is_2d_block=False,
+        )
     y = _blockwise_mxfp4_gemm_or_dequant(
         x_mxfp4, x_scale, w_mxfp4, w_scale,
         trans_b=True, output_dtype=original_dtype,
@@ -328,14 +342,14 @@ def _prep_w_for_gx(
         )
         assert hadamard_transform is not None
         w_clean, w_outlier_compact, w_outlier_indices = prepare_outlier_clean_column(weight, k=OUTLIER_K)
-        w_mxfp4, w_scale = iht_quantization(w_clean, left_mul=True)
+        w_mxfp4, w_scale = iht_quantization(w_clean, left_mul=True, hadamard_seed=_get_hadamard_seed())
         return w_mxfp4, w_scale, w_outlier_compact, w_outlier_indices
 
     # hadamard / outer_hadamard / none — single-tensor convert path.
     if mode == "hadamard":
         from alto._adahop_bridge import iht_quantization
         assert hadamard_transform is not None
-        w_mxfp4, w_scale = iht_quantization(weight, left_mul=True)
+        w_mxfp4, w_scale = iht_quantization(weight, left_mul=True, hadamard_seed=_get_hadamard_seed())
         return w_mxfp4, w_scale, None, None
     if mode == "outer_hadamard":
         assert hadamard_transform is not None
@@ -370,7 +384,7 @@ def _prep_x_for_gw(
     if mode in ("hadamard", "inner_outlier_extract_left"):
         from alto._adahop_bridge import iht_quantization
         assert hadamard_transform is not None
-        x_mxfp4, x_scale = iht_quantization(x, left_mul=True)
+        x_mxfp4, x_scale = iht_quantization(x, left_mul=True, hadamard_seed=_get_hadamard_seed())
         return x_mxfp4, x_scale, None, None
 
     if mode == "inner_outlier_extract_right":
@@ -381,7 +395,7 @@ def _prep_x_for_gw(
         )
         assert hadamard_transform is not None
         x_clean, x_outlier_compact, x_outlier_indices = prepare_outlier_clean_column(x, k=OUTLIER_K)
-        x_mxfp4, x_scale = iht_quantization(x_clean, left_mul=True)
+        x_mxfp4, x_scale = iht_quantization(x_clean, left_mul=True, hadamard_seed=_get_hadamard_seed())
         return x_mxfp4, x_scale, x_outlier_compact, x_outlier_indices
 
     if mode == "outer_hadamard":
@@ -427,7 +441,7 @@ def _backward_gx(
         assert hadamard_transform is not None
         g_clean, g_outlier_compact, g_outlier_indices = prepare_outlier_clean_row(grad_output, k=OUTLIER_K)
         g_clean_mxfp4, g_clean_scale = iht_quantization(
-            g_clean, left_mul=False, use_sr=use_sr_grad,
+            g_clean, left_mul=False, use_sr=use_sr_grad, hadamard_seed=_get_hadamard_seed(),
         )
         return inner_outlier_extract_left_cdna4(
             g_clean_mxfp4,
@@ -467,7 +481,7 @@ def _backward_gx(
     if mode == "hadamard":
         from alto._adahop_bridge import iht_quantization
         assert hadamard_transform is not None
-        g_mxfp4, g_scale = iht_quantization(grad_output, left_mul=False, use_sr=use_sr_grad)
+        g_mxfp4, g_scale = iht_quantization(grad_output, left_mul=False, use_sr=use_sr_grad, hadamard_seed=_get_hadamard_seed())
     elif mode == "outer_hadamard":
         assert hadamard_transform is not None
         g_transformed = hadamard_transform(grad_output, left_mul=True)
@@ -531,7 +545,7 @@ def _backward_gw(
     if mode in ("hadamard", "inner_outlier_extract_left"):
         from alto._adahop_bridge import iht_quantization
         assert hadamard_transform is not None
-        g_mxfp4, g_scale = iht_quantization(grad_output, left_mul=True, use_sr=use_sr_grad)
+        g_mxfp4, g_scale = iht_quantization(grad_output, left_mul=True, use_sr=use_sr_grad, hadamard_seed=_get_hadamard_seed())
     elif mode == "outer_hadamard":
         assert hadamard_transform is not None
         g_transformed = hadamard_transform(grad_output)

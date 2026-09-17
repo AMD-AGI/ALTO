@@ -104,10 +104,6 @@ class TrainingWeightWrapperBaseTensor(TorchAOBaseTensor):
             nonlocal config
             if config is None:
                 config = t.config
-            else:
-                assert t.config == config, (
-                    f"All TrainingWeightWrapperBaseTensor instances must have the same config, but found {t.config} and {config}"
-                )
             return t._data
 
         args_unwrapped, kwargs_unwrapped = pytree.tree_map_only(TrainingWeightWrapperBaseTensor, unwrap,

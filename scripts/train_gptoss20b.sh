@@ -57,6 +57,7 @@ fi
 
 ### Machine-specific args
 NGPU="${NGPU:-8}"
+PROF_FREQ="${PROF_FREQ:-100000}"
 HF_HOME_DIR="${HF_HOME_DIR:-/shared_inference/alirezak/hf_home}" # HF model location
 DATA_DIR="${DATA_DIR:-/shared_inference/alirezak/hf_home/data}" # expose data dir to container
 HF_ENV_FILE="${HF_ENV_FILE:-$HOME/.hf.env}" # .env file has raw HF access token
@@ -104,6 +105,7 @@ docker_args=(
     -d
     --rm
     --name "$CONTAINER"
+    --privileged
     --user "$(id -u):$(id -g)"
     --network host
     --ipc host
@@ -214,16 +216,16 @@ docker exec \
         --local-ranks-filter 0 \
         --tee 3 \
         -m alto.train \
+        --profiling.enable_profiling \
+        --profiling.profile_freq $PROF_FREQ \
+        --profiling.profiler_warmup 3 \
+        --profiling.profiler_active 1 \
         --module "$MODULE" \
         --config "$CONFIG" \
         --training.steps "$TRAINING_STEPS" \
         --comm.init_timeout_seconds 1800 \
         --hf_assets_path "$MODEL_DIR" \
         --dump_folder /checkpoints \
-        --profiling.enable_profiling \
-        --profiling.profile_freq 1000 \
-        --profiling.profiler_warmup 3 \
-        --profiling.profiler_active 1 \
     2>&1 | tee "$LOG_FILE"
 
 echo "[train] Run complete."

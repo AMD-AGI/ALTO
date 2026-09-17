@@ -67,7 +67,7 @@ def patterns_to_modes(
 
     ``layer_transform_config`` is the recipe-supplied pattern-pair → mode lookup,
     e.g. ``{"row-row": "hadamard", "col-col": "full_precision", "none-none": "hadamard"}``.
-    Unknown pairs fall back to ``"none"``.
+    Unknown pairs fall back to ``"hadamard"``.
 
     T1..T8 follow AdaHOP exactly:
       T1 = x_pat,  T2 = opposite(w_pat)            → forward_y      key "T1-T2"
@@ -85,8 +85,8 @@ def patterns_to_modes(
         t7, t8 = g_pat, w_pat
 
         out[layer] = {
-            "forward_y": layer_transform_config.get(f"{t1}-{t2}", "none"),
-            "backward_gw": layer_transform_config.get(f"{t4}-{t5}", "none"),
-            "backward_gx": layer_transform_config.get(f"{t7}-{t8}", "none"),
+            "forward_y": layer_transform_config.get(f"{t1}-{t2}", "hadamard"),
+            "backward_gw": layer_transform_config.get(f"{t4}-{t5}", "hadamard"),
+            "backward_gx": layer_transform_config.get(f"{t7}-{t8}", "hadamard"),
         }
     return out

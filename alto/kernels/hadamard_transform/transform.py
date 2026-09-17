@@ -34,6 +34,8 @@ class HadamardFactory:
     seed: Optional[int] = None
     generator: torch.Generator = torch.Generator()
     _cached_transform: Optional['HadamardTransform'] = None
+    _step_seed: int = 42
+    _caching_enabled: bool = True
 
     @classmethod
     def configure(
@@ -65,9 +67,11 @@ class HadamardFactory:
             cls.generator.manual_seed(seed)
 
     @classmethod
-    def refresh(cls) -> None:
+    def refresh(cls, disable_cache: bool = False) -> None:
         """Clear the cached transform so the next create_transform generates a fresh one."""
         cls._cached_transform = None
+        cls._caching_enabled = not disable_cache
+        cls._step_seed = int(torch.randint(0, 2**31, (1,)).item())
 
     @classmethod
     def create_transform(
@@ -88,20 +92,20 @@ class HadamardFactory:
 
         if cls.transform_type == "default":
             weight = cls._create_weight(device)
-            perm = cls._create_permutation(weight) if cls.randomized else None
+            perm = cls._create_permutation(weight, device) if cls.randomized else None
             t = HadamardTransform(weight, perm)
         elif cls.transform_type == "3rht":
             n = cls.block_size
             w = cls._create_weight(device)
-            p = cls._create_permutation(w)
+            p = cls._create_permutation(w, device)
             combined = w[p][:, p]
 
             w = cls._create_weight(device)
-            p = cls._create_permutation(w)
+            p = cls._create_permutation(w, device)
             combined = combined @ (w[p][:, p])
 
             w = cls._create_weight(device)
-            p = cls._create_permutation(w)
+            p = cls._create_permutation(w, device)
             combined = combined @ (w[p][:, p])
 
             combined = combined / n
@@ -109,7 +113,8 @@ class HadamardFactory:
         else:
             raise NotImplementedError("transform_type options are: default and 3rht")
 
-        cls._cached_transform = t
+        if cls._caching_enabled:
+            cls._cached_transform = t
         return t
 
     @classmethod
@@ -124,8 +129,8 @@ class HadamardFactory:
         return data
 
     @classmethod
-    def _create_permutation(cls, weight: Tensor) -> Tensor:
-        data = torch.randperm(weight.size(0), generator=cls.generator)
+    def _create_permutation(cls, weight: Tensor, device: torch.device) -> Tensor:
+        data = torch.randperm(weight.size(0), generator=cls.generator).to(device)
         return data
 
 

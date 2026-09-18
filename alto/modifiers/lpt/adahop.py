@@ -58,7 +58,7 @@ from alto.modifiers.lpt.adahop_internals.calibration_state import (
 
 __all__ = ["AdaHOPModifier"]
 
-_NONE_MODES = {"forward_y": "none", "backward_gx": "none", "backward_gw": "none"}
+_DEFAULT_MODES = {"forward_y": "hadamard", "backward_gx": "hadamard", "backward_gw": "hadamard"}
 
 
 class AdaHOPModifier(Modifier):
@@ -68,6 +68,10 @@ class AdaHOPModifier(Modifier):
 
     use_hadamard: bool = True
     use_randomized_hadamard: bool = False
+
+    apply_forward_y: bool = True
+    apply_backward_gx: bool = True
+    apply_backward_gw: bool = True
 
     calibration_steps: int = 30
     """Number of pre-step observations before transitioning to Phase B."""
@@ -112,7 +116,7 @@ class AdaHOPModifier(Modifier):
         if not self.use_hadamard:
             logger.info("[AdaHOP] use_hadamard=False; skipping HadamardFactory configuration.")
             return True
-        from alto._adahop_bridge import HadamardFactory
+        from alto.kernels.hadamard_transform import HadamardFactory
         HadamardFactory.configure(randomized=self.use_randomized_hadamard)
         logger.info(f"[AdaHOP] HadamardFactory configured (randomized={self.use_randomized_hadamard}).")
         return True
@@ -148,6 +152,10 @@ class AdaHOPModifier(Modifier):
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
+        if self.use_hadamard:
+            from alto.kernels.hadamard_transform import HadamardFactory
+            HadamardFactory.refresh()
+
         if not self.enabled or self._phase_b_done:
             return True
 
@@ -267,15 +275,8 @@ class AdaHOPModifier(Modifier):
     def _make_ht_resolver(self) -> Callable[[torch.device], Any]:
         if not self.use_hadamard:
             return lambda _dev: None
-        from alto._adahop_bridge import HadamardFactory
-        ht_cache: Dict[torch.device, Any] = {}
-
-        def _get_ht(device):
-            if device not in ht_cache:
-                ht_cache[device] = HadamardFactory.create_transform(device=device)
-            return ht_cache[device]
-
-        return _get_ht
+        from alto.kernels.hadamard_transform import HadamardFactory
+        return lambda dev: HadamardFactory.create_transform(device=dev)
 
     def _collect_wrappers(self, model_parts, wrapper_cls) -> None:
         # Attach to the canonical instance F.linear will see (see long comment
@@ -337,17 +338,18 @@ class AdaHOPModifier(Modifier):
         ht_resolver = self._make_ht_resolver()
         n = 0
         for fqn, wrapper in self._fqn_to_wrapper.items():
-            modes = modes_by_fqn.get(fqn, _NONE_MODES)
+            modes = modes_by_fqn.get(fqn, _DEFAULT_MODES)
             ht = ht_resolver(wrapper._data.device)
             wrapper.set_modes(
-                forward_y_mode=modes.get("forward_y", "none"),
-                backward_gx_mode=modes.get("backward_gx", "none"),
-                backward_gw_mode=modes.get("backward_gw", "none"),
+                forward_y_mode=modes.get("forward_y", "none") if self.apply_forward_y else "none",
+                backward_gx_mode=modes.get("backward_gx", "none") if self.apply_backward_gx else "none",
+                backward_gw_mode=modes.get("backward_gw", "none") if self.apply_backward_gw else "none",
                 hadamard_transform=ht,
             )
             n += 1
         ht_state = "attached" if self.use_hadamard else "none"
-        logger.info(f"[AdaHOP] Applied modes in place for {n} layers (hadamard={ht_state}).")
+        slots = f"forward_y={self.apply_forward_y}, backward_gx={self.apply_backward_gx}, backward_gw={self.apply_backward_gw}"
+        logger.info(f"[AdaHOP] Applied modes in place for {n} layers (hadamard={ht_state}, {slots}).")
         self._phase_b_done = True
 
     def _detach_observation_hooks(self) -> None:

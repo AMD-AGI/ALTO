@@ -192,8 +192,9 @@ def mxfp8_attention_forward_reference(
     v: torch.Tensor,
     sm_scale: float,
     causal: bool,
-    block_n: int = 64,
+    block_n: int = 128,
     block_size: int = BLOCK_SIZE_DEFAULT,
+    mask: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Pure-PyTorch golden reference for the MXFP8 (e4m3) flash-attention forward.
 
@@ -216,7 +217,7 @@ def mxfp8_attention_forward_reference(
         sm_scale: softmax scale applied to ``Q @ K^T``.
         causal: top-left causal mask ``key_j <= query_i`` (matches
             ``F.sdpa(is_causal=True)`` on bhsd tensors in PyTorch 2.x).
-        block_n: key-block width, must match the kernel ``BLOCK_N`` (default 64).
+        block_n: key-block width, must match the kernel ``BLOCK_N`` (default 128).
         block_size: MXFP8 quant block, must match ``QUANT_BLOCK_SIZE`` (default 32).
 
     Returns:
@@ -262,6 +263,8 @@ def mxfp8_attention_forward_reference(
             key_pos = torch.arange(j0, j1, device=device)
             allowed = key_pos[None, :] <= q_pos[:, None]  # [sq, bn]
             s = torch.where(allowed[None, None, :, :], s, torch.full_like(s, neg_inf))
+        if mask is not None:
+            s = torch.where(mask[..., :, j0:j1], s, torch.full_like(s, neg_inf))
 
         m_ij = torch.maximum(m_i, s.max(dim=-1).values)  # [b, hq, sq]
         p = torch.exp(s - m_ij[..., None])  # unnormalized, running max
@@ -298,6 +301,7 @@ def mxfp8_attention_backward_reference(
     softmax_lse: torch.Tensor,
     sm_scale: float,
     causal: bool,
+    mask: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pure-PyTorch golden reference for the MXFP8 (e4m3) flash-attention backward.
 
@@ -357,6 +361,8 @@ def mxfp8_attention_backward_reference(
         k_pos = torch.arange(sk, device=q.device)
         allowed = k_pos[None, :] <= q_pos[:, None]  # [sq, sk], top-left
         s = torch.where(allowed[None, None, :, :], s, torch.full_like(s, float("-inf")))
+    if mask is not None:
+        s = torch.where(mask, s, torch.full_like(s, float("-inf")))
 
     p = torch.exp(s - lse[..., None])  # softmax probabilities
     p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
@@ -389,6 +395,7 @@ def mxfp8_attention_backward_reference_stage2(
     sm_scale: float,
     causal: bool,
     block_size: int = BLOCK_SIZE_DEFAULT,
+    mask: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pure-PyTorch golden reference for the **Stage-2 (A1)** MXFP8 backward.
 
@@ -448,6 +455,8 @@ def mxfp8_attention_backward_reference_stage2(
         k_pos = torch.arange(sk, device=q.device)
         allowed = k_pos[None, :] <= q_pos[:, None]  # top-left
         s = torch.where(allowed[None, None, :, :], s, torch.full_like(s, float("-inf")))
+    if mask is not None:
+        s = torch.where(mask, s, torch.full_like(s, float("-inf")))
     p = torch.exp(s - lse[..., None])
     p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
 

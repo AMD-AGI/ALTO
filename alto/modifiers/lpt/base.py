@@ -7,7 +7,11 @@ import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules
 from pydantic import PrivateAttr, Field, field_validator, model_validator
-from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention import (
+    BaseAttention,
+    FlexAttentionWrapper,
+    ScaledDotProductAttentionWrapper,
+)
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 
@@ -15,6 +19,7 @@ from alto.modifiers import Modifier
 from alto.kernels.dispatch import (
     swap_params,
     TrainingOpConfig,
+    LPFlexAttentionWrapper,
     LPScaledDotProductAttentionWrapper,
 )
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
@@ -166,8 +171,15 @@ class LowPrecisionTrainingModifier(Modifier):
         for scheme_obj, targets in self.resolved_config.items():
             for name, module in match_named_modules(model, targets, self.ignore):
                 if isinstance(module, BaseAttention):
-                    assert module.attn_backend == "sdpa", "Only SDPA attention is supported for now."
-                    module.inner_attention = LPScaledDotProductAttentionWrapper(config=scheme_obj)
+                    if isinstance(module.inner_attention, FlexAttentionWrapper):
+                        module.inner_attention = LPFlexAttentionWrapper(config=scheme_obj)
+                    elif isinstance(module.inner_attention, ScaledDotProductAttentionWrapper):
+                        module.inner_attention = LPScaledDotProductAttentionWrapper(config=scheme_obj)
+                    else:
+                        raise ValueError(
+                            f"Unsupported attention wrapper {type(module.inner_attention)} in {name}; "
+                            "expected FlexAttentionWrapper or ScaledDotProductAttentionWrapper."
+                        )
                 elif isinstance(module, torch.nn.Linear):
                     if self.lora_rank > 0:
                         module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)

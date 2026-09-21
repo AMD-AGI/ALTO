@@ -4,10 +4,11 @@
 
 from .config import TrainingOpConfig
 from .conversion import swap_params
-from .attention import LPScaledDotProductAttentionWrapper
+from .attention import LPFlexAttentionWrapper, LPScaledDotProductAttentionWrapper
 
 __all__ = [
     "TrainingOpConfig",
     "swap_params",
+    "LPFlexAttentionWrapper",
     "LPScaledDotProductAttentionWrapper",
 ]

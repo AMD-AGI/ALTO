@@ -31,6 +31,8 @@ import triton
 import triton.language as tl
 from torch._library import triton_op, wrap_triton
 
+from .blockmask import MXFP8BlockMask
+
 from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
@@ -1024,8 +1026,8 @@ def attention_mxfp8_forward_triton_impl(
         ENABLE_DROPOUT=dropout_p > 0.0,
         USE_EXP2=use_exp2,
         RETURN_SCORES=return_scores,
-        BLOCK_M=64,
-        BLOCK_N=64,
+        BLOCK_M=128,
+        BLOCK_N=128,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
     )
@@ -1878,8 +1880,8 @@ def attention_mxfp8_backward_triton_impl(
     else:
         stride_lse_z, stride_lse_h, stride_lse_m = softmax_lse.stride()
 
-    BLOCK_M = 64
-    BLOCK_N = 64
+    BLOCK_M = 128
+    BLOCK_N = 128
     num_block_m = triton.cdiv(max_seqlen_q, BLOCK_M)
     num_block_n = triton.cdiv(max_seqlen_k, BLOCK_N)
 
@@ -2228,7 +2230,13 @@ def triton_attention_mxfp8(
     return_scores: bool,
     use_exp2: bool,
     layout: str,
+    block_mask: MXFP8BlockMask | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if block_mask is not None:
+        raise NotImplementedError(
+            "The MXFP8 BlockMask kernel path is not implemented yet: the forward and backward "
+            "Triton loops still need to consume the full/partial tables. Until then this entry "
+            "point must not silently fall back to a different numerical path.")
     return _triton_attention_mxfp8.apply(
         q,
         k,

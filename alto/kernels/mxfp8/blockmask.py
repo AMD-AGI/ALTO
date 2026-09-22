@@ -36,6 +36,8 @@ class MXFP8BlockMask:
     full_q_indices: torch.Tensor
     kv_partial_mask: torch.Tensor
     q_partial_mask: torch.Tensor
+    seqlen_q: int
+    seqlen_kv: int
 
 
 _CACHE: WeakKeyDictionary[BlockMask, MXFP8BlockMask] = WeakKeyDictionary()
@@ -148,6 +150,8 @@ def prepare_block_mask(block_mask: BlockMask) -> MXFP8BlockMask:
         q_partial_mask=_materialize_partial(
             block_mask, q_num_blocks, q_indices, BLOCK_SIZE, BLOCK_SIZE, index_is_q_block=True
         ),
+        seqlen_q=int(block_mask.shape[-2]),
+        seqlen_kv=int(block_mask.shape[-1]),
     )
     _CACHE[block_mask] = prepared
     return prepared

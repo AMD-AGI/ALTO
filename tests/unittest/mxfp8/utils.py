@@ -292,6 +292,91 @@ def mxfp8_attention_forward_reference(
     return o.to(q.dtype), softmax_lse
 
 
+def mxfp8_blockmask_forward_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    prepared,
+    sm_scale: float,
+    block_size: int = BLOCK_SIZE_DEFAULT,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Golden reference for the BlockMask forward, in the kernel's block order.
+
+    ``mxfp8_attention_forward_reference`` walks key blocks left to right, but the
+    kernel walks the full table and then the partial table. Because P is
+    quantized against the *running* row max, that order is part of the numerics,
+    so comparing the kernel against this function isolates Triton port bugs the
+    way the dense reference does for the causal path.
+
+    Only accepts tables with batch and head dims of 1, which is what
+    ``create_block_mask(..., B=None, H=None)`` produces.
+
+    Args:
+        q, k, v: ``[batch, nheads, seqlen, head_dim]`` (bhsd). GQA is supported.
+        prepared: an ``MXFP8BlockMask`` from ``prepare_block_mask``.
+        sm_scale: softmax scale applied to ``Q @ K^T``.
+        block_size: MXFP8 quant block, must match ``QUANT_BLOCK_SIZE``.
+
+    Returns:
+        (o, softmax_lse), with fully-masked query rows zeroed in both.
+    """
+    tile = prepared.kv_partial_mask.shape[-1]
+    batch, heads_q, seqlen_q, _ = q.shape
+    _, heads_kv, _, _ = k.shape
+    assert prepared.kv_indices.shape[:2] == (1, 1), "reference expects tables shared across batch and heads"
+    assert seqlen_q % tile == 0 and k.shape[2] % tile == 0
+    n_rep = heads_q // heads_kv
+
+    q_dq = _mxfp8_qdq(q, axis=-1, is_2d_block=True).to(torch.float32)
+    k_dq = _mxfp8_qdq(k, axis=-1, is_2d_block=True).to(torch.float32)
+    v_dq = _mxfp8_qdq(v, axis=-1, is_2d_block=True).to(torch.float32)
+    if n_rep > 1:
+        k_dq = k_dq.repeat_interleave(n_rep, dim=1)
+        v_dq = v_dq.repeat_interleave(n_rep, dim=1)
+
+    head_dim_v = v.shape[-1]
+    slots = prepared.kv_indices.shape[3]
+    o = torch.zeros((batch, heads_q, seqlen_q, head_dim_v), dtype=torch.float32, device=q.device)
+    lse = torch.zeros((batch, heads_q, seqlen_q), dtype=torch.float32, device=q.device)
+
+    for q_block in range(seqlen_q // tile):
+        rows = slice(q_block * tile, (q_block + 1) * tile)
+        q_tile = q_dq[:, :, rows, :]
+        m_i = torch.full((batch, heads_q, tile), float("-inf"), dtype=torch.float32, device=q.device)
+        l_i = torch.zeros((batch, heads_q, tile), dtype=torch.float32, device=q.device)
+        acc = torch.zeros((batch, heads_q, tile, head_dim_v), dtype=torch.float32, device=q.device)
+
+        walk = [(int(prepared.full_kv_indices[0, 0, q_block, s]), None)
+                for s in range(int(prepared.full_kv_num_blocks[0, 0, q_block]))]
+        walk += [(int(prepared.kv_indices[0, 0, q_block, s]), q_block * slots + s)
+                 for s in range(int(prepared.kv_num_blocks[0, 0, q_block]))]
+
+        for kv_block, flat_slot in walk:
+            cols = slice(kv_block * tile, (kv_block + 1) * tile)
+            s = torch.matmul(q_tile, k_dq[:, :, cols, :].transpose(-1, -2)) * sm_scale
+            if flat_slot is not None:
+                keep = prepared.kv_partial_mask[flat_slot]
+                s = torch.where(keep, s, torch.full_like(s, float("-inf")))
+
+            m_ij = torch.maximum(m_i, s.max(dim=-1).values)
+            # Shift by a finite value so a fully masked row gives exp(-inf)=0
+            # instead of -inf - -inf = NaN; the kernel does the same.
+            m_shift = torch.where(torch.isneginf(m_ij), torch.zeros_like(m_ij), m_ij)
+            p = torch.exp(s - m_shift[..., None])
+            alpha = torch.exp(m_i - m_shift)
+            p_dq = _mxfp8_qdq(p, axis=-1, is_2d_block=False, block_size=block_size)
+            acc = acc * alpha[..., None] + torch.matmul(p_dq, v_dq[:, :, cols, :])
+            l_i = l_i * alpha + p.sum(dim=-1)
+            m_i = m_ij
+
+        empty = l_i == 0
+        l_safe = torch.where(empty, torch.ones_like(l_i), l_i)
+        o[:, :, rows, :] = torch.where(empty[..., None], torch.zeros_like(acc), acc / l_safe[..., None])
+        lse[:, :, rows] = torch.where(empty, torch.zeros_like(m_i), m_i + torch.log(l_safe))
+
+    return o.to(q.dtype), lse
+
+
 def mxfp8_attention_backward_reference(
     q: torch.Tensor,
     k: torch.Tensor,

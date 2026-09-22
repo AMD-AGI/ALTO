@@ -77,9 +77,10 @@ class LPScaledDotProductAttentionWrapper(ScaledDotProductAttentionWrapper):
 class LPFlexAttentionWrapper(FlexAttentionWrapper):
     """MXFP8 implementation of FlexAttention's public wrapper contract.
 
-    The argument validation and BlockMask preparation are in place, but the
-    kernel behind them is not: calling this raises until the Triton BlockMask
-    loops land.
+    Mask semantics come from the Flex BlockMask tables, so the kernel carries no
+    causal or window arithmetic of its own. Forward runs in MXFP8; backward
+    still raises, so this is inference-shaped until the BlockMask gradient
+    kernels land.
     """
 
     def __init__(self, config: TrainingOpConfig):

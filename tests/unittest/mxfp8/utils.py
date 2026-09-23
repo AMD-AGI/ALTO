@@ -389,6 +389,7 @@ def mxfp8_attention_backward_reference_stage2(
     sm_scale: float,
     causal: bool,
     block_size: int = BLOCK_SIZE_DEFAULT,
+    consistent_delta: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pure-PyTorch golden reference for the **Stage-2 (A1)** MXFP8 backward.
 
@@ -406,7 +407,8 @@ def mxfp8_attention_backward_reference_stage2(
     single 2D-block dequant ``q_dq``/``k_dq``/``v_dq`` everywhere (no double
     quantization along seqlen, unlike the retired option-A reference). Only
     dO/P/dS are quantized fresh (1D per-row along their reduction axis), since the
-    forward never saw them.
+    forward never saw them. dO keeps its input dtype through quantization: BF16
+    inputs must use the same BF16 scale rounding as the Triton kernels.
 
     Quantization axis per dot (plan §9.5)::
 
@@ -415,6 +417,11 @@ def mxfp8_attention_backward_reference_stage2(
         dV = Pᵀ @ dO      reduction seqlen_q   : P,dO  1D along sq
         dK = dSᵀ @ Q      reduction seqlen_q   : dS 1D along sq ; Q 2D reuse
         dQ = dS @ K       reduction seqlen_k   : dS 1D along sk ; K 2D reuse
+
+    ``consistent_delta`` models the kernel switch of the same name: ``delta`` is
+    built from the quantized dO that dP consumes rather than the raw dO, so the
+    ``dp - delta`` subtraction cancels dO's quantization error instead of leaving
+    a row-constant bias in ``ds``.
 
     Same top-left causal mask as the other references (matches SDPA on bhsd), so
     causal tests must keep ``seqlen_q == seqlen_k``. Args mirror
@@ -452,14 +459,14 @@ def mxfp8_attention_backward_reference_stage2(
     p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
 
     # dP = dO @ Vᵀ (reduction head_dim_v): dO 1D along head_dim_v, V 2D reuse.
-    do_hd = qdq(do_f, axis=-1)
+    do_hd = qdq(do, axis=-1).to(torch.float32)
     dp = torch.matmul(do_hd, v_dq.transpose(-1, -2))
-    delta = (o_f * do_f).sum(dim=-1)
+    delta = (o_f * (do_hd if consistent_delta else do_f)).sum(dim=-1)
     ds = p * (dp - delta[..., None])  # fp32 elementwise
 
     # dV = Pᵀ @ dO (reduction seqlen_q): P and dO 1D along sq.
     p_sq = qdq(p, axis=-2)
-    do_sq = qdq(do_f, axis=-2)
+    do_sq = qdq(do, axis=-2).to(torch.float32)
     dv_full = torch.matmul(p_sq.transpose(-1, -2), do_sq)
 
     # dQ = sm_scale * dS @ K (reduction seqlen_k): dS 1D along sk, K 2D reuse.

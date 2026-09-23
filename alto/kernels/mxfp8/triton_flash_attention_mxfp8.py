@@ -35,6 +35,7 @@ from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     is_cdna4,
     _calculate_scales,
+    _dequantize_fp8,
     _quantize_fp8,
 )
 
@@ -1179,8 +1180,28 @@ def _bwd_preprocess(
     ACTUAL_BLOCK_DMODEL_V: tl.constexpr,
     HQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    QUANT_BLOCK_SIZE: tl.constexpr,
+    USE_ASM: tl.constexpr,
+    CONSISTENT_DELTA: tl.constexpr,
 ):
-    """delta = rowsum(o * do), one value per query row. Feeds ds = p * (dp - delta)."""
+    """delta = rowsum(o * do), one value per query row. Feeds ds = p * (dp - delta).
+
+    delta is the p-weighted row mean of dp: substituting ``o = Σ_j p_j v_j`` into
+    ``Σ_d o_d do_d`` gives ``Σ_j p_j dp_j``. So ``ds = p * (dp - delta)`` subtracts
+    two quantities of the same magnitude, and any error present in one but not the
+    other is amplified by ``|dp| / |dp - delta|``. ``o`` carries the forward's e4m3
+    V, so V's error cancels there; dO's does not, because dots b/f consume a
+    freshly quantized dÔ while this kernel reads the raw dO. What survives is a
+    row-constant bias in ds, which ``dQ = dS @ K`` turns into a rank-1
+    contamination along the mean key direction.
+
+    ``CONSISTENT_DELTA`` folds dO through the same e4m3 quantization scheme as
+    dots b/f. This removes the dO-only component of the row bias; other MXFP8
+    approximations, including P and the saved bf16 output, can still leave a
+    residual. The quantization is row-local (``IS_2D_BLOCK=False`` scales each
+    row's 32-wide head_dim groups independently of tiling), and every backward
+    kernel spans the full head_dim through the same ``BLOCK_DMODEL_V``.
+    """
     pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
     off_z = pid_bh // HQ
@@ -1204,9 +1225,32 @@ def _bwd_preprocess(
     out_ptrs = o_offset + off_m[:, None] * stride_om + off_d_v[None, :] * stride_ok
     do_ptrs = do_offset + off_m[:, None] * stride_dom + off_d_v[None, :] * stride_dok
 
-    o = tl.load(out_ptrs, mask=mask_o, other=0.0).to(tl.float32)
-    do = tl.load(do_ptrs, mask=mask_o, other=0.0).to(tl.float32)
-    delta = tl.sum(o * do, axis=1)
+    o = tl.load(out_ptrs, mask=mask_o, other=0.0)
+    do = tl.load(do_ptrs, mask=mask_o, other=0.0)
+
+    if CONSISTENT_DELTA:
+        # Quantize before any upcast: on CDNA4 _quantize_fp8 selects a different
+        # convert instruction for f32 vs bf16 inputs, and _calculate_scales rounds
+        # with the input's mantissa width. dots b/f see the raw bf16 dO tile, so
+        # this must too or the two paths quantize dO differently.
+        do_fp8, do_scales = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
+        # The quantize above must track USE_ASM to match dots b/f.
+        # The dequantize must not: every other caller in this repo pins it to the
+        # non-asm path, which is a plain multiply by a power of two and therefore
+        # exact. The asm path is unused here and produced garbage delta.
+        do = _dequantize_fp8(
+            do_fp8,
+            do_scales,
+            output_dtype=tl.float32,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_DMODEL_V,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+            FP8_FORMAT=E4M3_FORMAT_ID,
+            IS_2D_BLOCK=_MX_2D,
+            USE_ASM=False,
+        )
+
+    delta = tl.sum(o.to(tl.float32) * do.to(tl.float32), axis=1)
 
     delta_offset = Delta + off_z * stride_deltaz + off_h * stride_deltah + q_start * stride_deltam
     tl.store(delta_offset + off_m * stride_deltam, delta, mask=mask_m)
@@ -1817,6 +1861,7 @@ def attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    consistent_delta: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """MXFP8 flash-attention backward (stage-2 / A1, ``tl.dot_scaled``).
 
@@ -1828,6 +1873,11 @@ def attention_mxfp8_backward_triton_impl(
     Only the backward-only tensors dO/P/dS are quantized in-kernel (1D per-row
     along each dot's reduction axis), then fed to ``tl.dot_scaled`` (plan §9.5).
     Matches ``mxfp8_attention_backward_reference_stage2``.
+
+    ``consistent_delta`` computes ``delta`` from the same e4m3 dO that dots b/f
+    consume instead of the raw dO, so the ``dp - delta`` subtraction cancels dO's
+    quantization error rather than amplifying it. It touches the preprocess
+    kernel only; every dot keeps its operands. See ``_bwd_preprocess``.
 
     Requires CDNA4 (native ``tl.dot_scaled``).
     """
@@ -1905,6 +1955,9 @@ def attention_mxfp8_backward_triton_impl(
         ACTUAL_BLOCK_DMODEL_V=head_size_v,
         HQ=nheads_q,
         IS_VARLEN=is_varlen,
+        QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
+        USE_ASM=is_cdna4(),
+        CONSISTENT_DELTA=consistent_delta,
     )
 
     wrap_triton(_bwd_kernel_dq)[(batch * nheads_q, num_block_m)](
@@ -2062,6 +2115,7 @@ def fake_attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    consistent_delta: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.empty_like(q, dtype=bwd_torch_dtype)
     dk = torch.empty_like(k, dtype=bwd_torch_dtype)
@@ -2090,6 +2144,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         return_scores: bool,
         use_exp2: bool,
         layout: str,
+        consistent_delta: bool,
     ):
         q, q_scale = torch.ops.alto.convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
         k, k_scale = torch.ops.alto.convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
@@ -2117,6 +2172,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         )
 
         ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale)
+        ctx.consistent_delta = consistent_delta
         ctx.sm_scale = sm_scale
         ctx.causal = causal
         ctx.dropout_p = dropout_p
@@ -2155,8 +2211,9 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             max_seqlen_q=ctx.max_seqlens_q,
             max_seqlen_k=ctx.max_seqlens_k,
             use_exp2=ctx.use_exp2,
+            consistent_delta=ctx.consistent_delta,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 @attention_mxfp8_forward_triton_impl.register_fake
@@ -2228,6 +2285,7 @@ def triton_attention_mxfp8(
     return_scores: bool,
     use_exp2: bool,
     layout: str,
+    consistent_delta: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return _triton_attention_mxfp8.apply(
         q,
@@ -2245,4 +2303,5 @@ def triton_attention_mxfp8(
         return_scores,
         use_exp2,
         layout,
+        consistent_delta,
     )

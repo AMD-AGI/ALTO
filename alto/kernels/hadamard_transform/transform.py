@@ -37,7 +37,6 @@ class HadamardFactory:
         block_size: Optional[int] = None,
         randomized: Optional[bool] = None,
         dtype: Optional[torch.dtype] = None,
-        seed: Optional[int] = None,
     ) -> None:
         """
         Configure class-level default parameters for HadamardFactory.
@@ -45,7 +44,6 @@ class HadamardFactory:
         :param block_size: Default size of the Hadamard block
         :param randomized: Default whether to use randomized Hadamard transform
         :param dtype: Default data type for the transform
-        :param seed: Default random seed used for randomization
         """
         if block_size is not None:
             cls.block_size = block_size
@@ -97,7 +95,6 @@ class HadamardTransform:
     Hadamard transform that can be applied to tensors.
 
     :param weight: Hadamard matrix
-    :param perm: Optional permutation tensor for randomized transforms
     """
 
     def __init__(

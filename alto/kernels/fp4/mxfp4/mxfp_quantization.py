@@ -75,6 +75,8 @@ def _calculate_scales(
     # round even (adaptive)
     max_abs = max_abs.to(hp_int_dtype, bitcast=True)
     if USE_UOS:
+        # differ from the original uos paper:
+        # at the exact cutoff 7.25, this addition carries into the next exponent
         val_to_add = 3 << (hp_mbits - mbits - 3)
     else:
         val_to_add = 1 << (hp_mbits - mbits - 1)

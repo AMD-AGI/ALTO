@@ -362,7 +362,7 @@ class _DeOscillationHook:
         # through __torch_function__ (which would re-enter the FP4 GEMM
         # dispatch).
         raw = wrapper._data
-        w_now = raw.detach()
+        w_now = raw.detach().bfloat16()
 
         if self.KEY_PREV not in state or self.KEY_STEP not in state:
             # First call (either ever, or after a state-dict mishap).
@@ -400,7 +400,7 @@ class _DeOscillationHook:
             # Snap into the wrapper's underlying storage in place; the
             # FP4 GEMM dispatch on the next forward will read this new
             # value.
-            raw[reset_mask] = w_qdq[reset_mask]
+            raw[reset_mask] = w_qdq[reset_mask].float()
             # Refresh the snapshot so the next period does not see the
             # snap-to-bin-center as a large FP movement on its first
             # step.

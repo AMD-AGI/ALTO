@@ -37,7 +37,6 @@ class HadamardFactory:
         block_size: Optional[int] = None,
         randomized: Optional[bool] = None,
         dtype: Optional[torch.dtype] = None,
-        seed: Optional[int] = None,
     ) -> None:
         """
         Configure class-level default parameters for HadamardFactory.
@@ -45,7 +44,6 @@ class HadamardFactory:
         :param block_size: Default size of the Hadamard block
         :param randomized: Default whether to use randomized Hadamard transform
         :param dtype: Default data type for the transform
-        :param seed: Default random seed used for randomization
         """
         if block_size is not None:
             cls.block_size = block_size
@@ -70,8 +68,10 @@ class HadamardFactory:
         """
 
         weight = cls._create_weight(device)
-        perm = cls._create_permutation(weight, device) if cls.randomized else None
-        return HadamardTransform(weight, perm)
+        if cls.randomized:
+            perm = cls._create_permutation(weight, device)
+            weight = weight[perm][:, perm]
+        return HadamardTransform(weight)
 
     @classmethod
     def _create_weight(
@@ -95,16 +95,13 @@ class HadamardTransform:
     Hadamard transform that can be applied to tensors.
 
     :param weight: Hadamard matrix
-    :param perm: Optional permutation tensor for randomized transforms
     """
 
     def __init__(
         self,
         weight: Tensor,
-        perm: Optional[Tensor],
     ):
         self.weight = weight
-        self.perm = perm
         self._scale = torch.tensor(weight.size(0), dtype=torch.float64, device=weight.device).sqrt()
 
     def __call__(self, value: Tensor, inverse: bool = False, left_mul: bool = False) -> Tensor:
@@ -118,9 +115,6 @@ class HadamardTransform:
         :return: Transformed tensor
         """
         weight = self.weight
-
-        if self.perm is not None:
-            weight = weight[self.perm][:, self.perm]
 
         if inverse:
             weight = weight.T

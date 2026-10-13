@@ -1607,10 +1607,18 @@ def _attn_bwd_dkdv_inner(
     sm_scale: tl.constexpr,
     lo,
     num_block_m: tl.constexpr,
+    indices_base,
+    stride_idx_s,
+    mask_base,
+    stride_mask_s,
+    stride_mask_m,
+    stride_mask_n,
     USE_EXP2: tl.constexpr,
     N_CTX_Q: tl.constexpr,
     N_CTX_K: tl.constexpr,
     CAUSAL: tl.constexpr,
+    USE_BLOCK_MASK: tl.constexpr,
+    APPLY_MASK: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
 ):
@@ -1624,7 +1632,12 @@ def _attn_bwd_dkdv_inner(
     same 2D block scale re-indexed along seqlen. Only dO/P/dS are quantized fresh
     (plan §9.5 dots a/b/c/d).
     """
-    for start_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
+    for loop_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
+        if USE_BLOCK_MASK:
+            slot = loop_m // BLOCK_M
+            start_m = tl.load(indices_base + slot * stride_idx_s) * BLOCK_M
+        else:
+            start_m = loop_m
         offs_m = start_m + tl.arange(0, BLOCK_M)
         q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d_qk[None, :] * stride_qk
         do_ptrs = do_offset + offs_m[:, None] * stride_dom + offs_d_v[None, :] * stride_dok
@@ -1645,6 +1658,11 @@ def _attn_bwd_dkdv_inner(
             col_offset = N_CTX_Q - N_CTX_K
             causal_mask = offs_m[:, None] >= (col_offset + offs_n[None, :])
             qk = tl.where(causal_mask, qk, float("-inf"))
+        if APPLY_MASK:
+            slot = loop_m // BLOCK_M
+            keep = tl.load(mask_base + slot * stride_mask_s + (offs_m[:, None] % BLOCK_M) * stride_mask_m +
+                           (offs_n[None, :] % BLOCK_N) * stride_mask_n)
+            qk = tl.where(keep, qk, float("-inf"))
 
         l_ptrs = l_offset + offs_m * stride_ldm
         l_i = tl.load(l_ptrs, mask=mask_m, other=0.0)
@@ -1725,6 +1743,28 @@ def _bwd_kernel_dkdv(
     stride_ldz,
     stride_ldh,
     stride_ldm,
+    q_num_blocks,
+    q_indices,
+    full_q_num_blocks,
+    full_q_indices,
+    q_partial_mask,
+    stride_bqn_z,
+    stride_bqn_h,
+    stride_bqn_k,
+    stride_bqi_z,
+    stride_bqi_h,
+    stride_bqi_k,
+    stride_bqi_s,
+    stride_bqf_z,
+    stride_bqf_h,
+    stride_bqf_k,
+    stride_bqf_s,
+    stride_bqm_z,
+    stride_bqm_h,
+    stride_bqm_k,
+    stride_bqm_s,
+    stride_bqm_m,
+    stride_bqm_n,
     Z,
     HQ: tl.constexpr,
     HK: tl.constexpr,
@@ -1740,6 +1780,7 @@ def _bwd_kernel_dkdv(
     ACTUAL_BLOCK_DMODEL_QK: tl.constexpr,
     ACTUAL_BLOCK_DMODEL_V: tl.constexpr,
     CAUSAL: tl.constexpr,
+    USE_BLOCK_MASK: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -1821,52 +1862,53 @@ def _bwd_kernel_dkdv(
     dk = tl.zeros([BLOCK_N, BLOCK_DMODEL_QK], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL_V], dtype=tl.float32)
 
+    if USE_BLOCK_MASK:
+        q_count_base = q_num_blocks + off_z * stride_bqn_z + off_h_q * stride_bqn_h + start_n * stride_bqn_k
+        full_q_count_base = full_q_num_blocks + off_z * stride_bqn_z + off_h_q * stride_bqn_h + start_n * stride_bqn_k
+        q_indices_base = q_indices + off_z * stride_bqi_z + off_h_q * stride_bqi_h + start_n * stride_bqi_k
+        full_q_indices_base = full_q_indices + off_z * stride_bqf_z + off_h_q * stride_bqf_h + start_n * stride_bqf_k
+        q_mask_base = q_partial_mask + off_z * stride_bqm_z + off_h_q * stride_bqm_h + start_n * stride_bqm_k
+
     for _ in range(GROUP_SIZE):
-        dk, dv = _attn_bwd_dkdv_inner(
-            kt_fp8,
-            ks_hd,
-            vt_fp8,
-            vs_hd,
-            dk,
-            dv,
-            q_scale_base,
-            stride_qsm,
-            stride_qsk,
-            offs_d_qk,
-            offs_d_v,
-            offs_n,
-            mask_d_qk,
-            mask_d_v,
-            q_offset,
-            do_offset,
-            stride_qm,
-            stride_qk,
-            stride_dom,
-            stride_dok,
-            l_offset,
-            d_offset,
-            stride_ldm,
-            BLOCK_M,
-            BLOCK_N,
-            BLOCK_DMODEL_QK,
-            BLOCK_DMODEL_V,
-            SCALE_BLOCK_DMODEL_QK,
-            SCALE_ACTUAL_BLOCK_DMODEL_QK,
-            sm_scale,
-            lo,
-            num_block_m,
-            USE_EXP2,
-            N_CTX_Q,
-            N_CTX_K,
-            CAUSAL,
-            QUANT_BLOCK_SIZE,
-            USE_ASM,
-        )
+        if USE_BLOCK_MASK:
+            full_q_blocks = tl.load(full_q_count_base)
+            partial_q_blocks = tl.load(q_count_base)
+            dk, dv = _attn_bwd_dkdv_inner(
+                kt_fp8, ks_hd, vt_fp8, vs_hd, dk, dv, q_scale_base, stride_qsm, stride_qsk,
+                offs_d_qk, offs_d_v, offs_n, mask_d_qk, mask_d_v, q_offset, do_offset,
+                stride_qm, stride_qk, stride_dom, stride_dok, l_offset, d_offset, stride_ldm,
+                BLOCK_M, BLOCK_N, BLOCK_DMODEL_QK, BLOCK_DMODEL_V, SCALE_BLOCK_DMODEL_QK,
+                SCALE_ACTUAL_BLOCK_DMODEL_QK, sm_scale, 0, full_q_blocks, full_q_indices_base,
+                stride_bqf_s, q_mask_base, stride_bqm_s, stride_bqm_m, stride_bqm_n, USE_EXP2,
+                N_CTX_Q, N_CTX_K, False, True, False, QUANT_BLOCK_SIZE, USE_ASM)
+            dk, dv = _attn_bwd_dkdv_inner(
+                kt_fp8, ks_hd, vt_fp8, vs_hd, dk, dv, q_scale_base, stride_qsm, stride_qsk,
+                offs_d_qk, offs_d_v, offs_n, mask_d_qk, mask_d_v, q_offset, do_offset,
+                stride_qm, stride_qk, stride_dom, stride_dok, l_offset, d_offset, stride_ldm,
+                BLOCK_M, BLOCK_N, BLOCK_DMODEL_QK, BLOCK_DMODEL_V, SCALE_BLOCK_DMODEL_QK,
+                SCALE_ACTUAL_BLOCK_DMODEL_QK, sm_scale, 0, partial_q_blocks, q_indices_base,
+                stride_bqi_s, q_mask_base, stride_bqm_s, stride_bqm_m, stride_bqm_n, USE_EXP2,
+                N_CTX_Q, N_CTX_K, False, True, True, QUANT_BLOCK_SIZE, USE_ASM)
+        else:
+            dk, dv = _attn_bwd_dkdv_inner(
+                kt_fp8, ks_hd, vt_fp8, vs_hd, dk, dv, q_scale_base, stride_qsm, stride_qsk,
+                offs_d_qk, offs_d_v, offs_n, mask_d_qk, mask_d_v, q_offset, do_offset,
+                stride_qm, stride_qk, stride_dom, stride_dok, l_offset, d_offset, stride_ldm,
+                BLOCK_M, BLOCK_N, BLOCK_DMODEL_QK, BLOCK_DMODEL_V, SCALE_BLOCK_DMODEL_QK,
+                SCALE_ACTUAL_BLOCK_DMODEL_QK, sm_scale, lo, num_block_m, q_indices, 0,
+                q_partial_mask, 0, 0, 0, USE_EXP2, N_CTX_Q, N_CTX_K, CAUSAL, False, False,
+                QUANT_BLOCK_SIZE, USE_ASM)
         q_offset += stride_qh
         do_offset += stride_doh
         q_scale_base += stride_qsh
         l_offset += stride_ldh
         d_offset += stride_ldh
+        if USE_BLOCK_MASK:
+            q_count_base += stride_bqn_h
+            full_q_count_base += stride_bqn_h
+            q_indices_base += stride_bqi_h
+            full_q_indices_base += stride_bqf_h
+            q_mask_base += stride_bqm_h
 
     dk *= sm_scale
 
@@ -1912,10 +1954,18 @@ def _attn_bwd_dq_inner(
     SCALE_ACTUAL_BLOCK_DMODEL_V: tl.constexpr,
     sm_scale: tl.constexpr,
     hi,
+    indices_base,
+    stride_idx_s,
+    mask_base,
+    stride_mask_s,
+    stride_mask_m,
+    stride_mask_n,
     USE_EXP2: tl.constexpr,
     N_CTX_Q: tl.constexpr,
     N_CTX_K: tl.constexpr,
     CAUSAL: tl.constexpr,
+    USE_BLOCK_MASK: tl.constexpr,
+    APPLY_MASK: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
 ):
@@ -1930,7 +1980,12 @@ def _attn_bwd_dq_inner(
     if USE_EXP2:
         l_i *= RCP_LN2
 
-    for start_n in range(0, hi, BLOCK_N):
+    for loop_n in range(0, hi, BLOCK_N):
+        if USE_BLOCK_MASK:
+            slot = loop_n // BLOCK_N
+            start_n = tl.load(indices_base + slot * stride_idx_s) * BLOCK_N
+        else:
+            start_n = loop_n
         offs_n = start_n + tl.arange(0, BLOCK_N)
         mask_n = offs_n < N_CTX_K
         mask_k = mask_n[:, None] & mask_d_qk[None, :]
@@ -1951,6 +2006,11 @@ def _attn_bwd_dq_inner(
             col_offset = N_CTX_Q - N_CTX_K
             causal_mask = offs_m[:, None] >= (col_offset + offs_n[None, :])
             qk = tl.where(causal_mask, qk, float("-inf"))
+        if APPLY_MASK:
+            slot = loop_n // BLOCK_N
+            keep = tl.load(mask_base + slot * stride_mask_s + (offs_m[:, None] % BLOCK_M) * stride_mask_m +
+                           tl.arange(0, BLOCK_N)[None, :] * stride_mask_n)
+            qk = tl.where(keep, qk, float("-inf"))
 
         if USE_EXP2:
             qk *= sm_scale * RCP_LN2
@@ -2019,6 +2079,28 @@ def _bwd_kernel_dq(
     stride_ldz,
     stride_ldh,
     stride_ldm,
+    kv_num_blocks,
+    kv_indices,
+    full_kv_num_blocks,
+    full_kv_indices,
+    kv_partial_mask,
+    stride_bkn_z,
+    stride_bkn_h,
+    stride_bkn_q,
+    stride_bki_z,
+    stride_bki_h,
+    stride_bki_q,
+    stride_bki_s,
+    stride_bkf_z,
+    stride_bkf_h,
+    stride_bkf_q,
+    stride_bkf_s,
+    stride_bkm_z,
+    stride_bkm_h,
+    stride_bkm_q,
+    stride_bkm_s,
+    stride_bkm_m,
+    stride_bkm_n,
     Z,
     HQ: tl.constexpr,
     HK: tl.constexpr,
@@ -2034,6 +2116,7 @@ def _bwd_kernel_dq(
     ACTUAL_BLOCK_DMODEL_QK: tl.constexpr,
     ACTUAL_BLOCK_DMODEL_V: tl.constexpr,
     CAUSAL: tl.constexpr,
+    USE_BLOCK_MASK: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
@@ -2111,48 +2194,39 @@ def _bwd_kernel_dq(
     do_fp8_hd, dos_hd = _mx_quant(do, BLOCK_M, BLOCK_DMODEL_V, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
 
     dq = tl.zeros([BLOCK_M, BLOCK_DMODEL_QK], dtype=tl.float32)
-    dq = _attn_bwd_dq_inner(
-        dq,
-        q_fp8_hd,
-        qs_hd,
-        do_fp8_hd,
-        dos_hd,
-        k_scale_base,
-        v_scale_base,
-        stride_ksn,
-        stride_ksk,
-        stride_vsn,
-        stride_vsk,
-        offs_d_qk,
-        offs_d_v,
-        offs_m,
-        l_i,
-        Di,
-        mask_d_qk,
-        mask_d_v,
-        k_offset,
-        v_offset,
-        stride_kn,
-        stride_kk,
-        stride_vn,
-        stride_vk,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_DMODEL_QK,
-        BLOCK_DMODEL_V,
-        SCALE_BLOCK_DMODEL_QK,
-        SCALE_BLOCK_DMODEL_V,
-        SCALE_ACTUAL_BLOCK_DMODEL_QK,
-        SCALE_ACTUAL_BLOCK_DMODEL_V,
-        sm_scale,
-        hi,
-        USE_EXP2,
-        N_CTX_Q,
-        N_CTX_K,
-        CAUSAL,
-        QUANT_BLOCK_SIZE,
-        USE_ASM,
-    )
+    if USE_BLOCK_MASK:
+        kv_count_base = kv_num_blocks + off_z * stride_bkn_z + off_h_q * stride_bkn_h + start_m * stride_bkn_q
+        full_kv_count_base = (full_kv_num_blocks + off_z * stride_bkn_z + off_h_q * stride_bkn_h +
+                               start_m * stride_bkn_q)
+        kv_indices_base = kv_indices + off_z * stride_bki_z + off_h_q * stride_bki_h + start_m * stride_bki_q
+        full_kv_indices_base = (full_kv_indices + off_z * stride_bkf_z + off_h_q * stride_bkf_h +
+                                start_m * stride_bkf_q)
+        kv_mask_base = (kv_partial_mask + off_z * stride_bkm_z + off_h_q * stride_bkm_h +
+                        start_m * stride_bkm_q)
+        dq = _attn_bwd_dq_inner(
+            dq, q_fp8_hd, qs_hd, do_fp8_hd, dos_hd, k_scale_base, v_scale_base, stride_ksn, stride_ksk,
+            stride_vsn, stride_vsk, offs_d_qk, offs_d_v, offs_m, l_i, Di, mask_d_qk, mask_d_v, k_offset,
+            v_offset, stride_kn, stride_kk, stride_vn, stride_vk, BLOCK_M, BLOCK_N, BLOCK_DMODEL_QK,
+            BLOCK_DMODEL_V, SCALE_BLOCK_DMODEL_QK, SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_QK,
+            SCALE_ACTUAL_BLOCK_DMODEL_V, sm_scale, tl.load(full_kv_count_base) * BLOCK_N,
+            full_kv_indices_base, stride_bkf_s, kv_mask_base, stride_bkm_s, stride_bkm_m, stride_bkm_n,
+            USE_EXP2, N_CTX_Q, N_CTX_K, False, True, False, QUANT_BLOCK_SIZE, USE_ASM)
+        dq = _attn_bwd_dq_inner(
+            dq, q_fp8_hd, qs_hd, do_fp8_hd, dos_hd, k_scale_base, v_scale_base, stride_ksn, stride_ksk,
+            stride_vsn, stride_vsk, offs_d_qk, offs_d_v, offs_m, l_i, Di, mask_d_qk, mask_d_v, k_offset,
+            v_offset, stride_kn, stride_kk, stride_vn, stride_vk, BLOCK_M, BLOCK_N, BLOCK_DMODEL_QK,
+            BLOCK_DMODEL_V, SCALE_BLOCK_DMODEL_QK, SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_QK,
+            SCALE_ACTUAL_BLOCK_DMODEL_V, sm_scale, tl.load(kv_count_base) * BLOCK_N, kv_indices_base,
+            stride_bki_s, kv_mask_base, stride_bkm_s, stride_bkm_m, stride_bkm_n, USE_EXP2, N_CTX_Q,
+            N_CTX_K, False, True, True, QUANT_BLOCK_SIZE, USE_ASM)
+    else:
+        dq = _attn_bwd_dq_inner(
+            dq, q_fp8_hd, qs_hd, do_fp8_hd, dos_hd, k_scale_base, v_scale_base, stride_ksn, stride_ksk,
+            stride_vsn, stride_vsk, offs_d_qk, offs_d_v, offs_m, l_i, Di, mask_d_qk, mask_d_v, k_offset,
+            v_offset, stride_kn, stride_kk, stride_vn, stride_vk, BLOCK_M, BLOCK_N, BLOCK_DMODEL_QK,
+            BLOCK_DMODEL_V, SCALE_BLOCK_DMODEL_QK, SCALE_BLOCK_DMODEL_V, SCALE_ACTUAL_BLOCK_DMODEL_QK,
+            SCALE_ACTUAL_BLOCK_DMODEL_V, sm_scale, hi, kv_indices, 0, kv_partial_mask, 0, 0, 0,
+            USE_EXP2, N_CTX_Q, N_CTX_K, CAUSAL, False, False, QUANT_BLOCK_SIZE, USE_ASM)
 
     dq *= sm_scale
     tl.store(dq_offset + offs_m[:, None] * stride_qm + offs_d_qk[None, :] * stride_qk, dq,
@@ -2178,6 +2252,16 @@ def attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    kv_num_blocks: Optional[torch.Tensor] = None,
+    kv_indices: Optional[torch.Tensor] = None,
+    full_kv_num_blocks: Optional[torch.Tensor] = None,
+    full_kv_indices: Optional[torch.Tensor] = None,
+    kv_partial_mask: Optional[torch.Tensor] = None,
+    q_num_blocks: Optional[torch.Tensor] = None,
+    q_indices: Optional[torch.Tensor] = None,
+    full_q_num_blocks: Optional[torch.Tensor] = None,
+    full_q_indices: Optional[torch.Tensor] = None,
+    q_partial_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """MXFP8 flash-attention backward (stage-2 / A1, ``tl.dot_scaled``).
 
@@ -2243,6 +2327,29 @@ def attention_mxfp8_backward_triton_impl(
     BLOCK_N = 128
     num_block_m = triton.cdiv(max_seqlen_q, BLOCK_M)
     num_block_n = triton.cdiv(max_seqlen_k, BLOCK_N)
+    use_block_mask = kv_indices is not None
+    if use_block_mask:
+        kv_partial_mask = kv_partial_mask.view(*kv_indices.shape, BLOCKMASK_BLOCK_SIZE, BLOCKMASK_BLOCK_SIZE)
+        q_partial_mask = q_partial_mask.view(*q_indices.shape, BLOCKMASK_BLOCK_SIZE, BLOCKMASK_BLOCK_SIZE)
+        bkn_strides = _blockmask_strides(kv_num_blocks, batch, nheads_q, num_block_m, "kv_num_blocks")
+        assert _blockmask_strides(full_kv_num_blocks, batch, nheads_q, num_block_m,
+                                  "full_kv_num_blocks") == bkn_strides
+        bki_strides = _blockmask_strides(kv_indices, batch, nheads_q, num_block_m, "kv_indices")
+        bkf_strides = _blockmask_strides(full_kv_indices, batch, nheads_q, num_block_m, "full_kv_indices")
+        bkm_strides = _blockmask_strides(kv_partial_mask, batch, nheads_q, num_block_m, "kv_partial_mask")
+        bqn_strides = _blockmask_strides(q_num_blocks, batch, nheads_q, num_block_n, "q_num_blocks")
+        assert _blockmask_strides(full_q_num_blocks, batch, nheads_q, num_block_n,
+                                  "full_q_num_blocks") == bqn_strides
+        bqi_strides = _blockmask_strides(q_indices, batch, nheads_q, num_block_n, "q_indices")
+        bqf_strides = _blockmask_strides(full_q_indices, batch, nheads_q, num_block_n, "full_q_indices")
+        bqm_strides = _blockmask_strides(q_partial_mask, batch, nheads_q, num_block_n, "q_partial_mask")
+    else:
+        bkn_strides = (0, 0, 0)
+        bki_strides = bkf_strides = (0, 0, 0, 0)
+        bkm_strides = (0, 0, 0, 0, 0, 0)
+        bqn_strides = (0, 0, 0)
+        bqi_strides = bqf_strides = (0, 0, 0, 0)
+        bqm_strides = (0, 0, 0, 0, 0, 0)
 
     wrap_triton(_bwd_preprocess)[(num_block_m, batch * nheads_q)](
         o,
@@ -2311,13 +2418,35 @@ def attention_mxfp8_backward_triton_impl(
         stride_lse_z,
         stride_lse_h,
         stride_lse_m,
-        batch,
-        nheads_q,
-        nheads_k,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
+        kv_num_blocks=kv_num_blocks,
+        kv_indices=kv_indices,
+        full_kv_num_blocks=full_kv_num_blocks,
+        full_kv_indices=full_kv_indices,
+        kv_partial_mask=kv_partial_mask,
+        stride_bkn_z=bkn_strides[0],
+        stride_bkn_h=bkn_strides[1],
+        stride_bkn_q=bkn_strides[2],
+        stride_bki_z=bki_strides[0],
+        stride_bki_h=bki_strides[1],
+        stride_bki_q=bki_strides[2],
+        stride_bki_s=bki_strides[3],
+        stride_bkf_z=bkf_strides[0],
+        stride_bkf_h=bkf_strides[1],
+        stride_bkf_q=bkf_strides[2],
+        stride_bkf_s=bkf_strides[3],
+        stride_bkm_z=bkm_strides[0],
+        stride_bkm_h=bkm_strides[1],
+        stride_bkm_q=bkm_strides[2],
+        stride_bkm_s=bkm_strides[3],
+        stride_bkm_m=bkm_strides[4],
+        stride_bkm_n=bkm_strides[5],
+        Z=batch,
+        HQ=nheads_q,
+        HK=nheads_k,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
         num_block_n=num_block_n,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -2326,6 +2455,7 @@ def attention_mxfp8_backward_triton_impl(
         ACTUAL_BLOCK_DMODEL_QK=head_size_qk,
         ACTUAL_BLOCK_DMODEL_V=head_size_v,
         CAUSAL=causal,
+        USE_BLOCK_MASK=use_block_mask,
         USE_EXP2=use_exp2,
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
@@ -2378,13 +2508,35 @@ def attention_mxfp8_backward_triton_impl(
         stride_lse_z,
         stride_lse_h,
         stride_lse_m,
-        batch,
-        nheads_q,
-        nheads_k,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
+        q_num_blocks=q_num_blocks,
+        q_indices=q_indices,
+        full_q_num_blocks=full_q_num_blocks,
+        full_q_indices=full_q_indices,
+        q_partial_mask=q_partial_mask,
+        stride_bqn_z=bqn_strides[0],
+        stride_bqn_h=bqn_strides[1],
+        stride_bqn_k=bqn_strides[2],
+        stride_bqi_z=bqi_strides[0],
+        stride_bqi_h=bqi_strides[1],
+        stride_bqi_k=bqi_strides[2],
+        stride_bqi_s=bqi_strides[3],
+        stride_bqf_z=bqf_strides[0],
+        stride_bqf_h=bqf_strides[1],
+        stride_bqf_k=bqf_strides[2],
+        stride_bqf_s=bqf_strides[3],
+        stride_bqm_z=bqm_strides[0],
+        stride_bqm_h=bqm_strides[1],
+        stride_bqm_k=bqm_strides[2],
+        stride_bqm_s=bqm_strides[3],
+        stride_bqm_m=bqm_strides[4],
+        stride_bqm_n=bqm_strides[5],
+        Z=batch,
+        HQ=nheads_q,
+        HK=nheads_k,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
         num_block_m=num_block_m,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -2393,6 +2545,7 @@ def attention_mxfp8_backward_triton_impl(
         ACTUAL_BLOCK_DMODEL_QK=head_size_qk,
         ACTUAL_BLOCK_DMODEL_V=head_size_v,
         CAUSAL=causal,
+        USE_BLOCK_MASK=use_block_mask,
         USE_EXP2=use_exp2,
         IS_VARLEN=is_varlen,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
@@ -2423,6 +2576,16 @@ def fake_attention_mxfp8_backward_triton_impl(
     max_seqlen_q: Optional[int],
     max_seqlen_k: Optional[int],
     use_exp2: bool,
+    kv_num_blocks: Optional[torch.Tensor] = None,
+    kv_indices: Optional[torch.Tensor] = None,
+    full_kv_num_blocks: Optional[torch.Tensor] = None,
+    full_kv_indices: Optional[torch.Tensor] = None,
+    kv_partial_mask: Optional[torch.Tensor] = None,
+    q_num_blocks: Optional[torch.Tensor] = None,
+    q_indices: Optional[torch.Tensor] = None,
+    full_q_num_blocks: Optional[torch.Tensor] = None,
+    full_q_indices: Optional[torch.Tensor] = None,
+    q_partial_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.empty_like(q, dtype=bwd_torch_dtype)
     dk = torch.empty_like(k, dtype=bwd_torch_dtype)
@@ -2504,12 +2667,6 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         assert bias is None, "MXFP8 attention backward does not support bias yet."
         assert alibi_slopes is None, "MXFP8 attention backward does not support alibi yet."
         assert ctx.dropout_p == 0.0, "MXFP8 attention backward does not support dropout yet."
-        if ctx.block_mask is not None:
-            raise NotImplementedError(
-                "MXFP8 BlockMask backward is not implemented yet. The forward pass reads the Flex "
-                "tables, but _bwd_kernel_dq/_bwd_kernel_dkdv still walk causal ranges, so a "
-                "gradient computed here would not match the mask the forward used.")
-
         dq, dk, dv = torch.ops.alto.attention_mxfp8_backward_triton_impl(
             do,
             q,
@@ -2528,6 +2685,16 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             max_seqlen_q=ctx.max_seqlens_q,
             max_seqlen_k=ctx.max_seqlens_k,
             use_exp2=ctx.use_exp2,
+            kv_num_blocks=None if ctx.block_mask is None else ctx.block_mask.kv_num_blocks,
+            kv_indices=None if ctx.block_mask is None else ctx.block_mask.kv_indices,
+            full_kv_num_blocks=None if ctx.block_mask is None else ctx.block_mask.full_kv_num_blocks,
+            full_kv_indices=None if ctx.block_mask is None else ctx.block_mask.full_kv_indices,
+            kv_partial_mask=None if ctx.block_mask is None else ctx.block_mask.kv_partial_mask,
+            q_num_blocks=None if ctx.block_mask is None else ctx.block_mask.q_num_blocks,
+            q_indices=None if ctx.block_mask is None else ctx.block_mask.q_indices,
+            full_q_num_blocks=None if ctx.block_mask is None else ctx.block_mask.full_q_num_blocks,
+            full_q_indices=None if ctx.block_mask is None else ctx.block_mask.full_q_indices,
+            q_partial_mask=None if ctx.block_mask is None else ctx.block_mask.q_partial_mask,
         )
         return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
 

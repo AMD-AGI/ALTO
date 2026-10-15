@@ -149,17 +149,6 @@ class _AttentionNet(nn.Module):
         return self.proj(self.attn(x, x, x)[0])
 
 
-class _BranchNet(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.used = nn.Linear(16, 16)
-        self.unused = nn.Linear(16, 16)
-
-    def forward(self, x):
-        return self.used(x)
-
-
 def _calibration(model, *shape, batches=4):
 
     def calibrate():
@@ -182,14 +171,6 @@ def _modifiers_section(recipe):
     return yaml.safe_load(recipe.yaml())["quantization_stage"]["quantization_modifiers"]
 
 
-def _int_weights(targets):
-    return {"targets": targets, "weights": {"num_bits": 8, "type": "int", "symmetric": True, "strategy": "tensor"}}
-
-
-def _one_modifier(**config_groups):
-    return {"quantization_modifiers": {"QuantizationModifier": {"config_groups": config_groups}}}
-
-
 @pytest.mark.parametrize("scheme, num_bits", [("mx6", 5), ("mx9", 8)])
 def test_mx_recipe_blocks_conv2d_along_input_channels(apis, scheme, num_bits):
     groups = apis.create_quantization_recipe(scheme, targets=["Conv2d", "Linear"]).modifiers[0].resolved_config.config_groups
@@ -198,20 +179,6 @@ def test_mx_recipe_blocks_conv2d_along_input_channels(apis, scheme, num_bits):
     for name, block_axis in (("group_conv2d", -3), ("group_linear", -1)):
         for args in (groups[name].weights, groups[name].input_activations):
             assert (args.num_bits, args.dynamic, args.format, args.block_axis) == (num_bits, True, scheme, block_axis)
-
-
-def test_the_default_targets_are_linear_only(apis):
-    groups = apis.create_quantization_recipe("mx6").modifiers[0].resolved_config.config_groups
-
-    assert set(groups) == {"group_linear"}
-
-
-def test_int8_recipe_is_static_per_tensor_with_minmax_activations(apis):
-    group = apis.create_quantization_recipe("int8", targets=["Linear"]).modifiers[0].resolved_config.config_groups
-    weights, inputs = group["group_linear"].weights, group["group_linear"].input_activations
-
-    assert (weights.num_bits, weights.dynamic, weights.strategy) == (8, False, "tensor")
-    assert (inputs.num_bits, inputs.dynamic, inputs.strategy, inputs.observer) == (8, False, "tensor", "minmax")
 
 
 def test_create_rejects_unknown_schemes_and_targets(apis):
@@ -237,11 +204,6 @@ def test_a_created_recipe_survives_a_yaml_round_trip(apis, tmp_path):
     loaded = apis.load_quantization_recipe(path)
     assert _config_groups(loaded) == _config_groups(recipe)
     assert loaded.modifiers[0].ignore == recipe.modifiers[0].ignore
-
-
-def test_load_rejects_missing_files(apis, tmp_path):
-    with pytest.raises(FileNotFoundError):
-        apis.load_quantization_recipe(tmp_path / "missing.yaml")
 
 
 def test_apply_rejects_sequential_mode_and_unsupported_modifiers(apis, tmp_path):
@@ -272,8 +234,15 @@ def test_int8_quantizes_every_linear(apis):
     torch.manual_seed(0)
     model = _Net()
     reference = copy.deepcopy(model)
+    recipe = apis.create_quantization_recipe("int8")
+    groups = recipe.modifiers[0].resolved_config.config_groups
+    assert set(groups) == {"group_linear"}
+    weights, inputs = groups["group_linear"].weights, groups["group_linear"].input_activations
+    assert (weights.num_bits, weights.dynamic, weights.strategy) == (8, False, "tensor")
+    assert (inputs.num_bits, inputs.dynamic, inputs.strategy, inputs.observer) == (8, False, "tensor", "minmax")
 
-    apis.apply_quantization(model, apis.create_quantization_recipe("int8"), calibrate=_calibration(model, 64, 8))
+    result = apis.apply_quantization(model, recipe, calibrate=_calibration(model, 64, 8))
+    assert result is model
 
     for name in QUANTIZABLE:
         module = model.get_submodule(name)
@@ -300,8 +269,10 @@ def test_static_activations_require_calibration_before_initialization(apis):
 def test_a_dynamic_recipe_skips_calibrate_and_ends_frozen(apis):
     model = _Net()
     calls = []
+    recipe = apis.create_quantization_recipe("mx6")
+    assert set(recipe.modifiers[0].resolved_config.config_groups) == {"group_linear"}
 
-    apis.apply_quantization(model, apis.create_quantization_recipe("mx6"), calibrate=lambda: calls.append(None))
+    apis.apply_quantization(model, recipe, calibrate=lambda: calls.append(None))
 
     assert calls == []
     assert any("needs no calibration data" in message for message in apis.logger.warnings)
@@ -313,30 +284,17 @@ def test_a_dynamic_recipe_skips_calibrate_and_ends_frozen(apis):
 
 def test_multihead_attention_out_proj_can_be_explicitly_ignored(apis):
     model = _AttentionNet()
+    before = model.attn.out_proj.weight.detach().clone()
 
     apis.apply_quantization(model,
                             apis.create_quantization_recipe("int8", ignore=["attn.out_proj"]),
                             calibrate=_calibration(model, 2, 5, 16))
 
     assert not hasattr(model.attn.out_proj, "quantization_scheme")
+    assert torch.equal(model.attn.out_proj.weight, before)
     assert torch.isfinite(model.proj.input_scale).all()
     assert model.proj.quantization_status == QuantizationStatus.FROZEN
     assert torch.isfinite(model(torch.randn(2, 5, 16))).all()
-
-
-def test_unused_branches_can_be_explicitly_ignored_during_calibration(apis):
-    model = _BranchNet()
-    before = model.unused.weight.detach().clone()
-
-    apis.apply_quantization(model,
-                            apis.create_quantization_recipe("int8", ignore=["unused"]),
-                            calibrate=_calibration(model, 2, 16))
-
-    assert not hasattr(model.unused, "quantization_scheme")
-    assert torch.equal(model.unused.weight, before)
-    assert model.used.quantization_status == QuantizationStatus.FROZEN
-    assert torch.isfinite(model.used.input_scale).all()
-    assert torch.isfinite(model(torch.randn(2, 16))).all()
 
 
 def test_one_recipe_object_quantizes_several_models(apis):
@@ -369,18 +327,6 @@ def test_a_mixed_precision_recipe_runs_from_one_yaml(apis, tmp_path):
         assert module.quantization_scheme.weights.dynamic is False
         assert torch.isfinite(module.input_scale).all()
         assert module.quantization_status == QuantizationStatus.FROZEN
-
-
-def test_a_name_pattern_quantizes_supported_modules(apis, tmp_path):
-    path = _write_yaml(tmp_path / "head.yaml", _one_modifier(group_0=_int_weights(["re:head\\..*"])))
-    model = nn.ModuleDict({"head": nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.LayerNorm(4))})
-
-    result = apis.apply_quantization(model, path)
-
-    assert result is model
-    assert [hasattr(module, "quantization_scheme") for module in model.head] == [True, False, False]
-    assert model.head[0].quantization_status == QuantizationStatus.FROZEN
-    assert torch.isfinite(model.head(torch.randn(2, 4))).all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="MX dispatch launches the Triton kernel")

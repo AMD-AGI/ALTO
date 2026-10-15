@@ -75,8 +75,9 @@ class ModelPatcher:
                     assert args.num_bits == MX_QUANT_BIT[target_dtype], \
                         (f"{target_dtype} packed kernel is fixed at num_bits "
                          f"{MX_QUANT_BIT[target_dtype]}, got {args.num_bits}")
-                    packed = convert_to_mx(x, target_dtype=target_dtype)
-                    return convert_from_mx(packed, target_dtype, x.dtype, x.shape)
+                    axis = args.block_axis
+                    packed = convert_to_mx(x, target_dtype=target_dtype, axis=axis)
+                    return convert_from_mx(packed, target_dtype, x.dtype, x.shape, axis=axis)
                 return original_fake_quantize(x, scale, zero_point, args, g_idx, global_scale)
 
             @staticmethod

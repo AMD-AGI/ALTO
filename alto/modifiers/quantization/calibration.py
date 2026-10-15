@@ -255,9 +255,12 @@ def freeze_module_quantization(module: Module):
         if hasattr(module, obs_name):
             delattr(module, obs_name)
 
-    # change back to FROZEN status
-    # because we have set it to COMPRESSED to accelerate the validation
-    if module.quantization_status == QuantizationStatus.COMPRESSED:
+    # Static weights reach COMPRESSED once post_step bakes them. Dynamic or
+    # unquantized weights have nothing to bake and are frozen from CALIBRATION.
+    weights = scheme.weights
+    nothing_to_bake = weights is None or weights.dynamic is True
+    if module.quantization_status == QuantizationStatus.COMPRESSED or (
+            module.quantization_status == QuantizationStatus.CALIBRATION and nothing_to_bake):
         module.quantization_status = QuantizationStatus.FROZEN
 
 

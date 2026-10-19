@@ -7,10 +7,12 @@ validated before CDNA4 hardware is in the loop.
 
 import pytest
 import torch
-from torch.nn.attention.flex_attention import create_block_mask
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from alto.kernels.mxfp8.blockmask import blockmask_attention_fp32_reference, prepare_block_mask
 from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
+from alto.kernels.dispatch.attention import LPFlexAttentionWrapper
+from alto.kernels.dispatch.config import TrainingOpConfig
 
 from .utils import (
     calc_cossim,
@@ -251,27 +253,31 @@ def test_blockmask_kernel_uses_per_batch_per_head_tables():
 @cuda_only
 @pytest.mark.parametrize("window", [1, 128, 256])
 @pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
-def test_blockmask_backward_matches_same_quantization_reference(window, num_head_q, num_head_kv):
+@pytest.mark.parametrize("head_dim", [64, 192])
+def test_blockmask_backward_matches_same_quantization_reference(window, num_head_q, num_head_kv, head_dim):
     """dQ/dK/dV must consume the same sparse tables as the forward pass."""
     torch.manual_seed(5678)
     block_mask = create_block_mask(_causal_window(window), None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
     prepared = prepare_block_mask(block_mask)
-    q = torch.randn(1, num_head_q, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    k = torch.randn(1, num_head_kv, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    q = torch.randn(1, num_head_q, 256, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, num_head_kv, 256, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     v = torch.randn_like(k, requires_grad=True)
     do = torch.randn_like(q)
 
     output = _call_kernel(q, k, v, prepared)[0]
     (output * do).sum().backward()
 
-    ref_output, ref_lse = mxfp8_blockmask_forward_reference(q.detach(), k.detach(), v.detach(), prepared, 64**-0.5)
+    ref_output, ref_lse = mxfp8_blockmask_forward_reference(
+        q.detach(), k.detach(), v.detach(), prepared, head_dim**-0.5
+    )
     dense_mask = _dense_mask(_causal_window(window), 1, num_head_q, 256, 256, "cuda")
     ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
-        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, 64**-0.5, causal=False, mask=dense_mask
+        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, head_dim**-0.5, causal=False, mask=dense_mask
     )
 
     for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
         assert calc_cossim(expected, actual) > 0.99
+        assert calc_snr(expected, actual) > 30
 
 
 @cuda_only
@@ -286,8 +292,18 @@ def test_blockmask_backward_keeps_unattended_key_blocks_zero():
     q = torch.randn(1, 2, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     k = torch.randn_like(q, requires_grad=True)
     v = torch.randn_like(q, requires_grad=True)
+    do = torch.randn_like(q)
 
-    _call_kernel(q, k, v, prepared)[0].sum().backward()
+    output = _call_kernel(q, k, v, prepared)[0]
+    (output * do).sum().backward()
+    dense_mask = _dense_mask(first_key_block_only, 1, 2, 256, 256, "cuda")
+    ref_output, ref_lse = mxfp8_attention_forward_reference(q.detach(), k.detach(), v.detach(), 64**-0.5,
+                                                             causal=False, mask=dense_mask)
+    ref_dq, _, _ = mxfp8_attention_backward_reference_stage2(
+        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, 64**-0.5, causal=False, mask=dense_mask
+    )
+    assert calc_cossim(ref_dq, q.grad) > 0.99
+    assert calc_snr(ref_dq, q.grad) > 30
     assert torch.count_nonzero(k.grad[:, :, 128:]) == 0
     assert torch.count_nonzero(v.grad[:, :, 128:]) == 0
 
@@ -309,6 +325,8 @@ def test_blockmask_backward_uses_per_batch_per_head_tables():
     output, lse, _ = _call_kernel(q, k, v, prepared)
     (output * do).sum().backward()
     dense_mask = _dense_mask(shifted_diagonal, 2, 4, 256, 256, "cuda")
+    # The table-walk reference intentionally supports only broadcast B/H tables,
+    # so this non-broadcast stride test must use the kernel's own O/LSE.
     ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
         q.detach(), k.detach(), v.detach(), do, output.detach(), lse.detach(), 64**-0.5,
         causal=False, mask=dense_mask
@@ -316,6 +334,7 @@ def test_blockmask_backward_uses_per_batch_per_head_tables():
 
     for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
         assert calc_cossim(expected, actual) > 0.99
+        assert calc_snr(expected, actual) > 30
 
 
 @cuda_only
@@ -335,3 +354,95 @@ def test_blockmask_backward_empty_query_tile_is_zero():
     assert torch.count_nonzero(q.grad) == 0
     assert torch.count_nonzero(k.grad) == 0
     assert torch.count_nonzero(v.grad) == 0
+
+
+@cuda_only
+def test_blockmask_backward_partial_tile_empty_rows_are_zero():
+    """Empty rows inside a partial tile must have zero dQ and not poison dK/dV."""
+    def alternating_diagonal(batch, head, q_idx, kv_idx):
+        return (q_idx % 2 == 0) & (q_idx == kv_idx)
+
+    prepared = prepare_block_mask(
+        create_block_mask(alternating_diagonal, None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
+    )
+    q = torch.randn(1, 2, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn_like(q, requires_grad=True)
+    v = torch.randn_like(q, requires_grad=True)
+    do = torch.randn_like(q)
+
+    output, _, _ = _call_kernel(q, k, v, prepared)
+    (output * do).sum().backward()
+    dense_mask = _dense_mask(alternating_diagonal, 1, 2, 256, 256, "cuda")
+    ref_output, ref_lse = mxfp8_attention_forward_reference(q.detach(), k.detach(), v.detach(), 64**-0.5,
+                                                             causal=False, mask=dense_mask)
+    ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
+        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, 64**-0.5, causal=False, mask=dense_mask
+    )
+
+    assert torch.count_nonzero(q.grad[:, :, 1::2]) == 0
+    for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
+        assert calc_cossim(expected, actual) > 0.99
+        assert calc_snr(expected, actual) > 30
+
+
+@cuda_only
+@pytest.mark.parametrize("window", [128, 1024])
+@pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
+def test_blockmask_kernel_matches_bf16_flex_attention(window, num_head_q, num_head_kv):
+    """The public MXFP8 path must retain the established MXFP8-vs-Flex accuracy."""
+    torch.manual_seed(9012)
+    seqlen, head_dim = 512, 128
+    block_mask = create_block_mask(
+        _causal_window(window), None, None, seqlen, seqlen, device="cuda", BLOCK_SIZE=128
+    )
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, num_head_q, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, num_head_kv, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn_like(k, requires_grad=True)
+    do = torch.randn_like(q)
+
+    output, lse, _ = _call_kernel(q, k, v, prepared)
+    (output * do).sum().backward()
+    kernel_grads = (q.grad.detach(), k.grad.detach(), v.grad.detach())
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    ref_output, ref_lse = flex_attention(
+        q_ref, k_ref, v_ref, block_mask=block_mask, scale=head_dim**-0.5,
+        enable_gqa=num_head_q != num_head_kv, return_lse=True,
+    )
+    (ref_output * do).sum().backward()
+    pairs = [
+        ("o", ref_output, output),
+        ("lse", ref_lse, lse),
+        ("dQ", q_ref.grad, kernel_grads[0]),
+        ("dK", k_ref.grad, kernel_grads[1]),
+        ("dV", v_ref.grad, kernel_grads[2]),
+    ]
+    for name, expected, actual in pairs:
+        assert calc_cossim(expected, actual) > 0.99, name
+        assert calc_snr(expected, actual) > 18, name
+
+
+@cuda_only
+def test_lp_flex_attention_wrapper_returns_flex_contract():
+    """The wrapper must preserve FlexAttention's output/LSE public contract."""
+    seqlen, head_dim = 128, 64
+    block_mask = create_block_mask(_causal_window(128), None, None, seqlen, seqlen, device="cuda", BLOCK_SIZE=128)
+    q = torch.randn(1, 4, seqlen, head_dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    wrapper = LPFlexAttentionWrapper(TrainingOpConfig(
+        precision="mxfp8_e4m3",
+        use_2dblock_x=False,
+        use_2dblock_w=True,
+        use_hadamard=False,
+        use_sr_grad=False,
+        use_dge=False,
+    ))
+
+    output, lse = wrapper(q, k, v, block_mask=block_mask, return_lse=True)
+
+    assert output.shape == q.shape
+    assert lse.shape == q.shape[:-1]

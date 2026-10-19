@@ -1149,7 +1149,7 @@ def get_padded_head_dim(head_size: int):
     return padded_d_model
 
 
-def _blockmask_strides(table, batch, nheads_q, num_q_blocks, name):
+def _blockmask_strides(table, batch, nheads_q, num_index_blocks, name):
     """Strides for a BlockMask table, with broadcast dims collapsed to stride 0.
 
     Flex builds these with B or H equal to 1 when the mask does not depend on
@@ -1160,7 +1160,9 @@ def _blockmask_strides(table, batch, nheads_q, num_q_blocks, name):
     assert table.is_contiguous(), f"{name} must be contiguous"
     assert table.shape[0] in (1, batch), f"{name} batch dim {table.shape[0]} must be 1 or {batch}"
     assert table.shape[1] in (1, nheads_q), f"{name} head dim {table.shape[1]} must be 1 or {nheads_q}"
-    assert table.shape[2] == num_q_blocks, (f"{name} has {table.shape[2]} query blocks, expected {num_q_blocks}")
+    assert table.shape[2] == num_index_blocks, (
+        f"{name} has {table.shape[2]} indexed blocks, expected {num_index_blocks}"
+    )
     strides = list(table.stride())
     if table.shape[0] == 1:
         strides[0] = 0
@@ -1297,8 +1299,11 @@ def attention_mxfp8_forward_triton_impl(
     ks_strides = get_strides_from_layout(k_scale, layout)
     vs_strides = get_strides_from_layout(v_scale, layout)
 
+    BLOCK_M = 128
+    BLOCK_N = 128
     use_block_mask = kv_indices is not None
     if use_block_mask:
+        assert BLOCK_M == BLOCK_N == BLOCKMASK_BLOCK_SIZE
         num_q_blocks = max_seqlens_q // BLOCKMASK_BLOCK_SIZE
         kv_partial_mask = kv_partial_mask.view(*kv_indices.shape, BLOCKMASK_BLOCK_SIZE, BLOCKMASK_BLOCK_SIZE)
         bmn_strides = _blockmask_strides(kv_num_blocks, batch, nheads_q, num_q_blocks, "kv_num_blocks")
@@ -1385,8 +1390,8 @@ def attention_mxfp8_forward_triton_impl(
         ENABLE_DROPOUT=dropout_p > 0.0,
         USE_EXP2=use_exp2,
         RETURN_SCORES=return_scores,
-        BLOCK_M=128,
-        BLOCK_N=128,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
     )
@@ -1605,8 +1610,8 @@ def _attn_bwd_dkdv_inner(
     SCALE_BLOCK_DMODEL_QK: tl.constexpr,
     SCALE_ACTUAL_BLOCK_DMODEL_QK: tl.constexpr,
     sm_scale: tl.constexpr,
-    lo,
-    num_block_m: tl.constexpr,
+    first_query_block,
+    num_query_blocks,
     indices_base,
     stride_idx_s,
     mask_base,
@@ -1632,13 +1637,12 @@ def _attn_bwd_dkdv_inner(
     same 2D block scale re-indexed along seqlen. Only dO/P/dS are quantized fresh
     (plan §9.5 dots a/b/c/d).
     """
-    for loop_m in range(lo, num_block_m * BLOCK_M, BLOCK_M):
+    for slot in range(num_query_blocks):
         if USE_BLOCK_MASK:
-            slot = loop_m // BLOCK_M
-            start_m = tl.load(indices_base + slot * stride_idx_s) * BLOCK_M
+            query_start = tl.load(indices_base + slot * stride_idx_s) * BLOCK_M
         else:
-            start_m = loop_m
-        offs_m = start_m + tl.arange(0, BLOCK_M)
+            query_start = (first_query_block + slot) * BLOCK_M
+        offs_m = query_start + tl.arange(0, BLOCK_M)
         q_ptrs = q_offset + offs_m[:, None] * stride_qm + offs_d_qk[None, :] * stride_qk
         do_ptrs = do_offset + offs_m[:, None] * stride_dom + offs_d_v[None, :] * stride_dok
 
@@ -1659,9 +1663,8 @@ def _attn_bwd_dkdv_inner(
             causal_mask = offs_m[:, None] >= (col_offset + offs_n[None, :])
             qk = tl.where(causal_mask, qk, float("-inf"))
         if APPLY_MASK:
-            slot = loop_m // BLOCK_M
-            keep = tl.load(mask_base + slot * stride_mask_s + (offs_m[:, None] % BLOCK_M) * stride_mask_m +
-                           (offs_n[None, :] % BLOCK_N) * stride_mask_n)
+            keep = tl.load(mask_base + slot * stride_mask_s + tl.arange(0, BLOCK_M)[:, None] * stride_mask_m +
+                           tl.arange(0, BLOCK_N)[None, :] * stride_mask_n)
             qk = tl.where(keep, qk, float("-inf"))
 
         l_ptrs = l_offset + offs_m * stride_ldm
@@ -1691,7 +1694,7 @@ def _attn_bwd_dkdv_inner(
         # dot d: dk += dsᵀ @ q, reduction = seqlen_q (BLOCK_M). dS fresh (1D along
         # BLOCK_M); q reuses the saved 2D block scale re-indexed along seqlen.
         dst_fp8, dss_d = _mx_quant(tl.trans(ds), BLOCK_N, BLOCK_M, QUANT_BLOCK_SIZE, _MX_2D, USE_ASM)
-        qs_sq = _load_scale_sq(q_scale_base, start_m, offs_d_qk, stride_qsm, stride_qsk, N_CTX_Q,
+        qs_sq = _load_scale_sq(q_scale_base, query_start, offs_d_qk, stride_qsm, stride_qsk, N_CTX_Q,
                                BLOCK_M, SCALE_ACTUAL_BLOCK_DMODEL_QK, QUANT_BLOCK_SIZE)
         dk += tl.dot_scaled(dst_fp8, dss_d, "e4m3", q, qs_sq, "e4m3", out_dtype=tl.float32)
 
@@ -1798,7 +1801,7 @@ def _bwd_kernel_dkdv(
     SCALE_ACTUAL_BLOCK_DMODEL_V: tl.constexpr = ACTUAL_BLOCK_DMODEL_V // QUANT_BLOCK_SIZE
 
     off_hz = tl.program_id(0)
-    start_n = tl.program_id(1)
+    key_block = tl.program_id(1)
     off_z = off_hz // HK
     off_h_k = off_hz % HK
 
@@ -1833,14 +1836,14 @@ def _bwd_kernel_dkdv(
     dv_offset = DV + off_z * stride_vz + off_h_k * stride_vh + k_start * stride_vn
 
     if CAUSAL:
-        causal_boundary = start_n * BLOCK_N - BLOCK_M
+        causal_boundary = key_block * BLOCK_N - BLOCK_M
         lo = (causal_boundary + 1) // BLOCK_M * BLOCK_M
     else:
         lo = 0
 
     offs_d_qk = tl.arange(0, BLOCK_DMODEL_QK)
     offs_d_v = tl.arange(0, BLOCK_DMODEL_V)
-    offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_n = key_block * BLOCK_N + tl.arange(0, BLOCK_N)
 
     mask_n = offs_n < N_CTX_K
     mask_d_qk = offs_d_qk < ACTUAL_BLOCK_DMODEL_QK
@@ -1863,11 +1866,11 @@ def _bwd_kernel_dkdv(
     dv = tl.zeros([BLOCK_N, BLOCK_DMODEL_V], dtype=tl.float32)
 
     if USE_BLOCK_MASK:
-        q_count_base = q_num_blocks + off_z * stride_bqn_z + off_h_q * stride_bqn_h + start_n * stride_bqn_k
-        full_q_count_base = full_q_num_blocks + off_z * stride_bqn_z + off_h_q * stride_bqn_h + start_n * stride_bqn_k
-        q_indices_base = q_indices + off_z * stride_bqi_z + off_h_q * stride_bqi_h + start_n * stride_bqi_k
-        full_q_indices_base = full_q_indices + off_z * stride_bqf_z + off_h_q * stride_bqf_h + start_n * stride_bqf_k
-        q_mask_base = q_partial_mask + off_z * stride_bqm_z + off_h_q * stride_bqm_h + start_n * stride_bqm_k
+        q_count_base = q_num_blocks + off_z * stride_bqn_z + off_h_q * stride_bqn_h + key_block * stride_bqn_k
+        full_q_count_base = full_q_num_blocks + off_z * stride_bqn_z + off_h_q * stride_bqn_h + key_block * stride_bqn_k
+        q_indices_base = q_indices + off_z * stride_bqi_z + off_h_q * stride_bqi_h + key_block * stride_bqi_k
+        full_q_indices_base = full_q_indices + off_z * stride_bqf_z + off_h_q * stride_bqf_h + key_block * stride_bqf_k
+        q_mask_base = q_partial_mask + off_z * stride_bqm_z + off_h_q * stride_bqm_h + key_block * stride_bqm_k
 
     for _ in range(GROUP_SIZE):
         if USE_BLOCK_MASK:
@@ -1895,7 +1898,7 @@ def _bwd_kernel_dkdv(
                 offs_d_qk, offs_d_v, offs_n, mask_d_qk, mask_d_v, q_offset, do_offset,
                 stride_qm, stride_qk, stride_dom, stride_dok, l_offset, d_offset, stride_ldm,
                 BLOCK_M, BLOCK_N, BLOCK_DMODEL_QK, BLOCK_DMODEL_V, SCALE_BLOCK_DMODEL_QK,
-                SCALE_ACTUAL_BLOCK_DMODEL_QK, sm_scale, lo, num_block_m, q_indices, 0,
+                SCALE_ACTUAL_BLOCK_DMODEL_QK, sm_scale, lo // BLOCK_M, num_block_m - lo // BLOCK_M, q_indices, 0,
                 q_partial_mask, 0, 0, 0, USE_EXP2, N_CTX_Q, N_CTX_K, CAUSAL, False, False,
                 QUANT_BLOCK_SIZE, USE_ASM)
         q_offset += stride_qh
@@ -2008,7 +2011,7 @@ def _attn_bwd_dq_inner(
             qk = tl.where(causal_mask, qk, float("-inf"))
         if APPLY_MASK:
             slot = loop_n // BLOCK_N
-            keep = tl.load(mask_base + slot * stride_mask_s + (offs_m[:, None] % BLOCK_M) * stride_mask_m +
+            keep = tl.load(mask_base + slot * stride_mask_s + tl.arange(0, BLOCK_M)[:, None] * stride_mask_m +
                            tl.arange(0, BLOCK_N)[None, :] * stride_mask_n)
             qk = tl.where(keep, qk, float("-inf"))
 
@@ -2329,6 +2332,7 @@ def attention_mxfp8_backward_triton_impl(
     num_block_n = triton.cdiv(max_seqlen_k, BLOCK_N)
     use_block_mask = kv_indices is not None
     if use_block_mask:
+        assert BLOCK_M == BLOCK_N == BLOCKMASK_BLOCK_SIZE
         kv_partial_mask = kv_partial_mask.view(*kv_indices.shape, BLOCKMASK_BLOCK_SIZE, BLOCKMASK_BLOCK_SIZE)
         q_partial_mask = q_partial_mask.view(*q_indices.shape, BLOCKMASK_BLOCK_SIZE, BLOCKMASK_BLOCK_SIZE)
         bkn_strides = _blockmask_strides(kv_num_blocks, batch, nheads_q, num_block_m, "kv_num_blocks")

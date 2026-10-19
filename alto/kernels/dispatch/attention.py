@@ -78,9 +78,8 @@ class LPFlexAttentionWrapper(FlexAttentionWrapper):
     """MXFP8 implementation of FlexAttention's public wrapper contract.
 
     Mask semantics come from the Flex BlockMask tables, so the kernel carries no
-    causal or window arithmetic of its own. Forward runs in MXFP8; backward
-    still raises, so this is inference-shaped until the BlockMask gradient
-    kernels land.
+    causal or window arithmetic of its own. Both forward and backward run
+    through the MXFP8 BlockMask kernels.
     """
 
     def __init__(self, config: TrainingOpConfig):

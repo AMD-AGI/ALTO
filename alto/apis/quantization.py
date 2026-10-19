@@ -22,10 +22,14 @@ __all__ = [
     "load_quantization_recipe",
 ]
 
-SCHEMES = (*MX_QUANT_BIT, "int8")
+SCHEMES = (*MX_QUANT_BIT, "int8_dynamic", "int8_static")
 
 # MX blocks follow the input features for Linear and input channels for Conv2d.
 _BLOCK_AXIS = {"Linear": -1, "Conv2d": -3}
+
+# The token strategy keeps dims 0 and 1, so on a conv input it would scale each
+# input channel, the axis the conv reduces over.
+_INT8_DYNAMIC_STRATEGY = {"Linear": "token", "Conv2d": "tensor"}
 
 
 def create_quantization_recipe(
@@ -35,8 +39,10 @@ def create_quantization_recipe(
 ) -> Recipe:
     """Build a weight + input-activation recipe, one group per module type.
 
-    :param scheme: fully dynamic ``"mx6"``/``"mx9"``, or static per-tensor
-        ``"int8"`` with minmax activation calibration
+    :param scheme: fully dynamic ``"mx6"``/``"mx9"``; ``"int8_dynamic"``, with
+        static per-tensor weights and activations scaled at run time, per token
+        on Linear and per tensor on Conv2d; or static per-tensor
+        ``"int8_static"`` with minmax activation calibration
     :param targets: module types, out of ``Linear`` and ``Conv2d``. Conv2d
         requires the caller to install its quantization initialization first
     :param ignore: module names covering their subtree, or ``re:`` patterns
@@ -56,7 +62,9 @@ def create_quantization_recipe(
             weights.update(num_bits=MX_QUANT_BIT[scheme], dynamic=True,
                            format=scheme, block_axis=_BLOCK_AXIS[target])
         inputs = dict(weights)
-        if scheme == "int8":
+        if scheme == "int8_dynamic":
+            inputs.update(strategy=_INT8_DYNAMIC_STRATEGY[target], dynamic=True)
+        elif scheme == "int8_static":
             inputs["observer"] = "minmax"
         config_groups[f"group_{target.lower()}"] = {
             "targets": [target],

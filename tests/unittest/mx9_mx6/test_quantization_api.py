@@ -234,7 +234,7 @@ def test_int8_quantizes_every_linear(apis):
     torch.manual_seed(0)
     model = _Net()
     reference = copy.deepcopy(model)
-    recipe = apis.create_quantization_recipe("int8")
+    recipe = apis.create_quantization_recipe("int8_static")
     groups = recipe.modifiers[0].resolved_config.config_groups
     assert set(groups) == {"group_linear"}
     weights, inputs = groups["group_linear"].weights, groups["group_linear"].input_activations
@@ -262,8 +262,43 @@ def test_static_activations_require_calibration_before_initialization(apis):
     model = nn.Sequential(nn.Linear(4, 4))
 
     with pytest.raises(ValueError, match="needs calibration data"):
-        apis.apply_quantization(model, apis.create_quantization_recipe("int8"))
+        apis.apply_quantization(model, apis.create_quantization_recipe("int8_static"))
     assert not hasattr(model[0], "quantization_scheme")
+
+
+def test_int8_dynamic_scales_linear_inputs_per_token_and_conv2d_inputs_per_tensor(apis):
+    groups = apis.create_quantization_recipe("int8_dynamic", targets=["Conv2d", "Linear"]).modifiers[0].resolved_config.config_groups
+
+    assert set(groups) == {"group_conv2d", "group_linear"}
+    for name, strategy in (("group_conv2d", "tensor"), ("group_linear", "token")):
+        weights, inputs = groups[name].weights, groups[name].input_activations
+        assert (weights.num_bits, weights.dynamic, weights.strategy) == (8, False, "tensor")
+        assert (inputs.num_bits, inputs.dynamic, inputs.strategy, inputs.observer) == (8, True, strategy, None)
+
+
+def test_int8_dynamic_skips_calibrate_and_quantizes_each_token_on_its_own(apis):
+    torch.manual_seed(0)
+    model = _Net()
+    reference = copy.deepcopy(model)
+    calls = []
+
+    apis.apply_quantization(model, apis.create_quantization_recipe("int8_dynamic"), calibrate=lambda: calls.append(None))
+
+    assert calls == []
+    for name in QUANTIZABLE:
+        module = model.get_submodule(name)
+        assert module.quantization_status == QuantizationStatus.FROZEN
+        assert not hasattr(module, "input_scale")
+        steps = module.weight / module.weight_scale
+        assert torch.allclose(steps, steps.round(), atol=1e-3), f"{name} weight is not on the int8 grid"
+
+    # 3-D input: compressed_tensors falls back to one scale per tensor on 2-D input.
+    x = torch.randn(1, 4, 8)
+    out = model(x)
+    assert torch.allclose(out, reference(x), atol=0.05)
+    spiked = x.clone()
+    spiked[0, -1] *= 1000
+    assert torch.allclose(model(spiked)[0, :-1], out[0, :-1])
 
 
 def test_a_dynamic_recipe_skips_calibrate_and_ends_frozen(apis):
@@ -287,7 +322,7 @@ def test_multihead_attention_out_proj_can_be_explicitly_ignored(apis):
     before = model.attn.out_proj.weight.detach().clone()
 
     apis.apply_quantization(model,
-                            apis.create_quantization_recipe("int8", ignore=["attn.out_proj"]),
+                            apis.create_quantization_recipe("int8_static", ignore=["attn.out_proj"]),
                             calibrate=_calibration(model, 2, 5, 16))
 
     assert not hasattr(model.attn.out_proj, "quantization_scheme")
@@ -311,7 +346,7 @@ def test_one_recipe_object_quantizes_several_models(apis):
 def test_a_mixed_precision_recipe_runs_from_one_yaml(apis, tmp_path):
     stage = {
         "mx_modifiers": _modifiers_section(apis.create_quantization_recipe("mx6", ignore=["backbone"])),
-        "int8_modifiers": _modifiers_section(apis.create_quantization_recipe("int8", ignore=["head"])),
+        "int8_modifiers": _modifiers_section(apis.create_quantization_recipe("int8_static", ignore=["head"])),
     }
     path = _write_yaml(tmp_path / "mixed.yaml", stage)
     model = _Net()

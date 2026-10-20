@@ -5,9 +5,10 @@
 
 Importing top-level ``alto`` pulls torchtitan entry points and probes the GPU
 driver, so the modules under test are loaded directly, as in the MX6/MX9
-integration tests. Everything except the MX kernel test runs on CPU: an MX
-recipe only reaches the Triton kernel in a forward pass with quantization
-enabled, and calibration runs with quantization disabled.
+integration tests. Most tests run on CPU; device-placement regressions and
+the MX kernel test also exercise GPUs when available. An MX recipe only
+reaches the Triton kernel in a forward pass with quantization enabled, and
+calibration runs with quantization disabled.
 """
 
 import copy
@@ -61,7 +62,7 @@ def _load(monkeypatch, modname, relpath):
 
 
 @pytest.fixture
-def apis(monkeypatch):
+def apis(monkeypatch, request):
     before = set(sys.modules)
     forward_module = importlib.import_module("compressed_tensors.quantization.lifecycle.forward")
     monkeypatch.setattr(forward_module, "fake_quantize", forward_module.fake_quantize)
@@ -72,7 +73,7 @@ def apis(monkeypatch):
     logging_mod.logger = _Logger()
     monkeypatch.setitem(sys.modules, "torchtitan.tools.logging", logging_mod)
     utils_mod = types.ModuleType("torchtitan.tools.utils")
-    utils_mod.device_type = torch.device("cpu")
+    utils_mod.device_type = torch.device(getattr(request, "param", "cpu"))
     monkeypatch.setitem(sys.modules, "torchtitan.tools.utils", utils_mod)
 
     _make_pkg(monkeypatch, "alto", os.path.join(ROOT, "alto"))
@@ -256,6 +257,44 @@ def test_int8_quantizes_every_linear(apis):
     out, expected = model(x), reference(x)
     assert not torch.equal(out, expected)
     assert torch.allclose(out, expected, atol=0.05)
+
+
+@pytest.mark.parametrize("apis", ["cuda"], indirect=True)
+@pytest.mark.parametrize("model_device", [
+    "cpu",
+    pytest.param("non_current_gpu", marks=pytest.mark.skipif(torch.cuda.device_count() < 2,
+                                                             reason="requires two GPUs")),
+])
+def test_static_calibration_follows_model_device_not_global_device(apis, model_device):
+    if model_device == "non_current_gpu":
+        model_device = f"cuda:{(torch.cuda.current_device() + 1) % torch.cuda.device_count()}"
+    device = torch.device(model_device)
+    model = _Net().to(device)
+    recipe = apis.create_quantization_recipe("int8_static")
+
+    def calibrate():
+        # The first batch copies statistics across devices; the second reaches
+        # the moving average, which requires both tensors on the same device.
+        for _ in range(3):
+            model(torch.randn(16, 8, device=device))
+        for name in QUANTIZABLE:
+            module = model.get_submodule(name)
+            assert module.input_observer.quant_min.device == device
+            assert module.input_observer.quant_max.device == device
+            assert module.weight_observer.device == device
+
+    apis.apply_quantization(model, recipe, calibrate=calibrate)
+
+    for name in QUANTIZABLE:
+        module = model.get_submodule(name)
+        assert module.quantization_status == QuantizationStatus.FROZEN
+        for scale in (module.input_scale, module.weight_scale):
+            assert scale.device == device
+            assert torch.isfinite(scale).all()
+            assert (scale > 0).all()
+    output = model(torch.randn(2, 8, device=device))
+    assert output.device == device
+    assert torch.isfinite(output).all()
 
 
 def test_static_activations_require_calibration_before_initialization(apis):

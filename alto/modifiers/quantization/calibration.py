@@ -25,11 +25,11 @@ from compressed_tensors.quantization import (
 from compressed_tensors.quantization.lifecycle.forward import forward_quantize
 from compressed_tensors.utils import (
     align_module_device,
+    get_execution_device,
     getattr_chain,
     update_offload_parameter,
 )
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import device_type
 
 from alto.observers import Observer
 
@@ -90,7 +90,7 @@ def initialize_observer(
             base_name=base_name,
             args=args,
             module=module,
-            device=device_type,
+            device=get_execution_device(module),
             should_calculate_gparam=args.strategy == QuantizationStrategy.TENSOR_GROUP,
             should_calculate_qparams=True,
         )

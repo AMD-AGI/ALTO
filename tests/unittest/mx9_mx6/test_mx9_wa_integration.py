@@ -51,20 +51,6 @@ def _install_torchtitan_stubs(monkeypatch) -> None:
     _make_pkg(monkeypatch, "torchtitan", "")
     _make_pkg(monkeypatch, "torchtitan.tools", "")
 
-    logging_mod = types.ModuleType("torchtitan.tools.logging")
-
-    class _Logger:
-        def debug(self, *args, **kwargs):
-            pass
-
-        def info(self, *args, **kwargs):
-            pass
-
-        def warning(self, *args, **kwargs):
-            pass
-
-    logging_mod.logger = _Logger()
-    monkeypatch.setitem(sys.modules, "torchtitan.tools.logging", logging_mod)
 
     utils_mod = types.ModuleType("torchtitan.tools.utils")
     utils_mod.device_type = torch.device("cpu")

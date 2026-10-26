@@ -9,7 +9,7 @@
 #
 # Usage:
 #   bash examples/run_gptq.sh                          # 8 GPU, Llama-3.1-8B
-#   NGPU=1 COMM_MODE=local_tensor bash examples/run_gptq.sh  # single-GPU debug
+#   COMM_MODE=fake_backend bash examples/run_gptq.sh  # config dry run
 #   CONFIG=llama3_1b_gptq bash examples/run_gptq.sh   # switch to 1B model
 rm -rf outputs/
 set -ex

@@ -9,7 +9,7 @@
 
 from typing import Optional
 from contextlib import contextmanager
-import importlib
+import copy
 import json
 from pathlib import Path
 import shutil
@@ -25,11 +25,11 @@ from compressed_tensors import (
     ModelCompressor,
 )
 
-from torchtitan.config.manager import ConfigManager
-from torchtitan.trainer import Trainer
-from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.components.checkpointer import ModelWrapper
+from torchtitan.components.model_converter import ModelConvertersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.config.loader import ConfigLoader
+from torchtitan.trainer import Trainer
 
 from alto.components.converter import ModelOptConverter
 from alto.utils.compression.sparsity_metadata_config import SparsityConfigMetadata
@@ -143,22 +143,19 @@ def convert_to_hf(
     config: Trainer.Config,
     input_dir: str,
     output_dir: str,
-    model_name: str,
-    model_flavor: str,
     hf_assets_path: str,
     export_dtype: str,
     save_compressed: bool = True,
     disable_sparse_compression: bool = False,
 ):
     # load model and model args so that we can get the state dict shape
-    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
-    model_spec = model_module.model_registry(model_flavor)
-    model_config = model_spec.model
+    model_config = copy.deepcopy(config.model)
 
     model_converters = config.model_converters.build(
-        parallel_dims=None,
+        parallelism_context=None,
         model_compile_enabled=False,
     )
+    model_converters.convert_config(model_config)
 
     with torch.device("cpu"):
         model = model_config.build()
@@ -168,11 +165,11 @@ def convert_to_hf(
     model_converters.finalize([model])
     wrapped_model = ModelWrapper(model)
 
-    # pyrefly: ignore[bad-instantiation, not-callable]
-    sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
+    adapter_cls = type(model).state_dict_adapter_cls
     assert (
-        sd_adapter
-        is not None), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."
+        adapter_cls
+        is not None), "trying to convert checkpoint from DCP to HF safetensors format, but the model has no state dict adapter."
+    sd_adapter = adapter_cls(model_config, hf_assets_path)
 
     state_dict = wrapped_model._get_state_dict()
     dcp.load(
@@ -240,8 +237,8 @@ def eval_tasks(model_dir: str, tasks: list[str]):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
-    parser.add_argument("module", type=str, default="llama3")
-    parser.add_argument("config", type=str, default="llama3_8b")
+    parser.add_argument("module", type=str, help="e.g. alto.models.llama3.config_registry")
+    parser.add_argument("config", type=str, help="e.g. llama3_8b_gptq")
     parser.add_argument(
         "--export_dtype",
         type=str,
@@ -274,16 +271,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    config_manager = ConfigManager()
-    config = config_manager.parse_args(["--module", args.module, "--config", args.config])
+    config = ConfigLoader().load(["--module", args.module, "--config", args.config])
 
     dump_folder = Path(config.dump_folder)
     hf_assets_path = Path(config.hf_assets_path)
-    input_dir = dump_folder / "checkpoint" / f"step-{config.training.steps}"
+    checkpoint_folder = config.checkpointer.folder if config.checkpointer is not None else "checkpoint"
+    input_dir = dump_folder / checkpoint_folder / f"step-{config.training.steps}"
     output_dir = dump_folder / "hf"
-
-    model_name = config.model_spec.name
-    model_flavor = config.model_spec.flavor
 
     if not args.skip_export:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -295,8 +289,6 @@ if __name__ == "__main__":
             config,
             input_dir.as_posix(),
             output_dir.as_posix(),
-            model_name,
-            model_flavor,
             hf_assets_path.as_posix(),
             args.export_dtype,
             save_compressed=not args.save_uncompressed,

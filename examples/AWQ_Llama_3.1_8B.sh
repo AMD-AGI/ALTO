@@ -9,7 +9,7 @@
 #
 # Usage:
 #   bash examples/run_awq.sh                          # 8 GPU, Llama-3.1-8B
-#   NGPU=1 COMM_MODE=local_tensor bash examples/run_awq.sh  # single-GPU debug
+#   COMM_MODE=fake_backend bash examples/run_awq.sh  # config dry run
 #   CONFIG=llama3_1b_awq bash examples/run_awq.sh    # switch to 1B model
 rm -rf outputs/
 set -ex

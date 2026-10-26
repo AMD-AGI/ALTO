@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.protocols.module import Module
+from torchtitan.models.base import Module
 
 class DecomposedLinear(Module):
     

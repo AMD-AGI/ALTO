@@ -28,10 +28,12 @@ from compressed_tensors.utils import (
     getattr_chain,
     update_offload_parameter,
 )
-from torchtitan.tools.logging import logger
+import logging
+from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.utils import device_type
 
 from alto.observers import Observer
+
 
 __all__ = [
     "initialize_observer",
@@ -77,12 +79,12 @@ def initialize_observer(
     # training is no longer supported: always use memoryless for weights
     if base_name == "weight" and args.observer in ("minmax",):
         observer = "memoryless_minmax"
-        logger.warning("Overriding weight observer for lower memory usage "
-                       f"({args.observer} -> {observer})",)
+        sl.log_trace_message("alto.modifiers.quantization.calibration.warning", "Overriding weight observer for lower memory usage "
+                       f"({args.observer} -> {observer})", level=logging.WARNING)
     if base_name == "weight" and args.observer in ("mse",):
         observer = "memoryless_mse"
-        logger.warning("Overriding weight observer for lower memory usage "
-                       f"({args.observer} -> {observer})",)
+        sl.log_trace_message("alto.modifiers.quantization.calibration.warning", "Overriding weight observer for lower memory usage "
+                       f"({args.observer} -> {observer})", level=logging.WARNING)
 
     if args is not None and args.dynamic is not True:
         observer = Observer.create_instance(
@@ -141,7 +143,7 @@ def update_weight_zp_scale(module: Module):
         return
 
     if getattr(module, "quantization_status", None) != QuantizationStatus.CALIBRATION:
-        logger.warning("Attempting to calibrate weights of a module not in calibration mode")
+        sl.log_trace_message("alto.modifiers.quantization.calibration.warning", "Attempting to calibrate weights of a module not in calibration mode", level=logging.WARNING)
 
     call_observer(module=module, base_name="weight")
     observer: Observer = getattr(module, "weight_observer")

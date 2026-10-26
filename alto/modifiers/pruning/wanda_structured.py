@@ -11,11 +11,16 @@
 
 import torch
 from torch.nn import Module
-from torchtitan.tools.logging import logger
+from torchtitan.observability import structured_logger as sl
 
-from alto.modifiers.pruning.base import PruningModifierBase
+from alto.modifiers.pruning.base import (
+    PruningModifierBase,
+    copy_mlp_up_proj_weight_,
+    mlp_up_proj,
+)
 from alto.observers.per_channel_norm import PRECISION, PerChannelNormObserver
 from alto.utils.pytorch.module import TransformerConv1D
+
 
 __all__ = ["WandaStructuredModifier"]
 
@@ -68,24 +73,30 @@ class WandaStructuredModifier(PruningModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            logger.info(f"Pruning {name} using {num_samples.item()} samples")
+            sl.log_trace_message("alto.modifiers.pruning.wanda_structured.info", f"Pruning {name} using {num_samples.item()} samples")
             assert isinstance(observer, PerChannelNormObserver), \
                 "WandaPruningModifier requires per_channel_norm observer"
 
             # Determine pruning method based on dimension and layer name
             prune_fn = None
-            if 'mlp' in self.pruning_dimension and 'w3' in name:
+            target = module
+            up_proj = mlp_up_proj(name, module)
+            if 'mlp' in self.pruning_dimension and up_proj is not None:
                 prune_fn = self._prune_mlp
+                target = up_proj
             elif 'attn' in self.pruning_dimension and 'wo' in name:
                 prune_fn = self._prune_attn
 
             if prune_fn:
                 pruned_weight, pruned_mask = prune_fn(
-                    module=module,
+                    module=target,
                     row_scalar=observer.stats,
                     sparsity=sparsity,
                 )
-                module.weight.data.copy_(pruned_weight)
+                if up_proj is not None:
+                    copy_mlp_up_proj_weight_(name, module, pruned_weight)
+                else:
+                    target.weight.data.copy_(pruned_weight)
 
     def _observe_preprocess(self, module: Module,
                             row_scalar: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Size, torch.dtype]:
@@ -159,8 +170,8 @@ class WandaStructuredModifier(PruningModifierBase):
         W, W_metric, final_shape, final_dtype = self._observe_preprocess(module, row_scalar)
 
         # Get model dimensions
-        num_attention_heads = self._model_args.layer.attention.n_heads
-        num_key_value_heads = getattr(self._model_args.layer.attention, "n_kv_heads", num_attention_heads)
+        num_attention_heads = self._model_args.layers[0].attention.n_heads
+        num_key_value_heads = getattr(self._model_args.layers[0].attention, "n_kv_heads", num_attention_heads)
         hidden_dim = W.shape[1] // num_attention_heads
         group_size = num_attention_heads // num_key_value_heads
 

@@ -14,9 +14,11 @@ from compressed_tensors.modeling import (
     register_query_hook,
     register_value_hook,
 )
-from torchtitan.tools.logging import logger
+import logging
+from torchtitan.observability import structured_logger as sl
 from pydantic import BaseModel
 from torch.utils.hooks import RemovableHandle
+
 
 __all__ = ["HooksMixin"]
 
@@ -103,7 +105,7 @@ class HooksMixin(BaseModel):
         register_function = self._get_register_function(target, hook_type)
         handle = register_function(wrapped_hook, **kwargs)
         self._hooks.add(handle)
-        logger.debug(f"{self} added {handle}")
+        sl.log_trace_message("alto.modifiers.utils.hooks.debug", f"{self} added {handle}", level=logging.DEBUG)
 
         return handle
 

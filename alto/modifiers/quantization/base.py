@@ -22,23 +22,24 @@ from compressed_tensors.quantization import (
 from compressed_tensors.utils import getattr_chain, match_named_modules
 from pydantic import Field, PrivateAttr
 from torch.nn import Module
-from torchtitan.tools.logging import logger
+from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers import Modifier
 from alto.modifiers.quantization.mixin import QuantizationMixin
 from alto.modifiers.quantization.calibration import update_weight_zp_scale
 from alto.utils.pytorch.module import get_layers
 
+
 if TYPE_CHECKING:
-    from torchtitan.protocols.model import BaseModel
+    from torchtitan.models.base import BaseModel
 
 __all__ = ["QuantizationModifier"]
 
 
 DEFAULT_SUBLAYER_GROUPS = [
-    ["wq", "wk", "wv", "q_proj", "k_proj", "v_proj"],
+    ["wqkv", "wq", "wk", "wv", "q_proj", "k_proj", "v_proj"],
     ["wo", "o_proj"],
-    ["w1", "w3", "gate_proj", "up_proj"],
+    ["w13", "w1", "w3", "gate_proj", "up_proj"],
     ["w2", "down_proj"],
 ]
 
@@ -55,7 +56,7 @@ class QuantizationModifier(Modifier, QuantizationMixin):
     :param sequential_granularity: ``"block"`` processes all modules in a block
         at once; ``"sublayer"`` splits into sub-groups (qkv / o / up-gate / down)
     :param sublayer_groups: list of name-pattern lists defining sub-groups;
-        defaults to ``[["wq","wk","wv"], ["wo"], ["w1","w3"], ["w2"]]``
+        defaults to ``[["wqkv"], ["wo"], ["w13"], ["w2"]]`` (plus unfused/HF names)
     :param num_calibration_samples: max microbatches captured for sequential mode
     """
 
@@ -90,11 +91,11 @@ class QuantizationModifier(Modifier, QuantizationMixin):
 
         if self.sequential and self._captured_inputs:
             mode = f"sequential-{self.sequential_granularity}"
-            logger.info(f"{self.__class__.__name__}.on_post_step: mode={mode}, "
+            sl.log_trace_message("alto.modifiers.quantization.base.info", f"{self.__class__.__name__}.on_post_step: mode={mode}, "
                         f"{len(self._captured_inputs)} microbatches, "
                         f"{len(self._sequential_blocks)} blocks")
             return self._sequential_post_step(model_parts)
-        logger.info(f"{self.__class__.__name__}.on_post_step: mode=global-single-forward")
+        sl.log_trace_message("alto.modifiers.quantization.base.info", f"{self.__class__.__name__}.on_post_step: mode=global-single-forward")
         return self._nonsequential_post_step(model_parts)
 
     def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
@@ -141,7 +142,7 @@ class QuantizationModifier(Modifier, QuantizationMixin):
             block_mods = self._block_modules.get(blk_idx, set())
 
             if not block_mods:
-                logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: no modules, propagating")
+                sl.log_trace_message("alto.modifiers.quantization.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: no modules, propagating")
                 block.apply(disable_quantization)
                 block_inputs = self._forward_block(block, block_inputs)
                 block.apply(enable_quantization)
@@ -156,11 +157,11 @@ class QuantizationModifier(Modifier, QuantizationMixin):
                     block_mods,
                 )
             else:
-                logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
+                sl.log_trace_message("alto.modifiers.quantization.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
                             f"{len(block_mods)} modules, {len(block_inputs)} microbatches")
                 self._process_block(blk_idx, blk_name, block, block_inputs, block_mods)
 
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward")
+            sl.log_trace_message("alto.modifiers.quantization.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward")
             block.apply(disable_quantization)
             block_inputs = self._forward_block(block, block_inputs)
             block.apply(enable_quantization)
@@ -187,12 +188,12 @@ class QuantizationModifier(Modifier, QuantizationMixin):
             remaining -= group_mods
 
             group_names = [mod_name_map.get(m, "?") for m in group_mods]
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
+            sl.log_trace_message("alto.modifiers.quantization.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
                         f"{group_names}")
             self._process_block(blk_idx, blk_name, block, block_inputs, group_mods)
 
         if remaining:
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
+            sl.log_trace_message("alto.modifiers.quantization.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
                         f"{[mod_name_map.get(m, '?') for m in remaining]}")
             self._process_block(blk_idx, blk_name, block, block_inputs, remaining)
 
@@ -250,9 +251,9 @@ class QuantizationModifier(Modifier, QuantizationMixin):
                     "forward_pre",
                 )
 
-        logger.info(f"{self.__class__.__name__}: "
-                    f"{len(self._sequential_blocks)} sequential blocks, "
-                    f"sequential={self.sequential}")
+        sl.log_trace_message("alto.modifiers.quantization.base.info", f"{self.__class__.__name__}: "
+                             f"{len(self._sequential_blocks)} sequential blocks, "
+                             f"sequential={self.sequential}")
 
     def _capture_hook(self, module: Module, args: Any, kwargs: Any = None):
         if len(self._captured_inputs) >= self.num_calibration_samples:

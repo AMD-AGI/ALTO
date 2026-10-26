@@ -2,8 +2,10 @@
 #
 # SPDX-License-Identifier: MIT
 
+from dataclasses import dataclass
+
 import torch
-from torchtitan.models.common.attention import (ScaledDotProductAttention)
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 
 from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
 from .config import TrainingOpConfig
@@ -11,43 +13,42 @@ from .config import TrainingOpConfig
 __all__ = ["LPScaledDotProductAttention"]
 
 
-class LPScaledDotProductAttention(ScaledDotProductAttention):
+class LPScaledDotProductAttention(ScaledDotProductInnerAttention):
+    """Low-precision SDPA inner attention.
 
-    def __init__(self, config: TrainingOpConfig):
-        super().__init__()
-        self.config = config
-        self.attn_func = None
+    Must be selected in the model config (not swapped into a built model):
+    attention metadata is keyed by the configured inner attention class.
+    """
 
-        if isinstance(config, TrainingOpConfig) and config.precision == "mxfp4":
+    @dataclass(kw_only=True, slots=True)
+    class Config(ScaledDotProductInnerAttention.Config):
+        training_op_config: TrainingOpConfig
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.config = config.training_op_config
+        if self.config.precision == "mxfp4":
             self.attn_func = triton_attention_mxfp4
         else:
-            raise ValueError(f"Unsupported SDPA config: {config}")
+            raise ValueError(f"Unsupported SDPA config: {self.config}")
 
     def _get_name(self) -> str:
         return f"{self.__class__.__name__}[{self.config}]"
-    
-    def forward(
+
+    def attention_BLHK(
         self,
-        q_BLNH: torch.Tensor,
-        k_BLNH: torch.Tensor,
-        v_BLNH: torch.Tensor,
+        q_BLHK: torch.Tensor,
+        k_BLHK: torch.Tensor,
+        v_BLHV: torch.Tensor,
         *,
-        attention_masks: None = None,
-        scale: float | None = None,
-        enable_gqa: bool = False,
-        is_causal: bool = True,
-        **kwargs,
+        scale: float | None,
+        enable_gqa: bool,
+        is_causal: bool,
     ) -> torch.Tensor:
-        if attention_masks is not None:
-            raise ValueError(
-                "ScaledDotProductAttention does not support attention_masks; it "
-                "only supports causal/non-causal attention via is_causal."
-            )
-        # Transpose to (B, N, L, H) for SDPA
         q, k, v = (
-            q_BLNH.transpose(1, 2),
-            k_BLNH.transpose(1, 2),
-            v_BLNH.transpose(1, 2),
+            q_BLHK.transpose(1, 2),
+            k_BLHK.transpose(1, 2),
+            v_BLHV.transpose(1, 2),
         )
         batch, num_head_q, seqlen_q, head_dim_qk = q.shape
         batch_k, num_head_kv, seqlen_kv, head_dim_qk_k = k.shape
@@ -57,7 +58,6 @@ class LPScaledDotProductAttention(ScaledDotProductAttention):
         assert num_head_kv == num_head_kv_v
         assert head_dim_qk == head_dim_qk_k
         assert seqlen_kv == seqlen_kv_v
-        assert self.attn_func is not None
 
         sm_scale = head_dim_qk**(-0.5) if scale is None else scale
         o = self.attn_func(
@@ -77,5 +77,4 @@ class LPScaledDotProductAttention(ScaledDotProductAttention):
             use_exp2=True,
             layout="bhsd",
         )[0]
-        # Transpose back to (B, L, N, H)
         return o.transpose(1, 2)

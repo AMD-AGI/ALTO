@@ -45,7 +45,7 @@ Recipe YAML follows the same general shape as [llm-compressor](https://github.co
 
 | Model | Integration notes |
 |--------|-------------------|
-| **[Llama 3](alto/models/llama3)** | * Extended [state dict adapter](alto/models/llama3/state_dict_adapter.py) for Hugging Face Safetensors with observer/modifier state; <br/>* [patcher](alto/models/patcher.py) keeps query/key projections in the Transformers layout for RoPE; <br/> * Config registry hooks for TorchTitan. |
+| **[Llama 3](alto/models/llama3)** | * Extended [state dict adapter](alto/models/llama3/state_dict_adapter.py) for observer and modifier state; <br/> * Config registry hooks for TorchTitan. |
 | **[DeepSeek V3](alto/models/deepseek_v3)** | Config registry hooks for TorchTitan. |
 | **[GPT-OSS](alto/models/gpt_oss)** | Config registry hooks for TorchTitan. |
 
@@ -87,7 +87,7 @@ pip install -e .
 Example (Llama 3 registry pattern):
 
 ```python
-from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.components.model_converter import ModelConvertersContainer
 from alto.components.converter import ModelOptConverter
 
 config.model_converters = ModelConvertersContainer.Config(
@@ -97,7 +97,7 @@ config.model_converters = ModelConvertersContainer.Config(
 )
 ```
 
-See [`alto/models/llama3/config_registry.py`](alto/models/llama3/config_registry.py) for full trainer configs.
+Each model's [`config_registry.py`](alto/models/llama3/config_registry.py) starts from the upstream recipe when one exists, then restores the ALTO dataset, batch, checkpoint, and modifier settings. `examples/run.sh` selects ALTO's trainer through `TRAIN_FILE` (default `alto.train`).
 
 ### Launch training
 
@@ -107,25 +107,27 @@ From the repository root, the shared launcher wraps `torchrun` and `python -m al
 NGPU=8 MODULE=llama3 CONFIG=your_config_name ./examples/run.sh
 ```
 
+Extra arguments are forwarded to `alto.train`. Besides the TorchTitan loader options (`--override`, `--output-dir`, `--resume-step`, ...), dotted config field overrides are accepted, e.g. `--training.steps 10 --checkpointer.folder ckpt`. Overrides are applied after the config function runs, so fields baked into the model config (such as the sequence length) must be changed in the config function instead.
+
 Environment variables (see [`examples/run.sh`](examples/run.sh)):
 
 | Variable | Role |
 |----------|------|
 | `NGPU` | Processes per node (default `8`). |
-| `MODULE` | TorchTitan module name (`llama3`, `gpt_oss`, …). |
+| `MODULE` | Model name (`llama3`, `gpt_oss`, …) resolving to `alto.models.<name>.config_registry`, or a fully qualified module. |
 | `CONFIG` | Registered config function name. |
 | `TRAIN_FILE` | Python module for training entrypoint (default `alto.train`). |
-| `COMM_MODE` | Optional: `fake_backend` or `local_tensor` for config checks / single-GPU debugging. |
+| `COMM_MODE` | Optional: `fake_backend` for config checks with fake process groups. |
 
 ## Examples
 
-### GPT-OSS 20B — MXFP4 Training
+### GPT-OSS — MXFP4 Training
 
 - Recipe: [`alto/models/gpt_oss/configs/lpt_recipe.yaml`](alto/models/gpt_oss/configs/lpt_recipe.yaml)
 
   uses `LowPrecisionTrainingModifier` with `scheme: "mxfp4"`.
 
-- Config: [`gpt_oss_20b_lpt`](alto/models/gpt_oss/config_registry.py) in the GPT-OSS registry.
+- Config: [`gpt_oss_20b_lpt`](alto/models/gpt_oss/config_registry.py). Upstream does not publish a 20B recipe, so this config builds the `20b` flavor and keeps ALTO's pretraining batch, learning rate, and Megatron data settings. [`gpt_oss_debugmodel_lpt`](alto/models/gpt_oss/config_registry.py) remains available for a small upstream debug run.
 
 - Run:
 
@@ -140,8 +142,8 @@ training_stage:
   lpt_modifiers:
     LowPrecisionTrainingModifier:
       scheme: "mxfp4"          # also supports "nvfp4" (plus "mxfp8_e4m3" / "mxfp8_e5m2")
-      targets: ["Linear", "GptOssGroupedExperts"]
-      ignore: ["output", "re:.*\\.router\\.gate"]
+      targets: ["Linear", "GptOssGroupedLinear"]
+      ignore: ["lm_head", "re:.*\\.router\\.gate"]
       use_2dblock_x: false
       use_2dblock_w: true
       use_hadamard: true
@@ -164,7 +166,7 @@ TorchTitan typically saves checkpoints in PyTorch DCP format; you can convert to
 
 ```bash
 python ./alto/utils/exportation/export.py \
-  llama3 llama3_1b_opt \
+  alto.models.llama3.config_registry llama3_1b_opt \
   --tasks wikitext
 ```
 

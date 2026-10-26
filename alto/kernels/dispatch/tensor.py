@@ -13,7 +13,6 @@ from torch.distributed._tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torchao.utils import TorchAOBaseTensor
-from torchtitan.tools.logging import logger
 
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import _quantize_then_mxfp_scaled_grouped_mm
@@ -27,6 +26,7 @@ from alto.kernels.fp4.amdfp4 import (
 from alto.kernels.mxfp8.mxfp8_linear import _to_mxfp8_then_scaled_mm
 from alto.kernels.mxfp8.mxfp8_grouped_gemm import _quantize_then_mxfp8_scaled_grouped_mm
 from .config import TrainingOpConfig
+
 
 aten = torch.ops.aten
 

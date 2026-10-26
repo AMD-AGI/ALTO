@@ -57,7 +57,8 @@ CHECKPOINT_FOLDER=${CHECKPOINT_FOLDER:-"./outputs/ckpt_${CONFIG}_$(date +%Y%m%d_
 
 exec bash examples/run.sh \
     --hf_assets_path "${MODEL_PATH}" \
-    --checkpoint.initial_load_path "${MODEL_PATH}" \
-    --checkpoint.folder "${CHECKPOINT_FOLDER}" \
+    --checkpointer.initial_load_path "${MODEL_PATH}" \
+    --checkpointer.initial_load_in_hf true \
+    --checkpointer.folder "${CHECKPOINT_FOLDER}" \
     --validator.steps "${VALIDATOR_STEPS}" \
     "$@"

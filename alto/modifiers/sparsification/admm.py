@@ -15,11 +15,12 @@
 
 import torch
 from torch.nn import Module
-from torchtitan.tools.logging import logger
+from torchtitan.observability import structured_logger as sl
 
-from alto.modifiers.sparsification.base import SparsityModifierBase
+from alto.modifiers.sparsification.base import SparsityModifierBase, flatten_output_dims
 from alto.observers.hessian import PRECISION, HessianObserver
 from alto.utils.pytorch.module import TransformerConv1D
+
 
 __all__ = ["AdmmModifier"]
 
@@ -87,7 +88,7 @@ class AdmmModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
+            sl.log_trace_message("alto.modifiers.sparsification.admm.info", f"Sparsifying {name} using {num_samples.item()} samples")
             assert isinstance(observer, HessianObserver), "ADMMModifier requires hessian observer"
             sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
@@ -125,6 +126,7 @@ class AdmmModifier(SparsityModifierBase):
             W = W.flatten(1)
         elif TransformerConv1D and isinstance(module, TransformerConv1D):
             W.transpose_(0, 1)
+        W = flatten_output_dims(W)
         num_columns = W.shape[1]
 
         # Symmetric normalization: H' = H / (sqrt(diag)*sqrt(diag)^T), W' = W * norm (column scaling)

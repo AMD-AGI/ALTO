@@ -8,11 +8,10 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.protocols.model_converter import ModelConverter
+from torchtitan.components.model_converter import ModelConverter
 from torchtitan.config import Configurable
 
-from torchtitan.distributed import ParallelDims
-from torchtitan.tools.logging import logger
+from torchtitan.distributed import ParallelismContext
 
 from alto.config import Recipe
 
@@ -33,24 +32,31 @@ class ModelOptConverter(ModelConverter, Configurable):
         self,
         config: Config,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext | None,
         model_compile_enabled: bool,
     ):
-        # if parallel_dims is not None:
-        #     assert (not parallel_dims.dp_enabled), "Model optimizer does not yet support data parallelism"
-        #     assert (not parallel_dims.tp_enabled), "Model optimizer does not yet support tensor parallelism"
-        #     assert (not parallel_dims.cp_enabled), "Model optimizer does not yet support context parallelism"
+        # if parallelism_context is not None:
+        #     assert (not parallelism_context.dp_enabled), "Model optimizer does not yet support data parallelism"
+        #     assert (not parallelism_context.tp_enabled), "Model optimizer does not yet support tensor parallelism"
+        #     assert (not parallelism_context.cp_enabled), "Model optimizer does not yet support context parallelism"
 
         self.recipe = Recipe.create_instance(config.recipe)
 
     def convert(self, model: nn.Module):
-        from torchtitan.components.checkpoint import CheckpointManager
+        from torchtitan.components.checkpointer import CheckpointManager
         CheckpointManager.allow_partial_load = True
 
         for modifier in self.recipe.modifiers:
             modifier.convert(model)
-            
+
     def convert_config(self, model_config: "BaseModel.Config"):
+        from torchtitan.models.common.linear import Linear
+
+        # Modifiers replace or wrap weights (fake quantization, tensor subclasses,
+        # pruning masks), which the in-place WGRAD autograd function cannot handle.
+        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config):
+            config.inplace_wgrad_accum = False
+
         for modifier in self.recipe.modifiers:
             modifier.convert_config(model_config)
 

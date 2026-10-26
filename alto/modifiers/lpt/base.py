@@ -7,8 +7,9 @@ import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules, match_name
 from pydantic import PrivateAttr, Field, field_validator, model_validator
-from torchtitan.models.common.attention import BaseAttention, ScaledDotProductAttention
-from torchtitan.tools.logging import logger
+from torchtitan.models.common.attention import Attention
+from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers import Modifier
 from alto.kernels.dispatch import (
@@ -20,8 +21,9 @@ from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 from alto.nn import DecomposedLinear
 from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation
 
+
 if TYPE_CHECKING:
-    from torchtitan.protocols.model import BaseModel
+    from torchtitan.models.base import BaseModel
 
 __all__ = ["LowPrecisionTrainingModifier"]
 
@@ -171,9 +173,11 @@ class LowPrecisionTrainingModifier(Modifier):
     def on_convert(self, model: Module, **kwargs) -> bool:
         for scheme_obj, targets in self.resolved_config.items():
             for name, module in match_named_modules(model, targets, self.ignore):
-                if isinstance(module, BaseAttention):
-                    assert isinstance(module.inner_attention, ScaledDotProductAttention), "Only SDPA attention is supported for now."
-                    module.inner_attention = LPScaledDotProductAttention(config=scheme_obj)
+                if isinstance(module, Attention):
+                    # The inner attention is swapped in on_convert_config.
+                    assert isinstance(module.inner_attention, LPScaledDotProductAttention), (
+                        f"{name}: low-precision attention must be configured by convert_config, "
+                        f"got {type(module.inner_attention).__name__}")
                 elif isinstance(module, torch.nn.Linear):
                     if self.lora_rank > 0:
                         module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)
@@ -183,45 +187,70 @@ class LowPrecisionTrainingModifier(Modifier):
                         model.set_submodule(name, module, strict=True)
                     else:
                         swap_params(module, config=scheme_obj, module_name=name)
-                elif module.__class__.__name__.endswith("GroupedExperts"):
+                elif isinstance(module, GroupedLinear) or module.__class__.__name__ == "RoutedExperts":
                     swap_params(module, config=scheme_obj, module_name=name)
                 else:
                     raise ValueError(f"Unsupported module type: {type(module)}")
 
-        logger.info(f"LowPrecisionTrainingModifier converted model: {model}")
+        sl.log_trace_message("alto.modifiers.lpt.base.info", f"LowPrecisionTrainingModifier converted model: {model}")
         return True
 
     def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         # convert configs to enable token alignment
-        from torchtitan.models.common.moe import GroupedExperts
-        from torchtitan.components.quantization.utils import swap_token_dispatcher
+        from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+        from torchtitan.models.common.moe import RoutedExperts
         from torchtitan.models.common.linear import Linear
+        from torchtitan.quantization.utils import swap_token_dispatcher
 
-        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(parent, ALIGN_SIZE_M)
+        for _fqn, config, _parent, _attr in model_config.traverse(RoutedExperts.Config):
+            swap_token_dispatcher(config, ALIGN_SIZE_M)
 
         def is_match(
             name: str,
-            module_cls_name: str,
+            module_cls: type,
             targets: str | Iterable[str],
             ignore: str | Iterable[str] = tuple(),
         ) -> bool:
             targets = [targets] if isinstance(targets, str) else targets
             ignore = [ignore] if isinstance(ignore, str) else ignore
+            # Same semantics as compressed_tensors: any class in the MRO may match.
+            cls_names = {c.__name__ for c in module_cls.__mro__}
 
             return any(
-                match_name(name, target) or module_cls_name == target
+                match_name(name, target) or target in cls_names
                 for target in targets
             ) and not any(
-                match_name(name, ign) or module_cls_name == ign for ign in ignore
+                match_name(name, ign) or ign in cls_names for ign in ignore
             )
+
+        # Select low-precision SDPA in the config so that attention metadata,
+        # keyed by the configured inner attention class, reaches it.
+        for scheme_obj, targets in self.resolved_config.items():
+            for _fqn, config, _parent, _attr in model_config.traverse(Attention.Config):
+                if not is_match(_fqn, config._owner, targets, self.ignore):
+                    continue
+                inner = config.inner_attention
+                assert type(inner) is ScaledDotProductInnerAttention.Config, (
+                    f"{_fqn}: only SDPA attention is supported for now, got {type(inner).__qualname__}")
+                config.inner_attention = LPScaledDotProductAttention.Config(
+                    is_causal=inner.is_causal,
+                    sdpa_backends=inner.sdpa_backends,
+                    training_op_config=scheme_obj,
+                )
+
+        resolved_targets = list(self.resolved_config.values())
+
+        # The in-place WGRAD autograd function computes the weight gradient with
+        # plain GEMMs, bypassing the low-precision tensor subclass dispatch.
+        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config):
+            if any(is_match(_fqn, config._owner, t, self.ignore) for t in resolved_targets):
+                config.inplace_wgrad_accum = False
 
         # replace Linear with DecomposedLinear
         if self.lora_rank > 0:
-            resolved_targets = list(self.resolved_config.values())
             for _fqn, config, parent, attr in model_config.traverse(Linear.Config):
                 for target in resolved_targets:
-                    if is_match(_fqn, "Linear", target, self.ignore):
+                    if is_match(_fqn, config._owner, target, self.ignore):
                         new_config = DecomposedLinear.Config(
                             in_features=config.in_features,
                             out_features=config.out_features,
@@ -241,14 +270,15 @@ class LowPrecisionTrainingModifier(Modifier):
         if self.deosc_step > 0:
             if trainer is None:
                 raise ValueError("Trainer must be passed to the pre_step method to enable weight de-oscillation.")
-            if trainer.step >= self.deosc_step:
+            current_step = trainer.engine.num_completed_steps + 1
+            if current_step >= self.deosc_step:
                 deosc_config = DeOscillationConfig(
                     enable=True,
                     period=self.deosc_period,
                     ratio_threshold=self.deosc_ratio,
                     log_freq=self.deosc_log_freq,
                 )
-                enable_de_oscillation(trainer.optimizers, deosc_config)
+                enable_de_oscillation(trainer.engine.optim.optimizers, deosc_config)
         return True
 
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:

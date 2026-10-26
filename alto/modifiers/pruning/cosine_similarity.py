@@ -15,10 +15,12 @@ import torch
 from torch.nn import Module
 import torch.nn.functional as F
 from pydantic import PrivateAttr
-from torchtitan.tools.logging import logger
+import logging
+from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers.pruning.base import PruningModifierBase
 from alto.observers.input_only import InputOnlyObserver
+
 
 __all__ = ["CosineSimilarityModifier"]
 
@@ -39,14 +41,14 @@ class CosineSimilarityModifier(PruningModifierBase):
         CosineSimilarityModifier:
             sparsity: 0.25
             pruning_dimension: "layer"
-            targets: ["re:.*\\.wq$"]
+            targets: ["re:.*\\.wqkv$"]
             ignore: []
     ```
 
     Lifecycle:
 
     - on_initialize
-        - register InputOnlyObserver hooks on target layers (e.g. wq per block)
+        - register InputOnlyObserver hooks on target layers (e.g. wqkv per block)
     - pre_step / forward / post_step
         - observers collect input activations
         - compress_modules computes BI matrix and removes layers
@@ -55,7 +57,7 @@ class CosineSimilarityModifier(PruningModifierBase):
 
     :param sparsity: Fraction of layers to prune (e.g. 0.25 = remove 25% of layers)
     :param pruning_dimension: Must be "layer" (sublayer not yet supported)
-    :param targets: layer name patterns for observer placement. Use "re:.*\\.wq$"
+    :param targets: layer name patterns for observer placement. Use "re:.*\\.wqkv$"
         to capture the input hidden state at each TransformerBlock boundary.
     :param ignore: patterns to exclude
     """
@@ -88,24 +90,24 @@ class CosineSimilarityModifier(PruningModifierBase):
         for module, observer in self._layer_observers.items():
             name = self._module_names[module]
             num_samples = observer.num_samples
-            logger.info(f"Collected {num_samples.item()} samples for {name}")
+            sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.info", f"Collected {num_samples.item()} samples for {name}")
             assert isinstance(observer, InputOnlyObserver), \
                 "CosineSimilarityModifier requires input_only observer"
 
-            # Extract layer index from name like "layers.0.attention.wq"
+            # Extract layer index from name like "layers.0.attention.qkv_linear.wqkv"
             idx_match = re.search(r'\.(\d+)\.', name)
             if idx_match:
                 layer_idx = int(idx_match.group(1))
                 layer_activations[layer_idx] = observer.stats
 
         if not layer_activations:
-            logger.warning("No layer activations collected, skipping pruning.")
+            sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.warning", "No layer activations collected, skipping pruning.", level=logging.WARNING)
             return
 
-        total_layers = self._model_args.n_layers
+        total_layers = len(self._model_args.layers)
         num_layers_to_prune = int(self.sparsity * total_layers)
         if num_layers_to_prune <= 0:
-            logger.info("No layers to prune (sparsity too low).")
+            sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.info", "No layers to prune (sparsity too low).")
             self._pruning_complete = True
             return
 
@@ -114,7 +116,7 @@ class CosineSimilarityModifier(PruningModifierBase):
 
         # Find layers to prune using greedy search
         self._layers_to_prune = self._find_toprune_layers(bi_matrix, total_layers, num_layers_to_prune)
-        logger.info(f"Layers to prune (indices): {self._layers_to_prune}")
+        sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.info", f"Layers to prune (indices): {self._layers_to_prune}")
 
         # Remove layers from each model part
         for model in self._model_parts:
@@ -158,7 +160,7 @@ class CosineSimilarityModifier(PruningModifierBase):
             for j_pos in range(i_pos + 1, len(sorted_indices)):
                 j = sorted_indices[j_pos]
                 bi_matrix[i][j] = self._compute_bi(layer_activations[i], layer_activations[j])
-                logger.info(f"BI[{i}][{j}] = {bi_matrix[i][j]:.6f}")
+                sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.info", f"BI[{i}][{j}] = {bi_matrix[i][j]:.6f}")
 
         return bi_matrix
 
@@ -212,8 +214,8 @@ class CosineSimilarityModifier(PruningModifierBase):
                             best_prune = candidate
 
             if not best_prune:
-                logger.warning(f"Could not find more layers to prune, "
-                               f"stopping at {len(result)} of {num_layers_to_prune}")
+                sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.warning", f"Could not find more layers to prune, "
+                               f"stopping at {len(result)} of {num_layers_to_prune}", level=logging.WARNING)
                 break
 
             result.extend(best_prune)
@@ -227,14 +229,14 @@ class CosineSimilarityModifier(PruningModifierBase):
 
         Deletes the target TransformerBlocks from model.layers (ModuleDict),
         then re-indexes remaining layers to maintain contiguous string keys
-        ("0", "1", ...) and updates model.n_layers / model.model_args.n_layers.
+        ("0", "1", ...) and updates model.config.layers.
 
         :param model: Transformer model with model.layers (ModuleDict)
         :param layers_to_prune: list of layer indices to remove
         """
         if not hasattr(model, 'layers'):
-            logger.warning(f"Model {type(model).__name__} has no 'layers' attribute, "
-                           f"skipping removal.")
+            sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.warning", f"Model {type(model).__name__} has no 'layers' attribute, "
+                           f"skipping removal.", level=logging.WARNING)
             return
 
         last_layer_idx = max(int(k) for k in model.layers.keys())
@@ -243,16 +245,16 @@ class CosineSimilarityModifier(PruningModifierBase):
         for idx in sorted(layers_to_prune, reverse=True):
             key = str(idx)
             if idx == 0:
-                logger.warning("Layer 0 is the first layer and cannot be pruned, skipping.")
+                sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.warning", "Layer 0 is the first layer and cannot be pruned, skipping.", level=logging.WARNING)
                 continue
             if idx == last_layer_idx:
-                logger.warning(f"Layer {idx} is the last layer and cannot be pruned, skipping.")
+                sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.warning", f"Layer {idx} is the last layer and cannot be pruned, skipping.", level=logging.WARNING)
                 continue
             if key in model.layers:
                 del model.layers[key]
-                logger.info(f"Removed layer {key}")
+                sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.info", f"Removed layer {key}")
             else:
-                logger.warning(f"Layer {key} not found in model, skipping.")
+                sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.warning", f"Layer {key} not found in model, skipping.", level=logging.WARNING)
 
         # Re-index remaining layers to maintain contiguous string keys
         remaining_keys = sorted(model.layers.keys(), key=int)
@@ -264,10 +266,8 @@ class CosineSimilarityModifier(PruningModifierBase):
         # Update model config
         new_n_layers = len(new_layers)
         if hasattr(model, "config"):
-            model.config.n_layers = new_n_layers
-        if hasattr(model, "n_layers"):
-            model.n_layers = new_n_layers
-        logger.info(f"Model now has {new_n_layers} layers "
+            model.config.layers = [model.config.layers[int(k)] for k in remaining_keys]
+        sl.log_trace_message("alto.modifiers.pruning.cosine_similarity.info", f"Model now has {new_n_layers} layers "
                     f"(pruned {len(layers_to_prune)} layers)")
 
         torch.cuda.empty_cache()

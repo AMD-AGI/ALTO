@@ -35,5 +35,5 @@ pruning_stage:
     CosineSimilarityModifier:
       sparsity: 0.25
       pruning_dimension: "layer"
-      targets: ["re:.*\\.wq$"]
+      targets: ["re:.*\\.wqkv$"]
       ignore: ['re:.*lm_head']

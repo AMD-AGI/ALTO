@@ -11,6 +11,7 @@
 
 from abc import abstractmethod
 from functools import partial
+from types import SimpleNamespace
 from typing import Any, Generator, Literal, TYPE_CHECKING
 import gc
 import re
@@ -19,7 +20,8 @@ import torch
 from torch.nn import Module
 from pydantic import Field, PrivateAttr
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.tools.logging import logger
+import logging
+from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.utils import device_type
 
 from alto.observers import Observer
@@ -30,18 +32,66 @@ from alto.utils.pytorch.module import (
     get_prunable_layers,
     match_targets,
 )
+
 if TYPE_CHECKING:
-    from torchtitan.protocols.model import BaseModel
+    from torchtitan.models.base import BaseModel
 
 LAYER_OBSERVER_BASE_NAME = "pruning"
 PruningDim = Literal["attn", "mlp", "attn+mlp", "mlp+attn", "layer", "sublayer", "hidden_dim"]
 
 DEFAULT_SUBLAYER_GROUPS = [
-    ["wq", "wk", "wv", "q_proj", "k_proj", "v_proj"],
+    ["wqkv", "wq", "wk", "wv", "q_proj", "k_proj", "v_proj"],
     ["wo", "o_proj"],
-    ["w1", "w3", "gate_proj", "up_proj"],
+    ["w13", "w1", "w3", "gate_proj", "up_proj"],
     ["w2", "down_proj"],
 ]
+
+
+def _up_proj_rows(weight: torch.Tensor) -> torch.Tensor:
+    """Return the up-projection rows as a view of ``weight``'s storage.
+
+    ``narrow`` only adjusts offset and size, so the result shares the original
+    parameter storage for both ``[2, F, D]`` and flattened ``[2F, D]``.
+    """
+    if weight.ndim == 3 and weight.shape[0] == 2:
+        return weight.narrow(0, 1, 1).squeeze(0)
+    if weight.ndim == 2 and weight.shape[0] % 2 == 0:
+        half = weight.shape[0] // 2
+        return weight.narrow(0, half, half)
+    raise ValueError(f"unsupported fused w13 shape {tuple(weight.shape)}")
+
+
+def mlp_up_proj(name: str, module: Module) -> Module | None:
+    """Return a read-only module-like view of the up projection (``w3``).
+
+    The fused gate/up projection ``w13`` stores ``[w1; w3]`` along its output rows
+    (as ``[2F, D]`` or ``[2, F, D]``); its ``w3`` half is exposed as ``.weight`` for
+    structured-pruning calculations. Do not write through this view: use
+    :func:`copy_mlp_up_proj_weight_` so the original fused parameter is updated.
+    """
+    leaf = name.rsplit(".", 1)[-1]
+    if leaf == "w3":
+        return module
+    if leaf == "w13":
+        return SimpleNamespace(weight=_up_proj_rows(module.weight))
+    return None
+
+
+def copy_mlp_up_proj_weight_(
+    name: str,
+    module: Module,
+    weight: torch.Tensor,
+) -> None:
+    """Copy a pruned up-projection weight into the owning model parameter."""
+    leaf = name.rsplit(".", 1)[-1]
+    if leaf == "w3":
+        module.weight.data.copy_(weight)
+        return
+    if leaf != "w13":
+        raise ValueError(f"{name} is not an MLP up projection")
+
+    destination = _up_proj_rows(module.weight.data)
+    destination.copy_(weight.reshape(destination.shape))
 
 
 def calibrate_input_hook(module: Module, args: Any, base_name: str):
@@ -101,7 +151,7 @@ class PruningModifierBase(Modifier):
             if isinstance(self.sparsity, (list, dict)):
                 if len(self._target_layers) == len(self.sparsity):
                     continue
-                if len(self.sparsity) == m.n_layers:
+                if len(self.sparsity) == len(m.layers):
                     continue
                 if self._is_dict_with_digit_keys(self.sparsity) and len(self.sparsity) == len(
                         get_layers(self.sequential_targets, m)):
@@ -137,7 +187,7 @@ class PruningModifierBase(Modifier):
                     "forward_pre",
                 )
 
-        logger.info(f"{self.__class__.__name__}: {len(self._module_names)} modules, "
+        sl.log_trace_message("alto.modifiers.pruning.base.info", f"{self.__class__.__name__}: {len(self._module_names)} modules, "
                     f"{len(self._sequential_blocks)} sequential blocks")
         return True
 
@@ -154,14 +204,14 @@ class PruningModifierBase(Modifier):
 
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         if not self.sequential:
-            logger.info(f"{self.__class__.__name__}.on_post_step: mode=global-single-forward")
+            sl.log_trace_message("alto.modifiers.pruning.base.info", f"{self.__class__.__name__}.on_post_step: mode=global-single-forward")
             return self._fallback_post_step()
         if not self._captured_inputs:
-            logger.warning("No block inputs captured; falling back to global-single-forward")
+            sl.log_trace_message("alto.modifiers.pruning.base.warning", "No block inputs captured; falling back to global-single-forward", level=logging.WARNING)
             return self._fallback_post_step()
 
         mode = f"sequential-{self.sequential_granularity}"
-        logger.info(f"{self.__class__.__name__}.on_post_step: mode={mode}, "
+        sl.log_trace_message("alto.modifiers.pruning.base.info", f"{self.__class__.__name__}.on_post_step: mode={mode}, "
                     f"{len(self._captured_inputs)} microbatches, "
                     f"{len(self._sequential_blocks)} blocks")
         block_inputs = self._captured_inputs
@@ -171,7 +221,7 @@ class PruningModifierBase(Modifier):
             block_mods = self._block_modules.get(blk_idx, set())
 
             if not block_mods:
-                logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: no target modules, propagating")
+                sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: no target modules, propagating")
                 block_inputs = self._forward_block(block, block_inputs)
                 continue
 
@@ -180,7 +230,7 @@ class PruningModifierBase(Modifier):
             else:
                 self._process_block_whole(blk_idx, blk_name, block, block_inputs, block_mods)
 
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward")
+            sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward")
             block_inputs = self._forward_block(block, block_inputs)
 
         self._cleanup()
@@ -192,7 +242,7 @@ class PruningModifierBase(Modifier):
             if mod in self._layer_observers:
                 self._layer_observers[mod].clear_stats()
                 self._layer_observers[mod].enable()
-        logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
+        sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
                     f"collecting stats, {len(block_mods)} modules")
         with torch.no_grad():
             for inp_args, inp_kwargs in block_inputs:
@@ -200,7 +250,7 @@ class PruningModifierBase(Modifier):
         for mod in block_mods:
             if mod in self._layer_observers:
                 self._layer_observers[mod].disable(clear=False)
-        logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: compressing")
+        sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: compressing")
         self._scoped_compress(block_mods)
 
     def _process_block_sublayer(self, blk_idx, blk_name, block, block_inputs, block_mods):
@@ -218,12 +268,12 @@ class PruningModifierBase(Modifier):
             if not group_mods:
                 continue
             remaining -= group_mods
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
+            sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
                         f"{[mod_name_map.get(m, '?') for m in group_mods]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, group_mods)
 
         if remaining:
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
+            sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
                         f"{[mod_name_map.get(m, '?') for m in remaining]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, remaining)
 
@@ -313,9 +363,9 @@ class PruningModifierBase(Modifier):
                 if isinstance(module, torch.nn.Embedding):
                     continue
                 if name.endswith("output"):
-                    logger.warning("`output` was previously auto-ignored by SparseGPT and Wanda "
+                    sl.log_trace_message("alto.modifiers.pruning.base.warning", "`output` was previously auto-ignored by SparseGPT and Wanda "
                                    "modifiers and is not advised. Please add `re:.*output` to "
-                                   "your ignore list if this was unintentional")
+                                   "your ignore list if this was unintentional", level=logging.WARNING)
                 yield index, name, module
 
     def _initialize_module_name_mappings(self):

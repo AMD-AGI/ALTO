@@ -3,12 +3,10 @@
 # SPDX-License-Identifier: MIT
 
 import importlib
-from unittest.mock import patch
 
 import torch
 
 SUPPORTED_MODELS = ["llama3", "gpt_oss", "deepseek_v3"]
-PATCH_MODULES = ["config_registry", "state_dict_adapter"]
 
 
 class ModelPatcher:
@@ -21,31 +19,37 @@ class ModelPatcher:
         cls._patched = True
 
         cls.patch_fake_quantize()
-        cls.patch_apply_rotary_emb_complex()
 
         for model_name in SUPPORTED_MODELS:
-            model_module = importlib.import_module(f"torchtitan.models.{model_name}")
-            for patch_module in PATCH_MODULES:
-                try:
-                    source_module = importlib.import_module(f"alto.models.{model_name}.{patch_module}")
-                except ImportError:
-                    continue
-                target_module = importlib.import_module(f"torchtitan.models.{model_name}.{patch_module}")
-                for attr_name in source_module.__all__:
-                    patched_attr = getattr(source_module, attr_name)
-                    # print(
-                    #     f"Patching {attr_name} of {model_name}: {patched_attr}")
-                    original_attr = getattr(target_module, attr_name, None)
-                    # print(
-                    #     f"Original {attr_name} of {model_name}: {original_attr}"
-                    # )
-                    setattr(target_module, attr_name, patched_attr)
-                    patch(
-                        f"torchtitan.models.{model_name}.{patch_module}.{attr_name}",
-                        patched_attr,
-                    ).__enter__()
-                    if hasattr(model_module, attr_name):
-                        setattr(model_module, attr_name, patched_attr)
+            cls.patch_state_dict_adapter(model_name)
+
+    @classmethod
+    def patch_state_dict_adapter(cls, model_name: str):
+        """Replace a model's state dict adapter with ALTO's subclass of the same name.
+
+        The trainer builds the adapter from the model class attribute
+        ``state_dict_adapter_cls``; module attributes are patched as well for
+        code that imports the adapter by name.
+        """
+        try:
+            source_module = importlib.import_module(f"alto.models.{model_name}.state_dict_adapter")
+        except ImportError:
+            return
+        model_module = importlib.import_module(f"torchtitan.models.{model_name}")
+        target_module = importlib.import_module(f"torchtitan.models.{model_name}.state_dict_adapter")
+        model_cls_module = importlib.import_module(f"torchtitan.models.{model_name}.model")
+        model_classes = [
+            obj for obj in vars(model_cls_module).values()
+            if isinstance(obj, type) and "state_dict_adapter_cls" in vars(obj)
+        ]
+        for attr_name in source_module.__all__:
+            patched_attr = getattr(source_module, attr_name)
+            for model_cls in model_classes:
+                if model_cls.state_dict_adapter_cls.__name__ == attr_name:
+                    model_cls.state_dict_adapter_cls = patched_attr
+            setattr(target_module, attr_name, patched_attr)
+            if hasattr(model_module, attr_name):
+                setattr(model_module, attr_name, patched_attr)
 
     @classmethod
     def patch_fake_quantize(cls):
@@ -95,34 +99,3 @@ class ModelPatcher:
 
         forward_module.fake_quantize = fake_quantize
 
-    @classmethod
-    def patch_apply_rotary_emb_complex(cls):
-        from torchtitan.models.common.rope import ComplexRoPE
-        original_apply_rotary_emb_complex = ComplexRoPE.apply_rotary_emb
-
-        def apply_rotary_emb_complex(
-            cls,
-            xq: torch.Tensor,
-            xk: torch.Tensor,
-            rope_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            head_dim = xq.shape[-1]
-            xq = xq.reshape(
-                *xq.shape[:-1],
-                2,
-                head_dim // 2,
-            ).transpose(-1, -2).reshape(
-                *xq.shape[:-1],
-                head_dim,
-            ).contiguous()
-            xk = xk.reshape(
-                *xk.shape[:-1],
-                2,
-                head_dim // 2,
-            ).transpose(-1, -2).reshape(
-                *xk.shape[:-1],
-                head_dim,
-            ).contiguous()
-            return original_apply_rotary_emb_complex(xq, xk, rope_cache)
-
-        ComplexRoPE.apply_rotary_emb = classmethod(apply_rotary_emb_complex)

@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import dataclasses
 import importlib
 
 import torch
@@ -22,6 +23,30 @@ class ModelPatcher:
 
         for model_name in SUPPORTED_MODELS:
             cls.patch_state_dict_adapter(model_name)
+
+    @classmethod
+    def patch_model_config(cls, model_config):
+        """Use HF-layout CosSin RoPE for ALTO Llama models only."""
+        from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
+        from torchtitan.models.llama3.model import Llama3Model
+
+        if not isinstance(model_config, Llama3Model.Config):
+            return
+
+        for _fqn, config, parent, attr in model_config.traverse(ComplexRoPE.Config):
+            assert parent is not None and attr is not None
+            if type(config) is ComplexRoPE.Config:
+                setattr(
+                    parent,
+                    attr,
+                    CosSinRoPE.Config(
+                        **{
+                            field.name: getattr(config, field.name)
+                            for field in dataclasses.fields(config)
+                            if field.init
+                        }
+                    ),
+                )
 
     @classmethod
     def patch_state_dict_adapter(cls, model_name: str):

@@ -26,6 +26,7 @@ from torchtitan_recipes.models.llama3 import llama3_8b as _llama3_8b
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel as _llama3_debugmodel
 
 from alto.components.converter import ModelOptConverter
+from alto.models.patcher import ModelPatcher
 
 __all__ = [
     "llama3_debugmodel",
@@ -94,6 +95,7 @@ def _with_sdpa(config: Trainer.Config) -> Trainer.Config:
     """
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
+    ModelPatcher.patch_model_config(config.model)
     return config
 
 
@@ -215,10 +217,12 @@ def _attach(
 
 
 def llama3_debugmodel() -> Trainer.Config:
-    config = _llama3_debugmodel(
-        seq_len=2048,
-        parallelism=ParallelismConfig(),
-        attn_backend="sdpa",
+    config = _with_sdpa(
+        _llama3_debugmodel(
+            seq_len=2048,
+            parallelism=ParallelismConfig(),
+            attn_backend="sdpa",
+        )
     )
     return _prepare(config, steps=0, local_batch=4, global_batch=16, log_freq=None)
 

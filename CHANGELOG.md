@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.0 [dev]
+
+- Changed
+  - **[BREAKING CHANGE]** Vendored TorchTitan is now the 20261023 tree.
+  - Dotted CLI overrides for parallelism and `training.max_context_length` are applied by replaying the recorded `build_model_config` with the original flavor and attention backend. `expert_parallel_degree > 1` disables CUDA graphs because the stock expert-parallel dispatcher synchronizes with the CPU.
+  - Llama 3 uses `CosSinRoPE` so the Hugging Face query/key layout survives the TorchTitan update.
+- Fixed
+
+
 ## v0.1.0 [dev]
 
 - Changed
@@ -7,6 +16,12 @@
   - Dropped Instella-3B model config.
   - Use VarlenAttn instead of FlexAttn for GPT-OSS models.
   - Position ids are always populated by dataloader.
+  - Weight de-oscillation compares weights in BF16 and writes the snapped value back as float.
+  - MXFP4 universal optimal scaling uses the bitwise round path.
+  - Randomized Hadamard Transform uses the default generator and applies the permutation before initialization.
+
+- Fixed
+  - MXFP4 attention sums the quantized softmax tile, so the induced attention weights stay normalized.
 
 
 ## v0.0.2 [dev]

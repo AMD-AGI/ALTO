@@ -96,7 +96,12 @@ def test_gpt_oss_recipe_installs_lpt_modules():
     assert type(layer.feed_forward.routed_experts.w13).__qualname__ == (
         "LPTGptOssGroupedLinear.Config"
     )
-    assert type(layer.attention.inner_attention).__qualname__ == "VarlenInnerAttention.Config"
+    assert type(layer.attention.inner_attention).__qualname__ == (
+        "SlidingWindowVarlenInnerAttention.Config"
+    )
+    assert type(model_config.layers[1].attention.inner_attention).__qualname__ == (
+        "VarlenInnerAttention.Config"
+    )
     assert type(layer.feed_forward.router.gate).__qualname__ == "HiMidLoLinear.Config"
     assert type(model_config.lm_head).__qualname__ == "Linear.Config"
     assert layer.attention.qkv_linear.wqkv.inplace_wgrad_accum is False

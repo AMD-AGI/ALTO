@@ -28,7 +28,7 @@ from alto.components.optimizer import (
     _DeOscillationHook,
     _make_qdq_fn_for,
 )
-from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.config import TrainingOpConfig
 from alto.kernels.fp4 import convert_from_amdfp4, convert_to_amdfp4
 from alto.nn.lpt import lpt_module
 from torchtitan.models.common.linear import Linear

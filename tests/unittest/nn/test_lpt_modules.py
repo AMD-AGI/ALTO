@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.config import TrainingOpConfig
 from alto.models.gpt_oss.config_registry import gpt_oss_debugmodel_lpt
 from alto.modifiers.lpt.base import LowPrecisionTrainingModifier
 from alto.nn.lpt import LPTModule, lpt_module, require_training_op_config

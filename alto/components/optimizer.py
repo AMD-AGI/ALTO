@@ -58,7 +58,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor
 from torchtitan.components.optim import OptimizersContainer
 
-from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.config import TrainingOpConfig
 import logging
 
 logger = logging.getLogger(__name__)

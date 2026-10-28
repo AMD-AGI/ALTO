@@ -7,7 +7,7 @@ from torch.nn import Module
 from compressed_tensors.utils import match_named_modules, match_name
 from pydantic import PrivateAttr, Field, field_validator, model_validator
 from alto.modifiers import Modifier
-from alto.kernels.dispatch import TrainingOpConfig
+from alto.config import TrainingOpConfig
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 from alto.nn.lpt import LPTModule, apply_lpt_module_configs
 from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation

@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import alto.nn.lpt as lpt
-from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.config import TrainingOpConfig
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm import ALIGN_SIZE_M
 from alto.nn.lpt import lpt_module
 from torchtitan.models.common.linear import Linear

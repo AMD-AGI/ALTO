@@ -22,7 +22,7 @@ from torchtitan.config.override import derive
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.linear import GroupedLinear, Linear
 
-from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.config import TrainingOpConfig
 from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import triton_attention_mxfp4
 from alto.kernels.fp4.amdfp4 import (
     _quantize_then_amdfp4_scaled_grouped_mm,

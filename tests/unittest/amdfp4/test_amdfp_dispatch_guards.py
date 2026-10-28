@@ -10,7 +10,7 @@ import pytest
 import torch
 
 import alto.nn.lpt as lpt
-from alto.kernels.dispatch.config import TrainingOpConfig
+from alto.config import TrainingOpConfig
 from alto.kernels.fp4.amdfp4 import ALIGN_SIZE_M
 
 

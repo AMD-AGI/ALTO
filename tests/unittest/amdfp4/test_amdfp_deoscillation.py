@@ -8,8 +8,7 @@ The weight de-oscillation hook rebuilds the forward-path QDQ round trip via
 :func:`alto.components.optimizer._make_qdq_fn_for`.  Before AMD-FP4 support
 was wired in, that factory only knew ``mxfp4`` / ``nvfp4`` and raised
 ``ValueError`` for ``amdfp4`` — so enabling de-oscillation on an AMD-FP4 run
-would have crashed (AMD-FP4 weights reuse the NVFP4 wrapper, which the hook
-already peels).
+would have crashed on the first de-oscillation period.
 
 These tests lock in:
 
@@ -30,8 +29,11 @@ from alto.components.optimizer import (
     _make_qdq_fn_for,
 )
 from alto.kernels.dispatch.config import TrainingOpConfig
-from alto.kernels.dispatch.tensor import NVFP4TrainingWeightWrapperTensor
 from alto.kernels.fp4 import convert_from_amdfp4, convert_to_amdfp4
+from alto.nn.lpt import lpt_module
+from torchtitan.models.common.linear import Linear
+
+LPTLinear = lpt_module(Linear)
 
 
 def _make_config(precision: str, **overrides) -> TrainingOpConfig:
@@ -68,7 +70,7 @@ def test_make_qdq_fn_for_accepts_amdfp4():
 def test_make_qdq_fn_for_still_rejects_non_fp4():
     """Adversarial: a non-FP4 precision must still hit the ``else`` guard, so
     the amdfp4 arm didn't accidentally widen the accepted set."""
-    with pytest.raises(ValueError, match="only supports FP4 wrappers"):
+    with pytest.raises(ValueError, match="only supports FP4 precisions"):
         _make_qdq_fn_for(_make_config("mxfp8_e4m3"))
 
 
@@ -115,37 +117,43 @@ def test_amdfp4_qdq_matches_direct_ue5m3_convert(device):
 # ---------------------------------------------------------------------------
 
 def test_amdfp4_param_is_deosc_eligible():
-    """The hook's eligibility gate must accept amdfp4-wrapped params.  Before
-    this fix it only allowed mxfp4/nvfp4, so AMD-FP4 weights were silently
-    skipped even though ``_make_qdq_fn_for`` supports them — i.e. the path was
-    not actually open end to end."""
-    hook = _DeOscillationHook(DeOscillationConfig(enable=True))
-    w = torch.randn(32, 32, dtype=torch.bfloat16)
-    param = torch.nn.Parameter(
-        NVFP4TrainingWeightWrapperTensor(w, _make_config("amdfp4")),
-        requires_grad=True,
+    """AMD-FP4 LPT weights must be visible to the de-oscillation hook."""
+    config = _make_config("amdfp4")
+    module = LPTLinear(
+        LPTLinear.Config(
+            in_features=32,
+            out_features=32,
+            bias=False,
+            training_op_config=config,
+        )
     )
-    wrapper = hook._wrapper_if_eligible(param)
-    assert wrapper is not None, "amdfp4 param must be eligible for de-oscillation"
-    assert isinstance(wrapper, NVFP4TrainingWeightWrapperTensor)
-    assert wrapper.config.precision == "amdfp4"
+    hook = _DeOscillationHook(DeOscillationConfig(enable=True), [module])
+    tracked = hook._tracked_weight(module.weight)
+    assert tracked is not None, "amdfp4 param must be eligible for de-oscillation"
+    _raw, op_config, axis = tracked
+    assert op_config.precision == "amdfp4"
+    assert axis == module.lpt_qdq_axis
 
 
 def test_amdfp4_deosc_hook_tracks_param(device):
-    """End-to-end through the hook: an amdfp4 wrapper is seeded then QDQ-tracked
-    across a period without raising, proving the gate + factory + hook chain is
-    wired for AMD-FP4."""
-    hook = _DeOscillationHook(DeOscillationConfig(enable=True, period=2))
-    w = torch.randn(32, 32, dtype=torch.bfloat16, device=device)
-    wrapper = NVFP4TrainingWeightWrapperTensor(w, _make_config("amdfp4"))
+    """An AMD-FP4 LPT weight is seeded then QDQ-tracked across a period."""
+    config = _make_config("amdfp4")
+    module = LPTLinear(
+        LPTLinear.Config(
+            in_features=32,
+            out_features=32,
+            bias=False,
+            training_op_config=config,
+        )
+    ).to(device=device, dtype=torch.bfloat16)
+    hook = _DeOscillationHook(DeOscillationConfig(enable=True, period=2), [module])
+    raw, op_config, axis = hook._tracked_weight(module.weight)
     state: dict = {}
 
-    # First call seeds the period (no before/after pair yet).
-    assert hook._step_param(wrapper, state) == (0, 0, False)
+    assert hook._step_storage(raw, op_config, axis, state) == (0, 0, False)
     assert _DeOscillationHook.KEY_PREV in state
 
-    # Move the underlying weight, then take a tracked step.
-    wrapper._data.add_(torch.randn_like(wrapper._data) * 0.01)
-    hook._step_param(wrapper, state)
+    raw.add_(torch.randn_like(raw) * 0.01)
+    hook._step_storage(raw, op_config, axis, state)
     dist_qdq = state[_DeOscillationHook.KEY_DIST_QDQ]
     assert torch.isfinite(dist_qdq).all()

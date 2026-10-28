@@ -6,7 +6,6 @@ from typing import Optional
 
 import torch
 
-from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
 from alto.kernels.hadamard_transform import HadamardFactory, HadamardTransform
 from alto.kernels.dge import dge_bwd
 from .nvfp_quantization import (
@@ -62,7 +61,6 @@ class NVFP4LinearFunction(torch.autograd.Function):
         use_dge: bool = False,
         scale_format: str = "e4m3",
     ):
-        weight = unwrap_weight_wrapper(weight)
         # Align weight dtype with activation so saved QDQ tensors share a
         # common dtype across forward / backward under AMP autocast (matches
         # the MXFP4 ``original_dtype = x.dtype`` contract).

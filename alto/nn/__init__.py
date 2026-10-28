@@ -2,8 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
-from .decomposed_linear import DecomposedLinear
+from .lpt import LPTModule, lpt_module
 
 __all__ = [
-    "DecomposedLinear",
+    "LPTModule",
+    "lpt_module",
 ]

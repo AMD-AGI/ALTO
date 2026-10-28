@@ -19,7 +19,6 @@ from .triton_fp4_ops import (
     make_quantize_e2m1,
     quantize_e2m1,
 )
-from .tensor_wrappers import unwrap_weight_wrapper
 from .ue5m3_ops import (
     UE5M3_EPS,
     UE5M3_EXP_BIAS,
@@ -62,6 +61,5 @@ __all__ = (
     "resolve_expert_indices",
     "triton_quantize_to_ue5m3",
     "ue5m3_uint8_to_f32",
-    "unwrap_weight_wrapper",
     "use_cdna4_grouped_backend",
 )

@@ -3,21 +3,13 @@
 # SPDX-License-Identifier: MIT
 
 from typing import Literal, Iterable, TYPE_CHECKING
-import torch
 from torch.nn import Module
 from compressed_tensors.utils import match_named_modules, match_name
 from pydantic import PrivateAttr, Field, field_validator, model_validator
-from torchtitan.models.common.attention import Attention
-from torchtitan.models.common.linear import GroupedLinear
-
 from alto.modifiers import Modifier
-from alto.kernels.dispatch import (
-    swap_params,
-    TrainingOpConfig,
-    LPScaledDotProductAttention,
-)
+from alto.kernels.dispatch import TrainingOpConfig
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
-from alto.nn import DecomposedLinear
+from alto.nn.lpt import LPTModule, apply_lpt_module_configs
 from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation
 import logging
 
@@ -44,12 +36,6 @@ class LowPrecisionTrainingModifier(Modifier):
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     use_uos: bool = False
-
-    lora_rank: int = 0
-    """
-    Lora rank for the decomposed linear layer.
-    If 0, use the original linear layer.
-    """
 
     deosc_step: int = 0
     """
@@ -99,26 +85,14 @@ class LowPrecisionTrainingModifier(Modifier):
         return value
 
     @model_validator(mode="after")
-    def validate_lora_rank_alignment(self):
-        if self.lora_rank <= 0:
+    def validate_uos(self):
+        if not self.use_uos:
             return self
-
         schemes = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
-        for scheme_name in schemes:
-            if scheme_name in ("nvfp4", "amdfp4"):
-                if self.lora_rank % 16 != 0:
-                    raise ValueError(
-                        f"lora_rank must be divisible by 16 for {scheme_name}, got {self.lora_rank}"
-                    )
-            elif scheme_name in ("mxfp4", "mxfp8_e4m3", "mxfp8_e5m2"):
-                if self.lora_rank % 32 != 0:
-                    raise ValueError(
-                        f"lora_rank must be divisible by 32 for {scheme_name}, got {self.lora_rank}"
-                    )
-
-        if self.use_uos:
-            assert all(scheme_name in ("mxfp4",) for scheme_name in schemes), "UOS is only supported for mxfp4"
-            assert self.clip_mode == "none", "UOS is only supported with clip mode none"
+        if any(scheme_name != "mxfp4" for scheme_name in schemes):
+            raise ValueError("UOS is only supported for mxfp4")
+        if self.clip_mode != "none":
+            raise ValueError("UOS is only supported with clip mode none")
         return self
 
     @field_validator("deosc_step", mode="after")
@@ -173,26 +147,14 @@ class LowPrecisionTrainingModifier(Modifier):
         return self._resolved_config
 
     def on_convert(self, model: Module, **kwargs) -> bool:
-        for scheme_obj, targets in self.resolved_config.items():
+        for _scheme_obj, targets in self.resolved_config.items():
             for name, module in match_named_modules(model, targets, self.ignore):
-                if isinstance(module, Attention):
-                    # The inner attention is swapped in on_convert_config.
-                    assert isinstance(module.inner_attention, LPScaledDotProductAttention), (
-                        f"{name}: low-precision attention must be configured by convert_config, "
-                        f"got {type(module.inner_attention).__name__}")
-                elif isinstance(module, torch.nn.Linear):
-                    if self.lora_rank > 0:
-                        module = DecomposedLinear.from_linear(module, lora_rank=self.lora_rank)
-                        swap_params(module, config=scheme_obj, target_parameter_name="weight")
-                        swap_params(module, config=scheme_obj, target_parameter_name="u")
-                        swap_params(module, config=scheme_obj, target_parameter_name="v")
-                        model.set_submodule(name, module, strict=True)
-                    else:
-                        swap_params(module, config=scheme_obj, module_name=name)
-                elif isinstance(module, GroupedLinear) or module.__class__.__name__ == "RoutedExperts":
-                    swap_params(module, config=scheme_obj, module_name=name)
+                if isinstance(module, LPTModule):
+                    continue
                 else:
-                    raise ValueError(f"Unsupported module type: {type(module)}")
+                    raise ValueError(
+                        f"{name}: expected an initialized LPT module, got {type(module)}"
+                    )
 
         logger.info(f'LowPrecisionTrainingModifier converted model: {model}')
         print(f"converted model: {model}")
@@ -200,9 +162,7 @@ class LowPrecisionTrainingModifier(Modifier):
 
     def on_convert_config(self, model_config: "BaseModel.Config") -> bool:
         # convert configs to enable token alignment
-        from torchtitan.models.common.attention import ScaledDotProductInnerAttention
         from torchtitan.models.common.moe import RoutedExperts
-        from torchtitan.models.common.linear import Linear
         from torchtitan.quantization.utils import swap_token_dispatcher
 
         for _fqn, config, _parent, _attr in model_config.traverse(RoutedExperts.Config):
@@ -226,42 +186,11 @@ class LowPrecisionTrainingModifier(Modifier):
                 match_name(name, ign) or ign in cls_names for ign in ignore
             )
 
-        # Select low-precision SDPA in the config so that attention metadata,
-        # keyed by the configured inner attention class, reaches it.
-        for scheme_obj, targets in self.resolved_config.items():
-            for _fqn, config, _parent, _attr in model_config.traverse(Attention.Config):
-                if not is_match(_fqn, config._owner, targets, self.ignore):
-                    continue
-                inner = config.inner_attention
-                assert type(inner) is ScaledDotProductInnerAttention.Config, (
-                    f"{_fqn}: only SDPA attention is supported for now, got {type(inner).__qualname__}")
-                config.inner_attention = LPScaledDotProductAttention.Config(
-                    is_causal=inner.is_causal,
-                    sdpa_backends=inner.sdpa_backends,
-                    training_op_config=scheme_obj,
-                )
-
-        resolved_targets = list(self.resolved_config.values())
-
-        # The in-place WGRAD autograd function computes the weight gradient with
-        # plain GEMMs, bypassing the low-precision tensor subclass dispatch.
-        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config):
-            if any(is_match(_fqn, config._owner, t, self.ignore) for t in resolved_targets):
-                config.inplace_wgrad_accum = False
-
-        # replace Linear with DecomposedLinear
-        if self.lora_rank > 0:
-            for _fqn, config, parent, attr in model_config.traverse(Linear.Config):
-                for target in resolved_targets:
-                    if is_match(_fqn, config._owner, target, self.ignore):
-                        new_config = DecomposedLinear.Config(
-                            in_features=config.in_features,
-                            out_features=config.out_features,
-                            bias=config.bias,
-                            lora_rank=self.lora_rank,
-                            param_init=config.param_init | DecomposedLinear._EXTRA_INIT,
-                        )
-                        setattr(parent, attr, new_config)
+        apply_lpt_module_configs(
+            model_config,
+            list(self.resolved_config.items()),
+            lambda fqn, owner, targets: is_match(fqn, owner, targets, self.ignore),
+        )
         return True
 
     def on_initialize(self, model_parts: list[Module], **kwargs) -> bool:
@@ -281,7 +210,11 @@ class LowPrecisionTrainingModifier(Modifier):
                     ratio_threshold=self.deosc_ratio,
                     log_freq=self.deosc_log_freq,
                 )
-                enable_de_oscillation(trainer.engine.optim.optimizers, deosc_config)
+                enable_de_oscillation(
+                    trainer.engine.optim.optimizers,
+                    deosc_config,
+                    model_parts,
+                )
         return True
 
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:

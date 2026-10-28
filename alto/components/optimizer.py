@@ -41,18 +41,10 @@ are then re-initialized for the next period.
 Scope: which parameters are eligible
 ------------------------------------
 
-The hook only acts on parameters whose storage is wrapped by either
-:class:`~alto.kernels.dispatch.tensor.MXFP4TrainingWeightWrapperTensor` or
-:class:`~alto.kernels.dispatch.tensor.NVFP4TrainingWeightWrapperTensor`
-(directly, or as ``DTensor._local_tensor`` under FSDP2).  Other
-parameters (embeddings, norm scales, biases, MXFP8 weights, ...) are
-silently skipped.  The FP4 format and the per-block scaling layout used
-for ``Q`` come from the wrapper's
-:class:`~alto.kernels.dispatch.config.TrainingOpConfig`, and the
-reduction axis along which QDQ is performed comes from
-``_infer_reduction_axis``.  Reading both from the wrapper guarantees that the
-de-oscillation hook tracks oscillation in exactly the same FP4 grid the
-forward / backward GEMMs see, with no axis inference duplicated here.
+LPT modules expose their plain parameters through
+:meth:`~alto.nn.lpt.LPTModule.iter_lpt_weights`.  The hook uses that
+``TrainingOpConfig`` and the module's declared QDQ axis.  Embeddings,
+norms, biases, and MXFP8 weights are skipped.
 
 """
 
@@ -67,11 +59,6 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.optim import OptimizersContainer
 
 from alto.kernels.dispatch.config import TrainingOpConfig
-from alto.kernels.dispatch.tensor import (
-    MXFP4TrainingWeightWrapperTensor,
-    NVFP4TrainingWeightWrapperTensor,
-    TrainingWeightWrapperBaseTensor,
-)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -83,56 +70,14 @@ __all__ = [
 ]
 
 
-# Wrappers eligible for de-oscillation.  Only the two FP4 variants are
-# included on purpose: MXFP8 has a much wider grid where oscillation is
-# rare, and the bin-center snap we use only really makes sense for FP4.
-_FP4_WRAPPER_TYPES: tuple[type, ...] = (
-    MXFP4TrainingWeightWrapperTensor,
-    NVFP4TrainingWeightWrapperTensor,
-)
-
-
-def _infer_reduction_axis(w: torch.Tensor):
-    if w.dim() == 2:
-        return -1
-    elif w.dim() == 3:
-        return -2
-    else:
-        raise ValueError(f"Unexpected weight shape: {w.shape}")
-
-
-def _peel_to_fp4_wrapper(
-    p: torch.Tensor,
-) -> TrainingWeightWrapperBaseTensor | None:
-    """Return the FP4 wrapper tensor backing *p*, or ``None``.
-
-    Handles three layouts:
-
-    * plain ``nn.Parameter(FP4WrapperTensor(...))``
-    * FSDP2 ``nn.Parameter(DTensor(local=FP4WrapperTensor(...)))``
-    * any of the above un-parameterised (e.g. inside checkpointing utils)
-    """
-    t = p.data if isinstance(p, nn.Parameter) else p
-    if isinstance(t, DTensor):
-        t = t._local_tensor
-    if isinstance(t, _FP4_WRAPPER_TYPES):
-        return t  # type: ignore[return-value]
-    return None
-
-
 QdqFn = Callable[[torch.Tensor, int], torch.Tensor]
 
 
 def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
-    """Build a ``dequant(quant(., axis))`` callable matching the wrapper's
-    forward-path QDQ.
+    """Build a ``dequant(quant(., axis))`` callable matching the forward QDQ.
 
-    The closure runs on the *plain* underlying FP32/BF16 tensor (i.e.
-    ``wrapper._data``), with the same ``is_2d_block`` choice the FP4
-    GEMM applies to the weight operand.  The reduction axis is passed in
-    by the caller (read from ``_infer_reduction_axis``) so the
-    same cache entry serves both ``nn.Linear`` weights (axis ``-1``) and
-    grouped-MM expert weights (axis ``-2``) that share a config.
+    The closure runs on the plain local FP32/BF16 storage.  The reduction
+    axis is passed in by the caller from the owning LPT module.
     """
     from alto.kernels.fp4 import (
         convert_from_amdfp4,
@@ -215,7 +160,7 @@ def _make_qdq_fn_for(cfg: TrainingOpConfig) -> QdqFn:
             return dequantized
     else:
         raise ValueError(
-            f"de-oscillation only supports FP4 wrappers, "
+            f"de-oscillation only supports FP4 precisions, "
             f"got precision={cfg.precision!r}"
         )
 
@@ -272,46 +217,25 @@ class _DeOscillationHook:
     # numeric safety net.
     _EPS = 1.0e-30
 
-    def __init__(self, cfg: DeOscillationConfig) -> None:
+    def __init__(
+        self,
+        cfg: DeOscillationConfig,
+        model_parts: list[nn.Module] | None = None,
+    ) -> None:
         self._cfg = cfg
         # TrainingOpConfig is @dataclass(unsafe_hash=True), so the same
         # config object (or two equal ones) maps to a single cached QDQ.
-        # The cached closure takes ``(tensor, axis)``; the axis is read
-        # per-call from ``_infer_reduction_axis`` and is not
-        # baked into the cache key.
+        # The cached closure takes ``(tensor, axis)``.  The axis comes from
+        # the owning LPT module.
         self._qdq_cache: dict[TrainingOpConfig, QdqFn] = {}
+        self._lpt_weights = _index_lpt_weights(model_parts or [])
         # Counts how many periods have completed since the hook was
         # installed; used only for log throttling.
         self._periods_completed = 0
 
-    # ---- eligibility --------------------------------------------------
-
-    def _wrapper_if_eligible(
-        self,
-        p: nn.Parameter,
-    ) -> TrainingWeightWrapperBaseTensor | None:
-        """Return the FP4 wrapper if *p* is eligible for de-oscillation.
-
-        Block-size divisibility is *not* re-checked here -- the FP4
-        ``Linear`` / grouped-MM dispatch enforces it on every forward
-        already, so any param that survives one training step is
-        guaranteed to be compatible with the same QDQ kernels we are
-        about to call.
-        """
-        if not p.requires_grad:
-            return None
-        wrapper = _peel_to_fp4_wrapper(p)
-        if wrapper is None:
-            return None
-        cfg = wrapper.config
-        if cfg is None or cfg.precision not in ("mxfp4", "nvfp4", "amdfp4"):
-            return None
-        return wrapper
-
     # ---- per-config QDQ ----------------------------------------------
 
-    def _qdq_for(self, wrapper: TrainingWeightWrapperBaseTensor) -> QdqFn:
-        cfg = wrapper.config
+    def _qdq_for(self, cfg: TrainingOpConfig) -> QdqFn:
         fn = self._qdq_cache.get(cfg)
         if fn is None:
             fn = _make_qdq_fn_for(cfg)
@@ -326,12 +250,13 @@ class _DeOscillationHook:
         n_total = 0
         for group in optimizer.param_groups:
             for p in group["params"]:
-                wrapper = self._wrapper_if_eligible(p)
-                if wrapper is None:
+                tracked = self._tracked_weight(p)
+                if tracked is None:
                     continue
+                raw, op_config, axis = tracked
                 state = optimizer.state[p]
-                reset_count, total_count, did_reset = self._step_param(
-                    wrapper, state
+                reset_count, total_count, did_reset = self._step_storage(
+                    raw, op_config, axis, state
                 )
                 if did_reset:
                     triggered_params += 1
@@ -349,18 +274,29 @@ class _DeOscillationHook:
 
     # ---- per-parameter update ----------------------------------------
 
-    def _step_param(
+    def _tracked_weight(
         self,
-        wrapper: TrainingWeightWrapperBaseTensor,
+        param: nn.Parameter,
+    ) -> tuple[torch.Tensor, TrainingOpConfig, int] | None:
+        """Return local storage, config, and QDQ axis for an eligible parameter."""
+        if not param.requires_grad:
+            return None
+        tracked = self._lpt_weights.get(id(param))
+        if tracked is None:
+            return None
+        op_config, axis = tracked
+        return _local_storage(param), op_config, axis
+
+    def _step_storage(
+        self,
+        raw: torch.Tensor,
+        op_config: TrainingOpConfig,
+        axis: int,
         state: dict[str, Any],
     ) -> tuple[int, int, bool]:
         """Track movement, maybe reset, return ``(n_reset, n_total, did_reset)``."""
         cfg = self._cfg
-        # ``raw`` is the plain FP32/BF16 storage backing the wrapper.
-        # All math runs on it directly so we never accidentally go
-        # through __torch_function__ (which would re-enter the FP4 GEMM
-        # dispatch).
-        raw = wrapper._data
+        # ``raw`` is the plain local FP32/BF16 storage.
         w_now = raw.detach().bfloat16()
 
         if self.KEY_PREV not in state or self.KEY_STEP not in state:
@@ -375,8 +311,7 @@ class _DeOscillationHook:
         dist_w = state[self.KEY_DIST_FP]
         dist_w_qdq = state[self.KEY_DIST_QDQ]
 
-        qdq_fn = self._qdq_for(wrapper)
-        axis = _infer_reduction_axis(w_now)
+        qdq_fn = self._qdq_for(op_config)
         w_qdq = qdq_fn(w_now, axis)
         prev_qdq = qdq_fn(prev, axis)
         dist_w.add_((w_now - prev).abs())
@@ -396,7 +331,7 @@ class _DeOscillationHook:
         total_count = dist_w.numel()
         if reset_mask.any():
             reset_count = int(reset_mask.sum().item())
-            # Snap into the wrapper's underlying storage in place; the
+            # Snap into the parameter storage in place; the
             # FP4 GEMM dispatch on the next forward will read this new
             # value.
             raw[reset_mask] = w_qdq[reset_mask].float()
@@ -418,7 +353,7 @@ class _DeOscillationHook:
         """Allocate (or zero) per-parameter de-oscillation state.
 
         State tensors are *plain* tensors that share dtype, shape and
-        device with the wrapper's underlying storage.  They are stored
+        device with the parameter storage.  They are stored
         in ``optimizer.state[p]`` directly so they ride along with the
         AdamW moments through the standard optimizer state dict path.
         """
@@ -433,10 +368,39 @@ class _DeOscillationHook:
             state[self.KEY_PREV].copy_(w)
 
 
-def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillationConfig) -> None:
+def _local_storage(param: nn.Parameter) -> torch.Tensor:
+    """Return the tensor storage owned by this rank."""
+    data = param.data
+    if isinstance(data, DTensor):
+        return data._local_tensor
+    return data
+
+
+def _index_lpt_weights(
+    model_parts: list[nn.Module],
+) -> dict[int, tuple[TrainingOpConfig, int]]:
+    from alto.nn.lpt import LPTModule
+
+    specs: dict[int, tuple[TrainingOpConfig, int]] = {}
+    for part in model_parts:
+        for module in part.modules():
+            if not isinstance(module, LPTModule):
+                continue
+            for param, op_config, axis in module.iter_lpt_weights():
+                if op_config.precision not in ("mxfp4", "nvfp4", "amdfp4"):
+                    continue
+                specs[id(param)] = (op_config, axis)
+    return specs
+
+
+def enable_de_oscillation(
+    optimizers: OptimizersContainer,
+    config: DeOscillationConfig,
+    model_parts: list[nn.Module] | None = None,
+) -> None:
     if not config.enable or de_oscillation_enabled(optimizers):
         return
-    hook = _DeOscillationHook(config)
+    hook = _DeOscillationHook(config, model_parts)
     for opt in optimizers.optimizers:
         opt.register_step_post_hook(hook)
     logger.info(f'[de-osc] enabled period={config.period} ratio_threshold={config.ratio_threshold} log_freq={config.log_freq}')

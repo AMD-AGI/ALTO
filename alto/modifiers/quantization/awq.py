@@ -17,7 +17,6 @@ from compressed_tensors.utils import getattr_chain, match_named_modules
 from pydantic import PrivateAttr
 from torch.nn import Module
 import logging
-from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.utils import device_type
 
 from alto.observers.base import Observer
@@ -25,6 +24,8 @@ from alto.observers.activation_scale import ActivationScaleObserver
 from .base import QuantizationModifier
 from .calibration import calibrate_activations, update_weight_zp_scale
 from .mapping import LayerMapping, resolve_mappings
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["AWQModifier"]
@@ -114,7 +115,7 @@ class AWQModifier(QuantizationModifier):
                 self._block_mappings[blk_idx] = [
                     mp for mp in self._resolved_mappings if mp.smooth_name.startswith(blk_name + ".")
                 ]
-        sl.log_trace_message("alto.modifiers.quantization.awq.info", f"AWQModifier: {len(self._resolved_mappings)} mappings, {len(self._awq_observers)} observers")
+        logger.info(f'AWQModifier: {len(self._resolved_mappings)} mappings, {len(self._awq_observers)} observers')
         return result
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
@@ -206,7 +207,7 @@ class AWQModifier(QuantizationModifier):
         obs = self._awq_observers[first_bl]
         x_max = obs.stats
         if x_max is None or x_max.sum() == 0:
-            sl.log_trace_message("alto.modifiers.quantization.awq.warning", f"No activation data for {mapping.smooth_name}, skipping", level=logging.WARNING)
+            logger.warning(f'No activation data for {mapping.smooth_name}, skipping')
             return
         x_max = x_max.clone()
         best_error, best_scales = float("inf"), None
@@ -228,8 +229,8 @@ class AWQModifier(QuantizationModifier):
                 best_error = error
                 best_scales = scales.clone()
         if best_scales is None or torch.isnan(best_scales).any():
-            sl.log_trace_message("alto.modifiers.quantization.awq.warning", f"AWQ search failed for {mapping.smooth_name}", level=logging.WARNING)
+            logger.warning(f'AWQ search failed for {mapping.smooth_name}')
             return
         s = best_scales.to(mapping.smooth_layer.weight.device)
-        sl.log_trace_message("alto.modifiers.quantization.awq.info", f"  AWQ {mapping.smooth_name}: scale min={s.min():.4f} max={s.max():.4f} mean={s.mean():.4f}")
+        logger.info(f'  AWQ {mapping.smooth_name}: scale min={s.min():.4f} max={s.max():.4f} mean={s.mean():.4f}')
         _scale_ln_fcs(mapping.smooth_layer, mapping.balance_layers, s)

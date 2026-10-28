@@ -22,13 +22,14 @@ from compressed_tensors.utils import getattr_chain, match_named_modules
 from pydantic import PrivateAttr
 from torch.nn import Module
 import logging
-from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.utils import device_type
 
 from alto.observers.base import Observer
 from alto.observers.hessian import PRECISION, HessianGPTQObserver
 from .base import QuantizationModifier
 from .calibration import calibrate_activations, update_weight_zp_scale
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["GPTQModifier"]
@@ -87,7 +88,7 @@ class GPTQModifier(QuantizationModifier):
                 )
                 self._hessian_observers[module] = obs
 
-        sl.log_trace_message("alto.modifiers.quantization.gptq.info", f"GPTQModifier: {len(self._hessian_observers)} Hessian observers")
+        logger.info(f'GPTQModifier: {len(self._hessian_observers)} Hessian observers')
         return result
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
@@ -165,7 +166,7 @@ class GPTQModifier(QuantizationModifier):
     def _gptq_quantize(self, module: Module):
         obs = self._hessian_observers[module]
         quant_args = getattr_chain(module, "quantization_scheme.weights")
-        sl.log_trace_message("alto.modifiers.quantization.gptq.info", f"Quantizing {self._hessian_names[module]} ({obs.num_samples} samples)")
+        logger.info(f'Quantizing {self._hessian_names[module]} ({obs.num_samples} samples)')
 
         weight_shape = module.weight.shape
         W_orig = _flatten_output_dims(module.weight.data.clone())
@@ -191,7 +192,7 @@ class GPTQModifier(QuantizationModifier):
         )
         module.weight.data.copy_(W_q.reshape(weight_shape).to(module.weight.dtype))
         module.quantization_status = QuantizationStatus.COMPRESSED
-        sl.log_trace_message("alto.modifiers.quantization.gptq.info", f"  {self._hessian_names[module]}: loss={loss:.6f}")
+        logger.info(f'  {self._hessian_names[module]}: loss={loss:.6f}')
 
 
 # ======================================================================
@@ -234,7 +235,7 @@ def _gptq_block_quantize(W, H, scale, zp, quant_args, global_scale, blocksize, d
         H = torch.cholesky_inverse(H)
         Hinv = torch.linalg.cholesky(H, upper=True)
     except torch._C._LinAlgError:
-        sl.log_trace_message("alto.modifiers.quantization.gptq.warning", "Hessian inversion failed, falling back to RTN.", level=logging.WARNING)
+        logger.warning('Hessian inversion failed, falling back to RTN.')
         Hinv = torch.eye(num_cols, dtype=PRECISION, device=H.device)
 
     Q, losses = torch.zeros_like(W), torch.zeros(num_rows, device=W.device)

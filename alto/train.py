@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import logging
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -14,6 +15,10 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer as TitanTrainer
 
 from alto.components.converter import ModelOptConverter
+from alto.models.build_record import rebuild_recorded_model
+
+logger = logging.getLogger(__name__)
+
 
 def log_calibration(
     metrics_processor: MetricsProcessor,
@@ -289,11 +294,12 @@ def main() -> None:
     from torchtitan.observability.logging import init_logger
 
     init_logger()
-    sl.log_trace_message("alto.torchtitan_version", f"torchtitan version: {torchtitan.__version__}")
+    logger.info(f"torchtitan version: {torchtitan.__version__}")
 
     loader_args, overrides = split_field_overrides(sys.argv[1:])
     config = ConfigLoader().load(loader_args)
     apply_field_overrides(config, overrides)
+    rebuild_recorded_model(config)
     sl.init_structured_logger(
         source="training",
         output_dir=config.dump_folder,

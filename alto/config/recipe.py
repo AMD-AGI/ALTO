@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional, Union
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 import logging
-from torchtitan.observability import structured_logger as sl
 
 from ..modifiers import Modifier, ModifierFactory
 from .utils import (
@@ -26,6 +25,8 @@ from .utils import (
     filter_dict,
     get_yaml_serializable_dict,
 )
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["Recipe"]
@@ -73,7 +74,7 @@ class Recipe(BaseModel):
             group_name will be assigned.
         :return: The Recipe instance created from the modifiers
         """
-        sl.log_trace_message("alto.config.recipe.info", "Creating recipe from modifiers")
+        logger.info('Creating recipe from modifiers')
 
         if isinstance(modifiers, Modifier):
             modifiers = [modifiers]
@@ -135,13 +136,12 @@ class Recipe(BaseModel):
         if not os.path.isfile(path_or_modifiers):
             # not a local file
             # assume it's a string
-            sl.log_trace_message("alto.config.recipe.debug", "Could not initialize recipe as a file path or zoo stub, "
-                                 "attempting to process as a string.", level=logging.DEBUG)
-            sl.log_trace_message("alto.config.recipe.debug", f"Input string: {path_or_modifiers}", level=logging.DEBUG)
+            logger.debug('Could not initialize recipe as a file path or zoo stub, attempting to process as a string.')
+            logger.debug(f'Input string: {path_or_modifiers}')
             obj = _load_json_or_yaml_string(path_or_modifiers)
             return cls.from_dict(filter_dict(obj, target_stage=target_stage))
         else:
-            sl.log_trace_message("alto.config.recipe.info", f"Loading recipe from file {path_or_modifiers}")
+            logger.info(f'Loading recipe from file {path_or_modifiers}')
 
         with open(path_or_modifiers, "r") as file:
             content = file.read().strip()

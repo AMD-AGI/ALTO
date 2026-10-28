@@ -15,11 +15,13 @@
 
 import torch
 from torch.nn import Module
-from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers.sparsification.base import SparsityModifierBase, flatten_output_dims
 from alto.observers.hessian import PRECISION, HessianObserver
 from alto.utils.pytorch.module import TransformerConv1D
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["AdmmModifier"]
@@ -88,7 +90,7 @@ class AdmmModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            sl.log_trace_message("alto.modifiers.sparsification.admm.info", f"Sparsifying {name} using {num_samples.item()} samples")
+            logger.info(f'Sparsifying {name} using {num_samples.item()} samples')
             assert isinstance(observer, HessianObserver), "ADMMModifier requires hessian observer"
             sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,

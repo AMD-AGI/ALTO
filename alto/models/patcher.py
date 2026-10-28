@@ -21,7 +21,10 @@ class ModelPatcher:
 
         cls.patch_fake_quantize()
 
+        from alto.models.build_record import install_build_recorder
+
         for model_name in SUPPORTED_MODELS:
+            install_build_recorder(model_name)
             cls.patch_state_dict_adapter(model_name)
 
     @classmethod

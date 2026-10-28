@@ -11,7 +11,6 @@
 
 import torch
 from torch.nn import Module
-from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers.pruning.base import (
     PruningModifierBase,
@@ -20,6 +19,9 @@ from alto.modifiers.pruning.base import (
 )
 from alto.observers.hessian import PRECISION, HessianObserver
 from alto.utils.pytorch.module import TransformerConv1D
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["AdmmStructuredModifier"]
@@ -79,7 +81,7 @@ class AdmmStructuredModifier(PruningModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            sl.log_trace_message("alto.modifiers.pruning.admm_structured.info", f"Pruning {name} using {num_samples.item()} samples")
+            logger.info(f'Pruning {name} using {num_samples.item()} samples')
             assert isinstance(observer, HessianObserver), \
                 "AdmmStructuredModifier requires hessian observer"
 

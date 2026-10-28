@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 
 from torch.nn import Module
 import logging
-from torchtitan.observability import structured_logger as sl
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["LayerMapping", "resolve_mappings"]
@@ -85,8 +86,7 @@ def resolve_mappings(
                         break
 
             if not balance_modules:
-                sl.log_trace_message("alto.modifiers.quantization.mapping.warning", f"SmoothQuant/AWQ: no balance layers found for "
-                               f"{smooth_name}, skipping", level=logging.WARNING)
+                logger.warning(f'SmoothQuant/AWQ: no balance layers found for {smooth_name}, skipping')
                 continue
 
             resolved.append(

@@ -21,7 +21,6 @@ from torch.nn import Module
 from pydantic import Field, PrivateAttr
 from torchtitan.models.common.decoder import Decoder
 import logging
-from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.utils import device_type
 
 from alto.observers import Observer
@@ -32,6 +31,8 @@ from alto.utils.pytorch.module import (
     get_prunable_layers,
     match_targets,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.models.base import BaseModel
@@ -187,8 +188,7 @@ class PruningModifierBase(Modifier):
                     "forward_pre",
                 )
 
-        sl.log_trace_message("alto.modifiers.pruning.base.info", f"{self.__class__.__name__}: {len(self._module_names)} modules, "
-                    f"{len(self._sequential_blocks)} sequential blocks")
+        logger.info(f'{self.__class__.__name__}: {len(self._module_names)} modules, {len(self._sequential_blocks)} sequential blocks')
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
@@ -204,16 +204,14 @@ class PruningModifierBase(Modifier):
 
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         if not self.sequential:
-            sl.log_trace_message("alto.modifiers.pruning.base.info", f"{self.__class__.__name__}.on_post_step: mode=global-single-forward")
+            logger.info(f'{self.__class__.__name__}.on_post_step: mode=global-single-forward')
             return self._fallback_post_step()
         if not self._captured_inputs:
-            sl.log_trace_message("alto.modifiers.pruning.base.warning", "No block inputs captured; falling back to global-single-forward", level=logging.WARNING)
+            logger.warning('No block inputs captured; falling back to global-single-forward')
             return self._fallback_post_step()
 
         mode = f"sequential-{self.sequential_granularity}"
-        sl.log_trace_message("alto.modifiers.pruning.base.info", f"{self.__class__.__name__}.on_post_step: mode={mode}, "
-                    f"{len(self._captured_inputs)} microbatches, "
-                    f"{len(self._sequential_blocks)} blocks")
+        logger.info(f'{self.__class__.__name__}.on_post_step: mode={mode}, {len(self._captured_inputs)} microbatches, {len(self._sequential_blocks)} blocks')
         block_inputs = self._captured_inputs
         n_blocks = len(self._sequential_blocks)
 
@@ -221,7 +219,7 @@ class PruningModifierBase(Modifier):
             block_mods = self._block_modules.get(blk_idx, set())
 
             if not block_mods:
-                sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: no target modules, propagating")
+                logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: no target modules, propagating')
                 block_inputs = self._forward_block(block, block_inputs)
                 continue
 
@@ -230,7 +228,7 @@ class PruningModifierBase(Modifier):
             else:
                 self._process_block_whole(blk_idx, blk_name, block, block_inputs, block_mods)
 
-            sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward")
+            logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward')
             block_inputs = self._forward_block(block, block_inputs)
 
         self._cleanup()
@@ -242,15 +240,14 @@ class PruningModifierBase(Modifier):
             if mod in self._layer_observers:
                 self._layer_observers[mod].clear_stats()
                 self._layer_observers[mod].enable()
-        sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
-                    f"collecting stats, {len(block_mods)} modules")
+        logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: collecting stats, {len(block_mods)} modules')
         with torch.no_grad():
             for inp_args, inp_kwargs in block_inputs:
                 block(*inp_args, **inp_kwargs)
         for mod in block_mods:
             if mod in self._layer_observers:
                 self._layer_observers[mod].disable(clear=False)
-        sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}]: compressing")
+        logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: compressing')
         self._scoped_compress(block_mods)
 
     def _process_block_sublayer(self, blk_idx, blk_name, block, block_inputs, block_mods):
@@ -268,13 +265,11 @@ class PruningModifierBase(Modifier):
             if not group_mods:
                 continue
             remaining -= group_mods
-            sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
-                        f"{[mod_name_map.get(m, '?') for m in group_mods]}")
+            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: {[mod_name_map.get(m, '?') for m in group_mods]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, group_mods)
 
         if remaining:
-            sl.log_trace_message("alto.modifiers.pruning.base.info", f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
-                        f"{[mod_name_map.get(m, '?') for m in remaining]}")
+            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: {[mod_name_map.get(m, '?') for m in remaining]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, remaining)
 
     def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
@@ -363,9 +358,7 @@ class PruningModifierBase(Modifier):
                 if isinstance(module, torch.nn.Embedding):
                     continue
                 if name.endswith("output"):
-                    sl.log_trace_message("alto.modifiers.pruning.base.warning", "`output` was previously auto-ignored by SparseGPT and Wanda "
-                                   "modifiers and is not advised. Please add `re:.*output` to "
-                                   "your ignore list if this was unintentional", level=logging.WARNING)
+                    logger.warning('`output` was previously auto-ignored by SparseGPT and Wanda modifiers and is not advised. Please add `re:.*output` to your ignore list if this was unintentional')
                 yield index, name, module
 
     def _initialize_module_name_mappings(self):

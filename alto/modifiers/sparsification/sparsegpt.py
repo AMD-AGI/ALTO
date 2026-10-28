@@ -12,11 +12,12 @@
 import torch
 from torch.nn import Module
 import logging
-from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers.sparsification.base import SparsityModifierBase, flatten_output_dims
 from alto.observers.hessian import PRECISION, HessianSparseGPTObserver
 from alto.utils.pytorch.module import TransformerConv1D
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["SparseGPTModifier"]
@@ -83,7 +84,7 @@ class SparseGPTModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            sl.log_trace_message("alto.modifiers.sparsification.sparsegpt.info", f"Sparsifying {name} using {num_samples.item()} samples")
+            logger.info(f'Sparsifying {name} using {num_samples.item()} samples')
             assert isinstance(observer, HessianSparseGPTObserver), \
                 "SparseGPTModifier requires hessian_sparsegpt observer"
             loss, sparsified_weight = self._sparsify_weight(
@@ -145,9 +146,7 @@ class SparseGPTModifier(SparsityModifierBase):
             H = torch.linalg.cholesky(H, upper=True)
             Hinv = H
         except torch._C._LinAlgError:
-            sl.log_trace_message("alto.modifiers.sparsification.sparsegpt.warning", "Failed to invert hessian due to numerical instability. Consider "
-                                 "increasing SparseGPTModifier.dampening_frac, increasing the number "
-                                 "of calibration samples, or shuffling the calibration dataset", level=logging.WARNING)
+            logger.warning('Failed to invert hessian due to numerical instability. Consider increasing SparseGPTModifier.dampening_frac, increasing the number of calibration samples, or shuffling the calibration dataset')
             Hinv = H = torch.eye(num_columns, dtype=H.dtype, device=H.device)
 
         # sparsity mask

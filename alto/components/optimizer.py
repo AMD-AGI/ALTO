@@ -65,7 +65,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
 from torchtitan.components.optim import OptimizersContainer
-from torchtitan.observability import structured_logger as sl
 
 from alto.kernels.dispatch.config import TrainingOpConfig
 from alto.kernels.dispatch.tensor import (
@@ -73,6 +72,9 @@ from alto.kernels.dispatch.tensor import (
     NVFP4TrainingWeightWrapperTensor,
     TrainingWeightWrapperBaseTensor,
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -343,11 +345,7 @@ class _DeOscillationHook:
                 and n_total > 0
             ):
                 pct = n_reset / n_total * 100.0
-                sl.log_trace_message("alto.components.optimizer.info",
-                    f"[de-osc] period#{self._periods_completed} "
-                    f"triggered_params={triggered_params} "
-                    f"reset_ratio={pct:.4f}% ({n_reset}/{n_total})"
-                )
+                logger.info(f'[de-osc] period#{self._periods_completed} triggered_params={triggered_params} reset_ratio={pct:.4f}% ({n_reset}/{n_total})')
 
     # ---- per-parameter update ----------------------------------------
 
@@ -441,12 +439,7 @@ def enable_de_oscillation(optimizers: OptimizersContainer, config: DeOscillation
     hook = _DeOscillationHook(config)
     for opt in optimizers.optimizers:
         opt.register_step_post_hook(hook)
-    sl.log_trace_message("alto.components.optimizer.info",
-        "[de-osc] enabled "
-        f"period={config.period} "
-        f"ratio_threshold={config.ratio_threshold} "
-        f"log_freq={config.log_freq}"
-    )
+    logger.info(f'[de-osc] enabled period={config.period} ratio_threshold={config.ratio_threshold} log_freq={config.log_freq}')
 
 
 def de_oscillation_enabled(optimizers: OptimizersContainer):

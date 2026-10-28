@@ -9,7 +9,6 @@ from compressed_tensors.utils import match_named_modules, match_name
 from pydantic import PrivateAttr, Field, field_validator, model_validator
 from torchtitan.models.common.attention import Attention
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers import Modifier
 from alto.kernels.dispatch import (
@@ -20,6 +19,9 @@ from alto.kernels.dispatch import (
 from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.autotune import ALIGN_SIZE_M
 from alto.nn import DecomposedLinear
 from alto.components.optimizer import DeOscillationConfig, enable_de_oscillation
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
@@ -192,7 +194,8 @@ class LowPrecisionTrainingModifier(Modifier):
                 else:
                     raise ValueError(f"Unsupported module type: {type(module)}")
 
-        sl.log_trace_message("alto.modifiers.lpt.base.info", f"LowPrecisionTrainingModifier converted model: {model}")
+        logger.info(f'LowPrecisionTrainingModifier converted model: {model}')
+        print(f"converted model: {model}")
         return True
 
     def on_convert_config(self, model_config: "BaseModel.Config") -> bool:

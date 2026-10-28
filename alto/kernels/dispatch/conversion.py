@@ -13,9 +13,10 @@ from typing import Callable, Optional, Type
 import torch
 from torch import nn
 import logging
-from torchtitan.observability import structured_logger as sl
 
 from .config import TrainingOpConfig
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -104,7 +105,7 @@ def swap_params(
                 module_prefix = f"{module_name}." if module_name else ""
                 full_param_name = f"{module_prefix}{cur_fqn}{'.' if cur_fqn else ''}{param_name}"
                 if target_parameter_name is None and "bias" in param_name:
-                    sl.log_trace_message("alto.kernels.dispatch.conversion.debug", f"Skipped {full_param_name} because it is a bias parameter", level=logging.DEBUG)
+                    logger.debug(f'Skipped {full_param_name} because it is a bias parameter')
                     continue
                 if not isinstance(param.data, TrainingWeightWrapperBaseTensor):
                     new_param = nn.Parameter(
@@ -112,9 +113,7 @@ def swap_params(
                         requires_grad=param.requires_grad,
                     )
                     setattr(module, param_name, new_param)
-                    sl.log_trace_message("alto.kernels.dispatch.conversion.info",
-                        f"Swapped {full_param_name} to {tensor_cls.__name__}"
-                    )
+                    logger.info(f'Swapped {full_param_name} to {tensor_cls.__name__}')
 
                     def get_name_func_new():
                         orignal_name = module.__class__.__name__

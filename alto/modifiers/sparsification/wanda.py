@@ -12,11 +12,13 @@
 import torch
 from torch.nn import Module
 from torch.distributed.tensor import DTensor, Replicate
-from torchtitan.observability import structured_logger as sl
 
 from alto.modifiers.sparsification.base import SparsityModifierBase, flatten_output_dims
 from alto.observers.per_channel_norm import PRECISION, PerChannelNormObserver
 from alto.utils.pytorch.module import TransformerConv1D
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = ["WandaModifier"]
@@ -71,7 +73,7 @@ class WandaModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            sl.log_trace_message("alto.modifiers.sparsification.wanda.info", f"Sparsifying {name} using {num_samples.item()} samples")
+            logger.info(f'Sparsifying {name} using {num_samples.item()} samples')
             assert isinstance(observer, PerChannelNormObserver), \
                 "WandaModifier requires per_channel_norm observer"
             sparsified_weight, _ = self._sparsify_weight(

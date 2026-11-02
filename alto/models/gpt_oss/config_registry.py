@@ -110,7 +110,7 @@ def gpt_oss_20b() -> Trainer.Config:
         ),
         training=TrainingConfig(
             # Varlen attention has no C4 document cap in this eval config.
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=seq_len,
             max_context_length=model.max_context_length,
             steps=0,
@@ -182,7 +182,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=seq_len,
             num_tokens_per_train_step=16 * seq_len,
             max_context_length=model.max_context_length,
@@ -260,7 +260,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
             ),
         ),
         training=TrainingConfig(
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=seq_len,
             num_tokens_per_train_step=16 * seq_len,
             max_context_length=model.max_context_length,

@@ -68,4 +68,4 @@ def rebuild_recorded_model(config: Any) -> None:
         loss_fn.global_vocab_size = decoder_vocab_size(config.model)
     # The stock expert-parallel dispatcher synchronizes with the CPU.
     if config.parallelism.expert_parallel_degree > 1:
-        config.training.disable_cuda_graphs = True
+        config.training.disable_accelerator_graphs = True

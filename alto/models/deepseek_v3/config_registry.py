@@ -73,7 +73,7 @@ def deepseek_v3_16b() -> Trainer.Config:
     config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.num_tokens_per_microbatch_per_dp_rank = 4096
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
     config.dataloader = GrainDataLoader.Config(
@@ -110,7 +110,7 @@ def deepseek_v3_16b_lpt() -> Trainer.Config:
     config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.num_tokens_per_microbatch_per_dp_rank = 4096
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
     config.dataloader = GrainDataLoader.Config(

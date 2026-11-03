@@ -326,17 +326,18 @@ def convert_to_mxfp4_pytorch(
     else:
         max_abs = torch.amax(torch.abs(max_abs), dim=-1)
 
+    # Round the block magnitude to a power of two, matching the Triton kernel.
+    # UOS uses a larger mantissa bias so 7.25 carries into the next exponent.
+    # ceil(log2(max_abs / 7.25)) is the paper formula and does not match that
+    # rounding away from the cutoff.
+    max_abs = max_abs.contiguous().view(hp_int_dtype)
     if use_uos:
-        scales = torch.ceil(torch.log2(max_abs / 7.25))
-        scales = torch.where(max_abs == 0, 1.0, scales)
-        scales += 127
+        val_to_add = 3 << (hp_mbits - mbits - 3)
     else:
-        # round even (adaptive)
-        max_abs = max_abs.view(hp_int_dtype)
         val_to_add = 1 << (hp_mbits - mbits - 1)
-        mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
-        max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
-        scales = max_abs - target_max_pow2
+    mask = ((1 << (hp_ebits + sbits)) - 1) << hp_mbits
+    max_abs = ((max_abs + val_to_add) & mask) >> hp_mbits
+    scales = max_abs - target_max_pow2
 
     # Today, 2**-127 returns 0 in compile+inductor+triton because it is in the
     # float32 denormal range. For now, manually adjust the fp scale. This is

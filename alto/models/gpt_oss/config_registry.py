@@ -4,7 +4,7 @@
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-from torchtitan.components.data.megatron import megatron_dataset_config
+from torchtitan.components.data.megatron import megatron_packed_dataset
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.model_converter import ModelConvertersContainer
@@ -159,9 +159,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
         ),
         model=model,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=megatron_dataset_config(C4_TRAIN_IDX)
-            ),
+            dataset=megatron_packed_dataset(C4_TRAIN_IDX),
+            shuffle=False,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -201,9 +200,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
             freq=768,
             steps=64,
             dataloader=GrainDataLoader.Config(
-                dataset=ConcatThenSplitPackingConfig(
-                    dataset=megatron_dataset_config(C4_VAL_IDX)
-                ),
+                dataset=megatron_packed_dataset(C4_VAL_IDX),
                 shuffle=False,
             ),
         ),
@@ -237,9 +234,8 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
         ),
         model=model,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(
-                dataset=megatron_dataset_config(C4_TRAIN_IDX)
-            ),
+            dataset=megatron_packed_dataset(C4_TRAIN_IDX),
+            shuffle=False,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -279,9 +275,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
             freq=768,
             steps=64,
             dataloader=GrainDataLoader.Config(
-                dataset=ConcatThenSplitPackingConfig(
-                    dataset=megatron_dataset_config(C4_VAL_IDX)
-                ),
+                dataset=megatron_packed_dataset(C4_VAL_IDX),
                 shuffle=False,
             ),
         ),

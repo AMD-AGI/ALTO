@@ -4,7 +4,7 @@
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-from torchtitan.components.data.megatron import megatron_dataset_config
+from torchtitan.components.data.megatron import megatron_packed_dataset
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.model_converter import ModelConvertersContainer
 from torchtitan.components.validator import Validator
@@ -388,9 +388,8 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.optim.lr_scheduler.decay_ratio = 0.9
     config.optim.lr_scheduler.decay_type = "cosine"
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(
-            dataset=megatron_dataset_config(C4_TRAIN_IDX)
-        ),
+        dataset=megatron_packed_dataset(C4_TRAIN_IDX),
+        shuffle=False,
     )
     config.parallelism.expert_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1
@@ -494,9 +493,8 @@ def llama3_8b_lpt() -> Trainer.Config:
     config.optim.lr_scheduler.decay_ratio = 0.9
     config.optim.lr_scheduler.decay_type = "cosine"
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(
-            dataset=megatron_dataset_config(C4_TRAIN_IDX)
-        ),
+        dataset=megatron_packed_dataset(C4_TRAIN_IDX),
+        shuffle=False,
     )
     config.parallelism.expert_parallel_degree = 1
     config.parallelism.tensor_parallel_degree = 1

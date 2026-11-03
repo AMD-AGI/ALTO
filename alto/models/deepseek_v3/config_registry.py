@@ -17,6 +17,7 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
 )
 
 from alto.components.converter import ModelOptConverter
+from alto.models.batch import set_batch_sizes
 
 __all__ = [
     "deepseek_v3_debugmodel",
@@ -32,22 +33,32 @@ DEEPSEEK_V3_16B_PATH = (
 
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
-    config = deepseek_v3_debugmodel_orig(seq_len=2048)
+    seq_len = 2048
+    config = deepseek_v3_debugmodel_orig(seq_len=seq_len)
     config.profiler.enable_profiling = False
     config.training.steps = 10
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4 * 2048
-    config.training.num_tokens_per_train_step = 16 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
     config.activation_remat = None
     config.debug.seed = 1234
     return config
 
 
 def deepseek_v3_debugmodel_lpt() -> Trainer.Config:
-    config = deepseek_v3_debugmodel_orig(seq_len=2048)
+    seq_len = 2048
+    config = deepseek_v3_debugmodel_orig(seq_len=seq_len)
     config.profiler.enable_profiling = False
     config.training.steps = 10
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4 * 2048
-    config.training.num_tokens_per_train_step = 16 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
     config.activation_remat = None
     config.debug.seed = 1234
     config.model_converters = ModelConvertersContainer.Config(
@@ -61,8 +72,9 @@ def deepseek_v3_debugmodel_lpt() -> Trainer.Config:
 
 
 def deepseek_v3_16b() -> Trainer.Config:
+    seq_len = 4096
     config = deepseek_v3_16b_orig(
-        seq_len=4096,
+        seq_len=seq_len,
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
             tensor_parallel_degree=1,
@@ -72,7 +84,7 @@ def deepseek_v3_16b() -> Trainer.Config:
     config.dump_folder = "deepseek_v3_16b-outputs"
     config.profiler.enable_profiling = False
     config.training.steps = 0
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4096
+    set_batch_sizes(config.training, seq_len=seq_len, local_batch_size=1)
     config.training.disable_accelerator_graphs = True
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True
@@ -98,8 +110,9 @@ def deepseek_v3_16b() -> Trainer.Config:
 
 
 def deepseek_v3_16b_lpt() -> Trainer.Config:
+    seq_len = 4096
     config = deepseek_v3_16b_orig(
-        seq_len=4096,
+        seq_len=seq_len,
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
             tensor_parallel_degree=1,
@@ -109,7 +122,7 @@ def deepseek_v3_16b_lpt() -> Trainer.Config:
     config.dump_folder = "deepseek_v3_16b-outputs"
     config.profiler.enable_profiling = False
     config.training.steps = 0
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4096
+    set_batch_sizes(config.training, seq_len=seq_len, local_batch_size=1)
     config.training.disable_accelerator_graphs = True
     config.metrics.log_freq = 1
     config.metrics.enable_tensorboard = True

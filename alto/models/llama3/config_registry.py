@@ -19,6 +19,7 @@ from torchtitan_recipes.tests.models.llama3 import (
 )
 
 from alto.components.converter import ModelOptConverter
+from alto.models.batch import set_batch_sizes
 from alto.models.patcher import ModelPatcher
 
 __all__ = [
@@ -75,28 +76,38 @@ _CONFIGS = "./alto/models/llama3/configs"
 
 
 def llama3_debugmodel() -> Trainer.Config:
-    config = llama3_debugmodel_orig(seq_len=2048, attn_backend="sdpa")
+    seq_len = 2048
+    config = llama3_debugmodel_orig(seq_len=seq_len, attn_backend="sdpa")
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
     config.profiler.enable_profiling = False
     config.training.steps = 0
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4 * 2048
-    config.training.num_tokens_per_train_step = 16 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
     config.activation_remat = None
     config.debug.seed = 1234
     return config
 
 
 def llama3_debugmodel_opt() -> Trainer.Config:
-    config = llama3_debugmodel_orig(seq_len=2048, attn_backend="sdpa")
+    seq_len = 2048
+    config = llama3_debugmodel_orig(seq_len=seq_len, attn_backend="sdpa")
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4 * 2048
-    config.training.num_tokens_per_train_step = 16 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
     config.activation_remat = None
     config.debug.seed = 1234
     config.model_converters = ModelConvertersContainer.Config(
@@ -106,14 +117,19 @@ def llama3_debugmodel_opt() -> Trainer.Config:
 
 
 def llama3_debugmodel_lpt() -> Trainer.Config:
-    config = llama3_debugmodel_orig(seq_len=2048, attn_backend="sdpa")
+    seq_len = 2048
+    config = llama3_debugmodel_orig(seq_len=seq_len, attn_backend="sdpa")
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
     config.profiler.enable_profiling = False
     config.training.steps = 10
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4 * 2048
-    config.training.num_tokens_per_train_step = 16 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
     config.activation_remat = None
     config.debug.seed = 1234
     config.model_converters = ModelConvertersContainer.Config(
@@ -123,7 +139,8 @@ def llama3_debugmodel_lpt() -> Trainer.Config:
 
 
 def llama3_1b() -> Trainer.Config:
-    config = llama3_1b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_1b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -131,8 +148,12 @@ def llama3_1b() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 0
-    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
-    config.training.num_tokens_per_train_step = 10 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
@@ -155,7 +176,8 @@ def llama3_1b() -> Trainer.Config:
 
 
 def llama3_1b_opt() -> Trainer.Config:
-    config = llama3_1b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_1b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -163,8 +185,12 @@ def llama3_1b_opt() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
-    config.training.num_tokens_per_train_step = 10 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -191,7 +217,8 @@ def llama3_1b_opt() -> Trainer.Config:
 
 
 def llama3_1b_lpt() -> Trainer.Config:
-    config = llama3_1b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_1b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -199,8 +226,12 @@ def llama3_1b_lpt() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1000
-    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
-    config.training.num_tokens_per_train_step = 10 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
@@ -226,7 +257,8 @@ def llama3_1b_lpt() -> Trainer.Config:
 
 
 def llama3_1b_gptq() -> Trainer.Config:
-    config = llama3_1b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_1b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -234,8 +266,12 @@ def llama3_1b_gptq() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
-    config.training.num_tokens_per_train_step = 10 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -262,7 +298,8 @@ def llama3_1b_gptq() -> Trainer.Config:
 
 
 def llama3_1b_awq() -> Trainer.Config:
-    config = llama3_1b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_1b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -270,8 +307,12 @@ def llama3_1b_awq() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
-    config.training.num_tokens_per_train_step = 10 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -298,7 +339,8 @@ def llama3_1b_awq() -> Trainer.Config:
 
 
 def llama3_1b_mx9_wa() -> Trainer.Config:
-    config = llama3_1b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_1b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -306,8 +348,12 @@ def llama3_1b_mx9_wa() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
-    config.training.num_tokens_per_train_step = 10 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -334,7 +380,8 @@ def llama3_1b_mx9_wa() -> Trainer.Config:
 
 
 def llama3_1b_mx6_wa() -> Trainer.Config:
-    config = llama3_1b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_1b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -342,8 +389,12 @@ def llama3_1b_mx6_wa() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
-    config.training.num_tokens_per_train_step = 10 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -370,7 +421,8 @@ def llama3_1b_mx6_wa() -> Trainer.Config:
 
 
 def llama3_8b_pretrain() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -380,8 +432,12 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.metrics.enable_tensorboard = True
     config.profiler.enable_profiling = False
     config.training.steps = 5000
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 8192
-    config.training.num_tokens_per_train_step = 384 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=2,
+        global_batch_size=384,
+    )
     config.optim.optimizer.optimizers[0].lr = 1e-4
     config.optim.lr_scheduler.min_lr_factor = 0.0
     config.optim.lr_scheduler.warmup_steps = 500
@@ -406,7 +462,8 @@ def llama3_8b_pretrain() -> Trainer.Config:
 
 
 def llama3_8b() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -414,8 +471,12 @@ def llama3_8b() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 0
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
@@ -438,7 +499,8 @@ def llama3_8b() -> Trainer.Config:
 
 
 def llama3_8b_opt() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -446,8 +508,12 @@ def llama3_8b_opt() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
@@ -473,7 +539,8 @@ def llama3_8b_opt() -> Trainer.Config:
 
 
 def llama3_8b_lpt() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=8192)
+    seq_len = 8192
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -485,8 +552,12 @@ def llama3_8b_lpt() -> Trainer.Config:
     config.metrics.enable_tensorboard = True
     config.profiler.enable_profiling = False
     config.training.steps = 5000
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 8192
-    config.training.num_tokens_per_train_step = 384 * 8192
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=2,
+        global_batch_size=384,
+    )
     config.optim.optimizer.optimizers[0].lr = 1e-4
     config.optim.lr_scheduler.min_lr_factor = 0.0
     config.optim.lr_scheduler.warmup_steps = 500
@@ -514,7 +585,8 @@ def llama3_8b_lpt() -> Trainer.Config:
 
 
 def llama3_8b_gptq() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -522,8 +594,12 @@ def llama3_8b_gptq() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 128 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=128,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -550,7 +626,8 @@ def llama3_8b_gptq() -> Trainer.Config:
 
 
 def llama3_8b_rtn() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -558,8 +635,12 @@ def llama3_8b_rtn() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -586,7 +667,8 @@ def llama3_8b_rtn() -> Trainer.Config:
 
 
 def llama3_8b_awq() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -594,8 +676,12 @@ def llama3_8b_awq() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -622,7 +708,8 @@ def llama3_8b_awq() -> Trainer.Config:
 
 
 def llama3_8b_wanda() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -630,8 +717,12 @@ def llama3_8b_wanda() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -658,7 +749,8 @@ def llama3_8b_wanda() -> Trainer.Config:
 
 
 def llama3_8b_sparsegpt() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -666,8 +758,12 @@ def llama3_8b_sparsegpt() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 128 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=128,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -694,7 +790,8 @@ def llama3_8b_sparsegpt() -> Trainer.Config:
 
 
 def llama3_8b_magnitude() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -702,8 +799,12 @@ def llama3_8b_magnitude() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -732,7 +833,8 @@ def llama3_8b_magnitude() -> Trainer.Config:
 
 
 def llama3_8b_admm() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -740,8 +842,12 @@ def llama3_8b_admm() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 128 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=128,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -768,7 +874,8 @@ def llama3_8b_admm() -> Trainer.Config:
 
 
 def llama3_8b_alps() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -776,8 +883,12 @@ def llama3_8b_alps() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 128 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=128,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -804,7 +915,8 @@ def llama3_8b_alps() -> Trainer.Config:
 
 
 def llama3_8b_wanda_structured() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -812,8 +924,12 @@ def llama3_8b_wanda_structured() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -842,7 +958,8 @@ def llama3_8b_wanda_structured() -> Trainer.Config:
 
 
 def llama3_8b_obs() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -850,8 +967,12 @@ def llama3_8b_obs() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 128 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=128,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -878,7 +999,8 @@ def llama3_8b_obs() -> Trainer.Config:
 
 
 def llama3_8b_admm_structured() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -886,8 +1008,12 @@ def llama3_8b_admm_structured() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 128 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=128,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -916,7 +1042,8 @@ def llama3_8b_admm_structured() -> Trainer.Config:
 
 
 def llama3_8b_cosine_similarity() -> Trainer.Config:
-    config = llama3_8b_orig(seq_len=2048)
+    seq_len = 2048
+    config = llama3_8b_orig(seq_len=seq_len)
     for _fqn, attention, _parent, _attr in config.model.traverse(Attention.Config):
         attention.inner_attention = get_attention_config("sdpa")
     ModelPatcher.patch_model_config(config.model)
@@ -924,8 +1051,12 @@ def llama3_8b_cosine_similarity() -> Trainer.Config:
     config.metrics.log_freq = 1
     config.profiler.enable_profiling = False
     config.training.steps = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.num_tokens_per_train_step = 8 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=8,
+    )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -964,8 +1095,12 @@ def instella_3b() -> Trainer.Config:
     config.profiler.enable_profiling = False
     config.training.steps = 0
     config.training.max_context_length = seq_len
-    config.training.num_tokens_per_microbatch_per_dp_rank = seq_len
-    config.training.num_tokens_per_train_step = 10 * seq_len
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
@@ -998,8 +1133,12 @@ def instella_3b_opt() -> Trainer.Config:
     config.profiler.enable_profiling = False
     config.training.steps = 1
     config.training.max_context_length = seq_len
-    config.training.num_tokens_per_microbatch_per_dp_rank = seq_len
-    config.training.num_tokens_per_train_step = 10 * seq_len
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
@@ -1035,8 +1174,12 @@ def instella_3b_lpt() -> Trainer.Config:
     config.profiler.enable_profiling = False
     config.training.steps = 1000
     config.training.max_context_length = seq_len
-    config.training.num_tokens_per_microbatch_per_dp_rank = seq_len
-    config.training.num_tokens_per_train_step = 10 * seq_len
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=1,
+        global_batch_size=10,
+    )
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )

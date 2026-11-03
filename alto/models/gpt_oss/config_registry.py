@@ -27,6 +27,7 @@ from torchtitan_recipes.tests.models.gpt_oss import (
 )
 
 from alto.components.converter import ModelOptConverter
+from alto.models.batch import set_batch_sizes
 
 __all__ = [
     "gpt_oss_debugmodel",
@@ -48,22 +49,32 @@ C4_VAL_IDX = (
 
 
 def gpt_oss_debugmodel() -> Trainer.Config:
-    config = gpt_oss_debugmodel_orig(seq_len=2048)
+    seq_len = 2048
+    config = gpt_oss_debugmodel_orig(seq_len=seq_len)
     config.profiler.enable_profiling = False
     config.training.steps = 10
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4 * 2048
-    config.training.num_tokens_per_train_step = 16 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
     config.activation_remat = None
     config.debug.seed = 1234
     return config
 
 
 def gpt_oss_debugmodel_lpt() -> Trainer.Config:
-    config = gpt_oss_debugmodel_orig(seq_len=2048)
+    seq_len = 2048
+    config = gpt_oss_debugmodel_orig(seq_len=seq_len)
     config.profiler.enable_profiling = False
     config.training.steps = 10
-    config.training.num_tokens_per_microbatch_per_dp_rank = 4 * 2048
-    config.training.num_tokens_per_train_step = 16 * 2048
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
     config.activation_remat = None
     config.debug.seed = 1234
     config.model_converters = ModelConvertersContainer.Config(
@@ -78,6 +89,7 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
 
 def gpt_oss_20b() -> Trainer.Config:
     seq_len = 8192
+    local_batch_size = 1
     parallelism = ParallelismConfig(
         expert_parallel_degree=1,
         tensor_parallel_degree=1,
@@ -111,7 +123,7 @@ def gpt_oss_20b() -> Trainer.Config:
         training=TrainingConfig(
             # Varlen attention has no C4 document cap in this eval config.
             disable_accelerator_graphs=True,
-            num_tokens_per_microbatch_per_dp_rank=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=local_batch_size * seq_len,
             max_context_length=model.max_context_length,
             steps=0,
         ),
@@ -137,12 +149,14 @@ def gpt_oss_20b() -> Trainer.Config:
 
 def gpt_oss_20b_pretrain() -> Trainer.Config:
     seq_len = 8192
+    local_batch_size = 1
+    global_batch_size = 16
     steps = 1_200_000
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
         tensor_parallel_degree=1,
     )
-    model = build_model_config("20b", seq_len=seq_len, parallelism=parallelism)
+    model = build_model_config("20b_megatron", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -182,8 +196,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
         ),
         training=TrainingConfig(
             disable_accelerator_graphs=True,
-            num_tokens_per_microbatch_per_dp_rank=seq_len,
-            num_tokens_per_train_step=16 * seq_len,
+            num_tokens_per_microbatch_per_dp_rank=local_batch_size * seq_len,
+            num_tokens_per_train_step=global_batch_size * seq_len,
             max_context_length=model.max_context_length,
             steps=steps,
         ),
@@ -209,12 +223,14 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     seq_len = 8192
+    local_batch_size = 1
+    global_batch_size = 16
     steps = 1_200_000
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
         tensor_parallel_degree=1,
     )
-    model = build_model_config("20b", seq_len=seq_len, parallelism=parallelism)
+    model = build_model_config("20b_megatron", seq_len=seq_len, parallelism=parallelism)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -257,8 +273,8 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
         ),
         training=TrainingConfig(
             disable_accelerator_graphs=True,
-            num_tokens_per_microbatch_per_dp_rank=seq_len,
-            num_tokens_per_train_step=16 * seq_len,
+            num_tokens_per_microbatch_per_dp_rank=local_batch_size * seq_len,
+            num_tokens_per_train_step=global_batch_size * seq_len,
             max_context_length=model.max_context_length,
             steps=steps,
         ),

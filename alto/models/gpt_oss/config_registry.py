@@ -17,6 +17,10 @@ __all__ = [
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
+    "gpt_oss_20b_c4",
+    "gpt_oss_20b_c4_mxfp8_attn",
+    "gpt_oss_20b_c4_mxfp8_linear",
+    "gpt_oss_20b_c4_mxfp8_linear_attn",
 ]
 
 
@@ -111,5 +115,54 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_c4() -> Trainer.Config:
+    """From-scratch BF16 run on the protocol of the m355 20k-step BF16/MXFP8 comparison.
+
+    C4 is streamed from the HF Hub. The LR schedule keeps the 1.2M-step horizon of
+    ``gpt_oss_20b_pretrain``, so LR stays near its 4e-4 peak for all 20k steps.
+    """
+    config = gpt_oss_20b_pretrain()
+    config.hf_assets_path = "/workspace/hf_models/gpt-oss-20b"
+    config.dump_folder = "gpt_oss_20b-c4-bf16-outputs"
+    config.training.steps = 20000
+    config.lr_scheduler.total_steps = 1200000
+    config.metrics.enable_wandb = True
+    config.dataloader.dataset = "c4"
+    config.dataloader.dataset_path = None
+    config.validator.dataloader.dataset = "c4_validation"
+    config.validator.dataloader.dataset_path = None
+    config.checkpoint.interval = 5000
+    config.comm.train_timeout_seconds = 600
+    return config
+
+
+def gpt_oss_20b_c4_mxfp8_attn() -> Trainer.Config:
+    config = gpt_oss_20b_c4()
+    config.dump_folder = "gpt_oss_20b-c4-mxfp8-attn-cdelta-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp8_attn_consistent_delta_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_c4_mxfp8_linear() -> Trainer.Config:
+    config = gpt_oss_20b_c4()
+    config.dump_folder = "gpt_oss_20b-c4-mxfp8-linear-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/mxfp8_linear_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_c4_mxfp8_linear_attn() -> Trainer.Config:
+    config = gpt_oss_20b_c4()
+    config.dump_folder = "gpt_oss_20b-c4-mxfp8-linear-attn-cdelta-outputs"
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(
+            recipe="./alto/models/gpt_oss/configs/mxfp8_linear_attn_consistent_delta_recipe.yaml",),
     ],)
     return config

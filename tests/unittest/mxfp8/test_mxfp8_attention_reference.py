@@ -19,13 +19,20 @@ golden reference nor asserts:
 ``test_mxfp8_attention.py::test_attention``; not duplicated here.)
 """
 
+from pathlib import Path
+
 import pytest
 from tabulate import tabulate
 import torch
 
+from alto.config.recipe import Recipe
+from alto.kernels.dispatch.attention import LPScaledDotProductAttentionWrapper
+from alto.modifiers.lpt.base import LowPrecisionTrainingModifier
+
 from .utils import (
     calc_snr,
     calc_cossim,
+    _mxfp8_qdq,
     mxfp8_attention_forward_reference,
     mxfp8_attention_backward_reference,
     mxfp8_attention_backward_reference_stage2,
@@ -99,6 +106,7 @@ def test_reference_matches_bf16_sdpa(config, causal):
 non_causal_cases = [
     AttnConfig(seqlen_q=256, seqlen_kv=512, num_head_q=8, num_head_kv=2, head_dim_qk=128, head_dim_v=128),
     AttnConfig(seqlen_q=512, seqlen_kv=256, num_head_q=8, num_head_kv=2, head_dim_qk=192, head_dim_v=128),
+    AttnConfig(seqlen_q=96, seqlen_kv=160, num_head_q=8, num_head_kv=2, head_dim_qk=96, head_dim_v=96),
 ]
 
 
@@ -295,7 +303,8 @@ public_autograd_cases = [
 @cuda_only
 @pytest.mark.parametrize("config", public_autograd_cases)
 @pytest.mark.parametrize("causal", [True, False])
-def test_public_autograd_matches_sdpa(config, causal):
+@pytest.mark.parametrize("consistent_delta", [False, True])
+def test_public_autograd_matches_sdpa(config, causal, consistent_delta):
     """Public ``triton_attention_mxfp8`` forward/backward must wire gradients correctly.
 
     The lower-level backward op is tested across the large shape grid below. This
@@ -338,6 +347,7 @@ def test_public_autograd_matches_sdpa(config, causal):
         return_scores=False,
         use_exp2=True,
         layout="bhsd",
+        consistent_delta=consistent_delta,
     )[0]
     o_kernel.backward(do)
 
@@ -368,7 +378,30 @@ def test_public_autograd_matches_sdpa(config, causal):
 #   Stage-2 reference (same full quantization both sides -> gap = port bugs).
 # ---------------------------------------------------------------------------
 
-def _check_backward_kernel_vs_reference(config, causal, batch=4):
+def _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o, lse, config, causal, consistent_delta):
+    return torch.ops.alto.attention_mxfp8_backward_triton_impl(
+        do.contiguous(),
+        q8.contiguous(),
+        k8.contiguous(),
+        v8.contiguous(),
+        o.contiguous(),
+        lse.contiguous(),
+        q_scale,
+        k_scale,
+        v_scale,
+        sm_scale=config.head_dim_qk**(-0.5),
+        causal=causal,
+        layout="bhsd",
+        cu_seqlens_q=0,
+        cu_seqlens_k=0,
+        max_seqlen_q=config.seqlen_q,
+        max_seqlen_k=config.seqlen_kv,
+        use_exp2=True,
+        consistent_delta=consistent_delta,
+    )
+
+
+def _check_backward_kernel_vs_reference(config, causal, batch=4, consistent_delta=False):
     from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
 
     device = "cuda"
@@ -384,26 +417,17 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4):
     k8, k_scale = convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
     v8, v_scale = convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
 
-    dq_k, dk_k, dv_k = torch.ops.alto.attention_mxfp8_backward_triton_impl(
-        do.contiguous(),
-        q8.contiguous(),
-        k8.contiguous(),
-        v8.contiguous(),
-        o_ref.contiguous(),
-        lse_ref.contiguous(),
-        q_scale,
-        k_scale,
-        v_scale,
-        sm_scale=sm_scale,
-        causal=causal,
-        layout="bhsd",
-        cu_seqlens_q=0,
-        cu_seqlens_k=0,
-        max_seqlen_q=config.seqlen_q,
-        max_seqlen_k=config.seqlen_kv,
-        use_exp2=True,
-    )
-    dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(q, k, v, do, o_ref, lse_ref, sm_scale, causal)
+    dq_k, dk_k, dv_k = _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o_ref, lse_ref, config, causal,
+                                        consistent_delta)
+    dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(q,
+                                                                k,
+                                                                v,
+                                                                do,
+                                                                o_ref,
+                                                                lse_ref,
+                                                                sm_scale,
+                                                                causal,
+                                                                consistent_delta=consistent_delta)
 
     rows = []
     pairs = [("dQ", dq_r, dq_k), ("dK", dk_r, dk_k), ("dV", dv_r, dv_k)]
@@ -423,13 +447,141 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4):
 @cuda_only
 @pytest.mark.parametrize("config", test_cases)
 @pytest.mark.parametrize("causal", [True, False])
-def test_backward_kernel_matches_reference(config, causal):
+@pytest.mark.parametrize("consistent_delta", [False, True])
+def test_backward_kernel_matches_reference(config, causal, consistent_delta):
     """A1 backward kernel vs Stage-2 golden reference — isolates port bugs. CDNA4-only."""
-    _check_backward_kernel_vs_reference(config, causal)
+    _check_backward_kernel_vs_reference(config, causal, consistent_delta=consistent_delta)
 
 
 @cuda_only
 @pytest.mark.parametrize("config", non_causal_cases)
-def test_backward_kernel_matches_reference_non_square(config):
+@pytest.mark.parametrize("consistent_delta", [False, True])
+def test_backward_kernel_matches_reference_non_square(config, consistent_delta):
     """Backward kernel on seqlen_q != seqlen_k, the only shape family causal rejects."""
-    _check_backward_kernel_vs_reference(config, causal=False, batch=2)
+    _check_backward_kernel_vs_reference(config, causal=False, batch=2, consistent_delta=consistent_delta)
+
+
+# ---------------------------------------------------------------------------
+# consistent_delta — delta rebuilt from the e4m3 dO that dP consumes
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize(
+    ("recipe_name", "expected"),
+    [
+        ("mxfp8_attn_recipe.yaml", False),
+        ("mxfp8_attn_consistent_delta_recipe.yaml", True),
+    ],
+)
+def test_recipe_wires_consistent_delta_to_attention(recipe_name, expected):
+    """The recipe flag must survive parsing and reach the attention wrapper."""
+    recipe = Recipe.create_instance(
+        str(_REPO_ROOT / "alto/models/llama3/configs" / recipe_name)
+    )
+    assert len(recipe.modifiers) == 1
+    modifier = recipe.modifiers[0]
+    assert isinstance(modifier, LowPrecisionTrainingModifier)
+
+    config = next(iter(modifier.resolved_config))
+    assert config.attention_consistent_delta is expected
+    wrapper = LPScaledDotProductAttentionWrapper(config)
+    assert wrapper.attn_func.keywords["consistent_delta"] is expected
+
+
+consistent_delta_cases = [
+    AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=4, num_head_kv=4, head_dim_qk=128, head_dim_v=128),
+    AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=8, num_head_kv=2, head_dim_qk=128, head_dim_v=128),  # GQA
+    AttnConfig(seqlen_q=96, seqlen_kv=96, num_head_q=8, num_head_kv=2, head_dim_qk=96, head_dim_v=96),  # tail tiles
+]
+
+
+def _backward_both_delta_modes(q, k, v, do, config, causal):
+    """Same inputs through the backward op twice, toggling only consistent_delta."""
+    from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
+
+    o_ref, lse_ref = mxfp8_attention_forward_reference(q, k, v, config.head_dim_qk**(-0.5), causal)
+    q8, q_scale = convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    k8, k_scale = convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    v8, v_scale = convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+
+    args = (q8, k8, v8, q_scale, k_scale, v_scale, do, o_ref, lse_ref, config, causal)
+    return _run_backward_op(*args, False), _run_backward_op(*args, True)
+
+
+@cuda_only
+@pytest.mark.parametrize("config", consistent_delta_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_consistent_delta_touches_only_the_delta_path(config, causal):
+    """dV must be bit-identical, dQ/dK must move.
+
+    dV = Pᵀ @ dO never reads delta, so a change there means the switch leaked out
+    of the preprocess kernel. dQ/dK moving is what proves it took effect at all.
+    """
+    device = "cuda"
+    q, k, v = _make_qkv_bhsd(1, config, device, torch.bfloat16)
+    do = _make_do_bhsd(1, config, device, torch.bfloat16)
+
+    (dq_off, dk_off, dv_off), (dq_on, dk_on, dv_on) = _backward_both_delta_modes(q, k, v, do, config, causal)
+
+    torch.testing.assert_close(dv_off, dv_on, rtol=0, atol=0)
+    assert not torch.equal(dq_off, dq_on), "consistent_delta left dQ unchanged"
+    assert not torch.equal(dk_off, dk_on), "consistent_delta left dK unchanged"
+
+
+@cuda_only
+@pytest.mark.parametrize("config", consistent_delta_cases)
+@pytest.mark.parametrize("causal", [True, False])
+def test_consistent_delta_is_noop_on_an_e4m3_fixed_point(config, causal):
+    """Feed a dO the e4m3 round-trip leaves alone; the switch must then do nothing.
+
+    Pins the change to the dO round-trip: a wrong mask, a wrong block size, or a
+    stray edit to ``o`` would still shift delta on an input that quantizes to
+    itself.
+    """
+    device = "cuda"
+    q, k, v = _make_qkv_bhsd(1, config, device, torch.bfloat16)
+    do = _make_do_bhsd(1, config, device, torch.bfloat16)
+    do = _mxfp8_qdq(do, axis=-1, is_2d_block=False).to(torch.bfloat16)
+    assert torch.equal(do, _mxfp8_qdq(do, axis=-1, is_2d_block=False).to(torch.bfloat16)), \
+        "test input is not an e4m3 fixed point, so it cannot pin the round-trip"
+
+    (dq_off, dk_off, dv_off), (dq_on, dk_on, dv_on) = _backward_both_delta_modes(q, k, v, do, config, causal)
+
+    for name, off, on in [("dQ", dq_off, dq_on), ("dK", dk_off, dk_on), ("dV", dv_off, dv_on)]:
+        torch.testing.assert_close(off, on, rtol=0, atol=0, msg=f"{name} moved on an e4m3 fixed point")
+
+
+@cuda_only
+def test_consistent_delta_shrinks_the_row_sum_bias():
+    """Measure the row-constant bias in ds that the switch is meant to remove.
+
+    ``Σ_j ds_ij = 0`` in exact arithmetic. Make every key row identical and
+    ``dQ = dS @ K`` collapses to ``(Σ_j ds_ij) · k``, so ‖dQ‖ reads that residual
+    off directly — the true dQ is zero. What is left with the switch on comes
+    from quantizing dS itself; what the switch removes is dO's share.
+
+    V carries a large shared row mean, as residual-stream activations do. That is
+    what makes ``delta = Σ_j p_j dp_j`` comparable to the individual ``dp_j`` and
+    puts dO's error in charge of the residual; with iid V the two are the same
+    size, delta is near zero, and there is nothing to cancel.
+    """
+    device = "cuda"
+    config = AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=4, num_head_kv=4, head_dim_qk=128, head_dim_v=128)
+    q, k, v = _make_qkv_bhsd(1, config, device, torch.bfloat16)
+    k = k[:, :, :1, :].expand_as(k).contiguous()
+    v = (v.float() + 8.0 * v[:, :, :1, :].float()).bfloat16()
+    do = _make_do_bhsd(1, config, device, torch.bfloat16)
+
+    (dq_off, _, _), (dq_on, _, _) = _backward_both_delta_modes(q, k, v, do, config, causal=False)
+
+    norm_off = dq_off.float().norm().item()
+    norm_on = dq_on.float().norm().item()
+    print()
+    print(tabulate([["‖dQ‖ (true value 0)", norm_off, norm_on, norm_on / norm_off]],
+                   headers=["Residual", "delta from raw dO", "delta from e4m3 dO", "ratio"],
+                   tablefmt="github"))
+
+    assert norm_on < 0.5 * norm_off, \
+        f"consistent_delta did not shrink the row-sum residual: {norm_off} -> {norm_on}"

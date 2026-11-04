@@ -48,5 +48,17 @@ class TrainingOpConfig:
       * NVFP4: not implemented
     """
 
+    attention_consistent_delta: bool = False
+    """
+    Compute the MXFP8 attention backward's ``delta`` from the same e4m3 dO that
+    ``dP = dO @ Vᵀ`` consumes, instead of the raw dO.
+
+    ``delta`` is the p-weighted row mean of ``dp``, so ``ds = p * (dp - delta)``
+    cancels whatever error the two share. It already shares V's, since ``o``
+    comes from the forward's e4m3 V, but not dO's. Closing that gap removes a
+    row-constant bias in ``ds`` that ``dQ = dS @ K`` amplifies. Preprocess kernel
+    only — every dot keeps its e4m3 operands. MXFP8 attention only.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

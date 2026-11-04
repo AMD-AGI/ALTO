@@ -31,6 +31,7 @@ __all__ = [
     "llama3_8b_light_mxfp8_attn",
     "llama3_8b_light_mxfp8_attn_consistent_delta",
     "llama3_8b_light_mxfp8_linear_attn",
+    "llama3_8b_light_mxfp8_linear_attn_consistent_delta",
     "llama3_8b_opt",
     "llama3_8b_lpt",
     "llama3_1b_gptq",
@@ -347,6 +348,19 @@ def llama3_8b_light_mxfp8_linear_attn() -> Trainer.Config:
         converters=[
             ModelOptConverter.Config(
                 recipe="./alto/models/llama3/configs/mxfp8_linear_attn_recipe.yaml",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_8b_light_mxfp8_linear_attn_consistent_delta() -> Trainer.Config:
+    config = llama3_8b()
+    config.dump_folder = "llama3_8b-c4-mxfp8-linear-attn-cdelta-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            ModelOptConverter.Config(
+                recipe="./alto/models/llama3/configs/mxfp8_linear_attn_consistent_delta_recipe.yaml",
             ),
         ],
     )

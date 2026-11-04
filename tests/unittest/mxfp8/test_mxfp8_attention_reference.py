@@ -474,6 +474,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
     [
         ("mxfp8_attn_recipe.yaml", False),
         ("mxfp8_attn_consistent_delta_recipe.yaml", True),
+        ("mxfp8_linear_attn_consistent_delta_recipe.yaml", True),
     ],
 )
 def test_recipe_wires_consistent_delta_to_attention(recipe_name, expected):

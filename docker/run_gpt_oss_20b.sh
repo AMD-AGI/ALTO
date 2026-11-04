@@ -13,6 +13,38 @@ WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-gpt-oss-20b-mxfp8-c4-ablation}"
 MODE="${1:-shell}"
 WANDB_NETRC="${HOME}/.netrc"
 SUITE="bf16 attn"
+IDLE_POLLS=5
+POLL_SECONDS=60
+
+busy_gpus() {
+    rocm-smi --showuse --showmemuse --json | python3 -c '
+import json, sys
+cards = json.load(sys.stdin)
+print(" ".join(name for name, card in cards.items()
+               if int(card["GPU Memory Allocated (VRAM%)"]) > 1 or int(card["GPU use (%)"]) > 10))'
+}
+
+# Someone else's back-to-back jobs leave short gaps, so the node must stay idle
+# for IDLE_POLLS consecutive polls before a run takes all 8 GPUs.
+wait_for_idle_gpus() {
+    local idle=0 busy last="unset"
+    while true; do
+        busy="$(busy_gpus)"
+        if [[ "${busy}" != "${last}" ]]; then
+            echo "[$(date -u +%FT%TZ)] busy GPUs: ${busy:-none}"
+            last="${busy}"
+        fi
+        if [[ -z "${busy}" ]]; then
+            idle=$((idle + 1))
+        else
+            idle=0
+        fi
+        if (( idle >= IDLE_POLLS )); then
+            return
+        fi
+        sleep "${POLL_SECONDS}"
+    done
+}
 
 config_of() {
     case "$1" in
@@ -34,7 +66,7 @@ case "${MODE}" in
         ;;
     bf16|attn|linear|linear-attn)
         CONFIG_NAME="$(config_of "${MODE}")"
-        TRAIN_COMMAND="$(train_command "${CONFIG_NAME}" "gpt-oss-20b-${MODE}")"
+        TRAIN_COMMAND="$(train_command "${CONFIG_NAME}" "${WANDB_RUN_NAME:-gpt-oss-20b-${MODE}}" "${*:2}")"
         ;;
     smoke)
         GROUP="${2:-linear-attn}"
@@ -44,12 +76,23 @@ case "${MODE}" in
         ;;
     suite)
         for group in ${SUITE}; do
+            wait_for_idle_gpus
             "${BASH_SOURCE[0]}" "${group}"
         done
         exit 0
         ;;
+    compare-1k)
+        for group in ${SUITE}; do
+            wait_for_idle_gpus
+            WANDB_RUN_NAME="gpt-oss-20b-${group}-1k" "${BASH_SOURCE[0]}" "${group}" \
+                --training.steps 1000 --validator.freq 250 --checkpoint.no-enable \
+                --dump_folder "gpt_oss_20b-c4-${group}-1k-outputs"
+        done
+        exit 0
+        ;;
     *)
-        echo "Usage: $0 {shell|bf16|attn|linear|linear-attn|smoke [group]|suite}" >&2
+        echo "Usage: $0 {shell|<group> [torchtitan flags...]|smoke [group]|suite|compare-1k}" >&2
+        echo "  group: bf16|attn|linear|linear-attn" >&2
         exit 2
         ;;
 esac

@@ -87,11 +87,16 @@ linear 和 linear-attn 需要时单独启动。
 ## 启动
 
 ```bash
-./docker/run_gpt_oss_20b.sh smoke attn      # 先跑 10 步，确认能起来（第 1 步含 Triton 编译，约 4 分钟）
-./docker/daemon_gpt_oss_20b.sh start        # 后台跑 suite
-./docker/daemon_gpt_oss_20b.sh start attn   # 或者只跑一组
-./docker/daemon_gpt_oss_20b.sh attach attn  # 看实时输出
+./docker/run_gpt_oss_20b.sh smoke attn          # 先跑 10 步，确认能起来（第 1 步含 Triton 编译，约 4 分钟）
+./docker/daemon_gpt_oss_20b.sh start compare-1k # bf16 vs attn 各 1000 步，每 250 步验证一次，不存 checkpoint
+./docker/daemon_gpt_oss_20b.sh start            # 后台跑 suite（20000 步）
+./docker/daemon_gpt_oss_20b.sh start attn       # 或者只跑一组
+./docker/daemon_gpt_oss_20b.sh attach attn      # 看实时输出
 ```
+
+`suite` 和 `compare-1k` 每组开跑前都会等节点空闲：8 张卡显存都不超过 1%、利用率都不超过 10%，
+并且连续保持 5 分钟。等待期间日志里只在忙碌的卡变化时打一行。1000 步的结果写在
+`gpt_oss_20b-c4-<组>-1k-outputs`，W&B run 名带 `-1k` 后缀，不会和长跑混在一起。
 
 日志在 `logs/gpt_oss_20b_<组>.log`。中途挂了就重新 `start` 同一组，会从 dump 目录里最新的 checkpoint 续跑。
 
@@ -107,7 +112,7 @@ special_tokens_map.json  tokenizer_config.json  tokenizer.json
 ## 时长与磁盘
 
 - 4 卡冒烟实测吞吐：bf16 8,800 tps/卡，attn 6,200，linear-attn 3,700。m355 上 8 卡 BF16 实测
-  20000 步约 11 小时，按同样比例换算：attn 约 17 小时，linear-attn 约 28 小时，suite 合计约 2.5 天。
+  20000 步约 11 小时，按同样比例换算：attn 约 17 小时，linear-attn 约 28 小时，suite 合计约 28 小时。
 - checkpoint 每 5000 步存一次，保留最近 2 份（torchtitan 不允许少于 2 份）。一份约 250GB
   （20B 参数的 fp32 权重加 Adam 状态，估算值），一组最多占约 500GB。磁盘不够时，跑下一组之前删掉上一组的
   `<dump 目录>/checkpoint`。

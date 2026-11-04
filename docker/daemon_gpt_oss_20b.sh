@@ -31,7 +31,7 @@ case "${ACTION}" in
         tmux kill-session -t "${SESSION}"
         ;;
     *)
-        echo "Usage: $0 {start|status|attach|stop} [suite|bf16|attn|linear|linear-attn]" >&2
+        echo "Usage: $0 {start|status|attach|stop} [suite|compare-1k|bf16|attn|linear|linear-attn]" >&2
         exit 2
         ;;
 esac

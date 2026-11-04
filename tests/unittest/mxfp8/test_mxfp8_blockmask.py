@@ -433,6 +433,41 @@ def test_blockmask_kernel_matches_bf16_flex_attention(window, num_head_q, num_he
 
 
 @cuda_only
+@pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
+def test_blockmask_lse_gradient_matches_bf16_flex_attention(num_head_q, num_head_kv):
+    """GPT-OSS's attention sink differentiates through the returned LSE.
+
+    The loss reads only the LSE, so every dQ/dK bit comes from ``dlse``: a
+    backward that drops it returns zeros here. dV must be zero, since the LSE
+    does not depend on V.
+    """
+    torch.manual_seed(7890)
+    seqlen, head_dim = 512, 64
+    block_mask = create_block_mask(_causal_window(128), None, None, seqlen, seqlen, device="cuda", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, num_head_q, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, num_head_kv, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn_like(k, requires_grad=True)
+    dlse = torch.randn(1, num_head_q, seqlen, device="cuda", dtype=torch.float32)
+
+    _, lse, _ = _call_kernel(q, k, v, prepared)
+    (lse * dlse).sum().backward()
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    _, ref_lse = flex_attention(
+        q_ref, k_ref, v.detach(), block_mask=block_mask, scale=head_dim**-0.5,
+        enable_gqa=num_head_q != num_head_kv, return_lse=True,
+    )
+    (ref_lse * dlse).sum().backward()
+
+    assert torch.count_nonzero(v.grad) == 0
+    for name, expected, actual in (("dQ", q_ref.grad, q.grad), ("dK", k_ref.grad, k.grad)):
+        assert calc_cossim(expected, actual) > 0.99, name
+        assert calc_snr(expected, actual) > 18, name
+
+
+@cuda_only
 def test_lp_flex_attention_wrapper_returns_flex_contract():
     """The wrapper must preserve FlexAttention's output/LSE public contract."""
     seqlen, head_dim = 128, 64

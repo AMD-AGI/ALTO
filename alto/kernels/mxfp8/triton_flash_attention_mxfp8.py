@@ -2288,6 +2288,7 @@ def attention_mxfp8_backward_triton_impl(
     v: torch.Tensor,
     o: torch.Tensor,
     softmax_lse: torch.Tensor,
+    dlse: torch.Tensor,
     q_scale: torch.Tensor,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
@@ -2326,6 +2327,11 @@ def attention_mxfp8_backward_triton_impl(
     consume instead of the raw dO, so the ``dp - delta`` subtraction cancels dO's
     quantization error rather than amplifying it. It touches the preprocess
     kernel only; every dot keeps its operands. See ``_bwd_preprocess``.
+
+    ``dlse`` is the upstream gradient of the returned ``softmax_lse``. Since
+    ``d lse_i / d s_ij = p_ij``, it adds ``p * dlse`` to ``ds``, which is the
+    same as using ``delta - dlse`` in ``ds = p * (dp - delta)``. Callers that
+    discard the LSE pass zeros.
 
     Requires CDNA4 (native ``tl.dot_scaled``).
     """
@@ -2431,6 +2437,7 @@ def attention_mxfp8_backward_triton_impl(
         USE_ASM=is_cdna4(),
         CONSISTENT_DELTA=consistent_delta,
     )
+    delta.sub_(dlse)
 
     wrap_triton(_bwd_kernel_dq)[(batch * nheads_q, num_block_m)](
         q,
@@ -2622,6 +2629,7 @@ def fake_attention_mxfp8_backward_triton_impl(
     v: torch.Tensor,
     o: torch.Tensor,
     softmax_lse: torch.Tensor,
+    dlse: torch.Tensor,
     q_scale: torch.Tensor,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
@@ -2722,7 +2730,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs):
-        do = grad_outputs[0]
+        do, dlse = grad_outputs[0], grad_outputs[1]
         q, k, v, o, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors
         assert bias is None, "MXFP8 attention backward does not support bias yet."
         assert alibi_slopes is None, "MXFP8 attention backward does not support alibi yet."
@@ -2734,6 +2742,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
             v,
             o,
             softmax_lse,
+            dlse,
             q_scale,
             k_scale,
             v_scale,

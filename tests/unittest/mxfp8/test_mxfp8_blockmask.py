@@ -251,10 +251,16 @@ def test_blockmask_kernel_uses_per_batch_per_head_tables():
 
 
 @cuda_only
-@pytest.mark.parametrize("window", [1, 128, 256])
+# window=1 is a one-element softmax, so the true dQ/dK are zero; with a
+# consistent delta the reference returns exact zeros and cosine similarity
+# would only compare rounding noise.
+@pytest.mark.parametrize("window, consistent_delta", [
+    (1, False), (128, False), (256, False), (128, True), (256, True),
+])
 @pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
 @pytest.mark.parametrize("head_dim", [64, 192])
-def test_blockmask_backward_matches_same_quantization_reference(window, num_head_q, num_head_kv, head_dim):
+def test_blockmask_backward_matches_same_quantization_reference(window, consistent_delta, num_head_q, num_head_kv,
+                                                                head_dim):
     """dQ/dK/dV must consume the same sparse tables as the forward pass."""
     torch.manual_seed(5678)
     block_mask = create_block_mask(_causal_window(window), None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
@@ -264,7 +270,7 @@ def test_blockmask_backward_matches_same_quantization_reference(window, num_head
     v = torch.randn_like(k, requires_grad=True)
     do = torch.randn_like(q)
 
-    output = _call_kernel(q, k, v, prepared)[0]
+    output = _call_kernel(q, k, v, prepared, consistent_delta=consistent_delta)[0]
     (output * do).sum().backward()
 
     ref_output, ref_lse = mxfp8_blockmask_forward_reference(
@@ -272,7 +278,8 @@ def test_blockmask_backward_matches_same_quantization_reference(window, num_head
     )
     dense_mask = _dense_mask(_causal_window(window), 1, num_head_q, 256, 256, "cuda")
     ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
-        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, head_dim**-0.5, causal=False, mask=dense_mask
+        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, head_dim**-0.5, causal=False, mask=dense_mask,
+        consistent_delta=consistent_delta,
     )
 
     for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
@@ -446,3 +453,39 @@ def test_lp_flex_attention_wrapper_returns_flex_contract():
 
     assert output.shape == q.shape
     assert lse.shape == q.shape[:-1]
+
+
+@cuda_only
+def test_lp_flex_attention_wrapper_forwards_consistent_delta():
+    """The recipe flag must reach the BlockMask backward through the wrapper.
+
+    dV = Pᵀ @ dO never reads delta, so it must stay bit-identical; dQ/dK moving
+    is what proves the flag was not dropped on the way to the kernel.
+    """
+    torch.manual_seed(3456)
+    seqlen, head_dim = 256, 64
+    block_mask = create_block_mask(_causal_window(128), None, None, seqlen, seqlen, device="cuda", BLOCK_SIZE=128)
+    q = torch.randn(1, 4, seqlen, head_dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    do = torch.randn_like(q)
+
+    def grads(consistent_delta):
+        wrapper = LPFlexAttentionWrapper(TrainingOpConfig(
+            precision="mxfp8_e4m3",
+            use_2dblock_x=False,
+            use_2dblock_w=True,
+            use_hadamard=False,
+            use_sr_grad=False,
+            use_dge=False,
+            attention_consistent_delta=consistent_delta,
+        ))
+        leaves = [t.clone().requires_grad_(True) for t in (q, k, v)]
+        (wrapper(*leaves, block_mask=block_mask) * do).sum().backward()
+        return [t.grad for t in leaves]
+
+    (dq_off, dk_off, dv_off), (dq_on, dk_on, dv_on) = grads(False), grads(True)
+
+    torch.testing.assert_close(dv_off, dv_on, rtol=0, atol=0)
+    assert not torch.equal(dq_off, dq_on), "consistent_delta did not reach the BlockMask backward"
+    assert not torch.equal(dk_off, dk_on), "consistent_delta did not reach the BlockMask backward"

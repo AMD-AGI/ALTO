@@ -141,5 +141,6 @@ class LPFlexAttentionWrapper(FlexAttentionWrapper):
             use_exp2=True,
             layout="bhsd",
             block_mask=prepared,
+            consistent_delta=self.config.attention_consistent_delta,
         )
         return (output, lse) if return_lse else output

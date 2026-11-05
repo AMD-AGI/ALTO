@@ -3,6 +3,3 @@
 # SPDX-License-Identifier: MIT
 
 #from .llama3 import *
-from alto.patches.patcher import ModelPatcher
-
-ModelPatcher.patch()

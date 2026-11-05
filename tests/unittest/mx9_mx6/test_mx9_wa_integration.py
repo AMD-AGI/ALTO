@@ -11,7 +11,7 @@ post_step dynamic-weight skip -> wrapped Linear forward -> MX9 W+A QDQ.
 
 MX9 W+A QDQ dispatches to the REAL packed Triton kernel (``convert_to_mx`` /
 ``convert_from_mx``), not the ``mx9_fake_quantize`` emulation -- see
-``alto/models/patcher.py`` and commit ``95b1114`` (validated end-to-end on
+``alto/patches/patcher.py`` and commit ``95b1114`` (validated end-to-end on
 LLaMA-3.2-1B: wikitext loss 2.1141 vs the fake-quant path's 2.1140). This test
 therefore requires CUDA and counts calls on both functions to prove the real
 kernel path fires and the emulation does not.
@@ -105,7 +105,7 @@ def _load_quantization_modifier(monkeypatch):
 
     quant_base_mod = _load(monkeypatch, "alto.modifiers.quantization.base", "alto/modifiers/quantization/base.py")
 
-    patcher_mod = _load(monkeypatch, "alto.models.patcher", "alto/models/patcher.py")
+    patcher_mod = _load(monkeypatch, "alto.patches.patcher", "alto/patches/patcher.py")
     patcher_mod.ModelPatcher.patch_fake_quantize()
 
     return quant_base_mod.QuantizationModifier, quantize_mod

@@ -48,7 +48,7 @@ def rebuild_recorded_model(config: Any) -> None:
     """Call the model's ``build_model_config`` with the final trainer settings."""
     from torchtitan.models.common.config_utils import decoder_vocab_size
 
-    from alto.models.patcher import ModelPatcher
+    from alto.patches.patcher import ModelPatcher
 
     model = getattr(config, "model", None)
     recorded = None if model is None else _BUILD_ARGS.get(id(model))

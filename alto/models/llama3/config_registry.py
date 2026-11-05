@@ -20,7 +20,7 @@ from torchtitan_recipes.tests.models.llama3 import (
 
 from alto.components.converter import ModelOptConverter
 from alto.models.batch import set_batch_sizes
-from alto.models.patcher import ModelPatcher
+from alto.patches.patcher import ModelPatcher
 
 __all__ = [
     "llama3_debugmodel",

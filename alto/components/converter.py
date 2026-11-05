@@ -14,7 +14,6 @@ from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelismContext
 
 from alto.config import Recipe
-from alto.models.patcher import ModelPatcher
 
 if TYPE_CHECKING:
     from torchtitan.models.base import BaseModel
@@ -52,6 +51,8 @@ class ModelOptConverter(ModelConverter, Configurable):
 
     def convert_config(self, model_config: "BaseModel.Config"):
         from torchtitan.models.common.linear import Linear
+
+        from alto.patches.patcher import ModelPatcher
 
         ModelPatcher.patch_model_config(model_config)
 

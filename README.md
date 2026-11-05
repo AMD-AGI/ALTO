@@ -107,7 +107,7 @@ From the repository root, the shared launcher wraps `torchrun` and `python -m al
 NGPU=8 MODULE=llama3 CONFIG=your_config_name ./examples/run.sh
 ```
 
-Extra arguments are forwarded to `alto.train`. Besides the TorchTitan loader options (`--override`, `--output-dir`, `--resume-step`, ...), dotted config field overrides are accepted, e.g. `--training.steps 10 --checkpointer.folder ckpt`. Overrides are applied after the config function runs, so fields baked into the model config (such as the sequence length) must be changed in the config function instead.
+Extra arguments are forwarded to `alto.train`. Besides the TorchTitan loader options (`--override`, `--output-dir`, `--resume-step`, ...), dotted config field overrides are accepted, e.g. `--training.steps 10 --checkpointer.folder ckpt`. Overrides are applied after the config function runs. Recorded model configs are then rebuilt using the original flavor and attention backend, with the final parallelism settings and `training.max_context_length`.
 
 Environment variables (see [`examples/run.sh`](examples/run.sh)):
 
@@ -127,7 +127,7 @@ Environment variables (see [`examples/run.sh`](examples/run.sh)):
 
   uses `LowPrecisionTrainingModifier` with `scheme: "mxfp4"`.
 
-- Config: [`gpt_oss_20b_lpt`](alto/models/gpt_oss/config_registry.py). Upstream does not publish a 20B recipe, so this config builds the `20b` flavor and keeps ALTO's pretraining batch, learning rate, and Megatron data settings. [`gpt_oss_debugmodel_lpt`](alto/models/gpt_oss/config_registry.py) remains available for a small upstream debug run.
+- Config: [`gpt_oss_20b_lpt`](alto/models/gpt_oss/config_registry.py). This config builds the Primus-Megatron-style `20b_megatron` flavor and keeps ALTO's pretraining batch, learning rate, and Megatron data settings. [`gpt_oss_debugmodel_lpt`](alto/models/gpt_oss/config_registry.py) remains available for a small upstream debug run.
 
 - Run:
 

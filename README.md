@@ -127,7 +127,7 @@ Environment variables (see [`examples/run.sh`](examples/run.sh)):
 
   uses `LowPrecisionTrainingModifier` with `scheme: "mxfp4"`.
 
-- Config: [`gpt_oss_20b_lpt`](alto/models/gpt_oss/config_registry.py). Upstream does not publish a 20B recipe, so this config builds the `20b` flavor and keeps ALTO's pretraining batch, learning rate, and Megatron data settings. [`gpt_oss_debugmodel_lpt`](alto/models/gpt_oss/config_registry.py) remains available for a small upstream debug run.
+- Config: [`gpt_oss_20b_lpt`](alto/models/gpt_oss/config_registry.py). This config builds the Primus-Megatron-style `20b_megatron` flavor and keeps ALTO's pretraining batch, learning rate, and Megatron data settings. [`gpt_oss_debugmodel_lpt`](alto/models/gpt_oss/config_registry.py) remains available for a small upstream debug run.
 
 - Run:
 

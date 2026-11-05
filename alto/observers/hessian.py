@@ -11,6 +11,11 @@ from .base import Observer, register_observer
 PRECISION = torch.float32
 
 
+def _is_native_linear_projection(module: torch.nn.Module) -> bool:
+    weight = getattr(module, "weight", None)
+    return weight is not None and weight.ndim > 2 and not isinstance(module, torch.nn.Conv2d)
+
+
 @register_observer("hessian")
 class HessianObserver(Observer):
     r"""
@@ -29,7 +34,7 @@ class HessianObserver(Observer):
     def make_empty_stats(self) -> torch.Tensor:
         module = self.module()
         weight = module.weight
-        if isinstance(module, torch.nn.Linear):
+        if isinstance(module, torch.nn.Linear) or _is_native_linear_projection(module):
             num_columns = weight.shape[-1]
         elif TransformerConv1D and isinstance(module, TransformerConv1D):
             num_columns = weight.shape[0]
@@ -46,7 +51,11 @@ class HessianObserver(Observer):
     def reshape_input(self, inp: torch.Tensor) -> torch.Tensor:
         module = self.module()
         num_added = inp.shape[0] if inp.dim() > 2 else 1
-        if isinstance(module, torch.nn.Linear) or (TransformerConv1D and isinstance(module, TransformerConv1D)):
+        if (
+            isinstance(module, torch.nn.Linear)
+            or (TransformerConv1D and isinstance(module, TransformerConv1D))
+            or _is_native_linear_projection(module)
+        ):
             inp = inp.reshape((-1, inp.shape[-1])).t()
         elif inp.dim() == 2:
             inp = inp.unsqueeze(0)

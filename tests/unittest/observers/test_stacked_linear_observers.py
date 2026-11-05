@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from alto.observers.hessian import HessianObserver
+from alto.observers.hessian import HessianGPTQObserver, HessianObserver
 from alto.observers.per_channel_norm import PerChannelNormObserver
 
 
@@ -24,3 +24,20 @@ def test_stacked_linear_observer_uses_logical_input_dimension(observer_cls):
     else:
         assert observer.stats.shape == (5,)
         torch.testing.assert_close(observer.stats, rows.square().sum(dim=0) / 2)
+
+
+def test_hessian_gptq_observer_uses_logical_input_dimension_for_native_projection():
+    class NativeProjection(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(2, 3, 5))
+
+    module = NativeProjection()
+    observer = HessianGPTQObserver(base_name="test", module=module, device=torch.device("cpu"))
+    inputs = torch.randn(2, 3, 4, 5)
+
+    observer(inputs)
+
+    rows = inputs.flatten(0, -2).to(torch.float32)
+    assert observer.stats.shape == (5, 5)
+    torch.testing.assert_close(observer.stats, 2 * (rows.T @ rows))

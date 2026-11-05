@@ -280,6 +280,26 @@ def apply_field_overrides(config: Any, overrides: list[tuple[str, str | None]]) 
         sl.log_trace_instant(f"alto.config_override.{path}")
 
 
+def apply_loaded_overrides(config: Any, overrides: list[tuple[str, str | None]]) -> None:
+    """Apply CLI overrides around the model rebuild.
+
+    Rebuild reads parallelism and ``training.max_context_length`` and replaces
+    ``config.model``. ``--model.*`` is applied after that replacement. Applying
+    it earlier writes the override onto the config that rebuild discards.
+    """
+    other: list[tuple[str, str | None]] = []
+    model_overrides: list[tuple[str, str | None]] = []
+    for path, raw in overrides:
+        root = path.replace("-", "_").split(".", 1)[0]
+        if root == "model":
+            model_overrides.append((path, raw))
+        else:
+            other.append((path, raw))
+    apply_field_overrides(config, other)
+    rebuild_recorded_model(config)
+    apply_field_overrides(config, model_overrides)
+
+
 def main() -> None:
     """Run the config selected on the command line with ALTO's trainer.
 
@@ -298,8 +318,7 @@ def main() -> None:
 
     loader_args, overrides = split_field_overrides(sys.argv[1:])
     config = ConfigLoader().load(loader_args)
-    apply_field_overrides(config, overrides)
-    rebuild_recorded_model(config)
+    apply_loaded_overrides(config, overrides)
     sl.init_structured_logger(
         source="training",
         output_dir=config.dump_folder,

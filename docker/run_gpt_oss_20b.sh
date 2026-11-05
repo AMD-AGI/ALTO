@@ -76,14 +76,12 @@ case "${MODE}" in
         ;;
     suite)
         for group in ${SUITE}; do
-            wait_for_idle_gpus
             "${BASH_SOURCE[0]}" "${group}"
         done
         exit 0
         ;;
     compare-1k)
         for group in ${SUITE}; do
-            wait_for_idle_gpus
             WANDB_RUN_NAME="gpt-oss-20b-${group}-1k" "${BASH_SOURCE[0]}" "${group}" \
                 --training.steps 1000 --validator.freq 250 --checkpoint.no-enable \
                 --dump_folder "gpt_oss_20b-c4-${group}-1k-outputs"
@@ -113,6 +111,10 @@ HF_MODELS_DIR="$(cd "${HF_MODELS_DIR}" && pwd)"
 
 if [[ ! -f "${ALTO_DIR}/3rdparty/torchtitan/pyproject.toml" ]]; then
     git -C "${ALTO_DIR}" submodule update --init --recursive
+fi
+
+if [[ "${MODE}" != "shell" ]]; then
+    wait_for_idle_gpus
 fi
 
 sudo docker run --rm --init \

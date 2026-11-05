@@ -94,8 +94,8 @@ linear 和 linear-attn 需要时单独启动。
 ./docker/daemon_gpt_oss_20b.sh attach attn      # 看实时输出
 ```
 
-`suite` 和 `compare-1k` 每组开跑前都会等节点空闲：8 张卡显存都不超过 1%、利用率都不超过 10%，
-并且连续保持 5 分钟。等待期间日志里只在忙碌的卡变化时打一行。1000 步的结果写在
+除 `shell` 外，每次训练开跑前都会等节点空闲：8 张卡显存都不超过 1%、利用率都不超过 10%，
+并且连续保持 5 分钟。`suite` 和 `compare-1k` 里每组各等一次。等待期间日志里只在忙碌的卡变化时打一行。1000 步的结果写在
 `gpt_oss_20b-c4-<组>-1k-outputs`，W&B run 名带 `-1k` 后缀，不会和长跑混在一起。
 
 日志在 `logs/gpt_oss_20b_<组>.log`。中途挂了就重新 `start` 同一组，会从 dump 目录里最新的 checkpoint 续跑。
@@ -114,8 +114,8 @@ special_tokens_map.json  tokenizer_config.json  tokenizer.json
 - 4 卡冒烟实测吞吐：bf16 8,800 tps/卡，attn 6,200，linear-attn 3,700。m355 上 8 卡 BF16 实测
   20000 步约 11 小时，按同样比例换算：attn 约 17 小时，linear-attn 约 28 小时，suite 合计约 28 小时。
 - checkpoint 每 5000 步存一次，保留最近 2 份（torchtitan 不允许少于 2 份）。一份约 250GB
-  （20B 参数的 fp32 权重加 Adam 状态，估算值），一组最多占约 500GB。磁盘不够时，跑下一组之前删掉上一组的
-  `<dump 目录>/checkpoint`。
+  （20B 参数的 fp32 权重加 Adam 状态，估算值）。torchtitan 先存新的再删旧的，所以存第 15000 步时会短暂有
+  3 份，约 750GB；最后一步只存权重。磁盘不够时，跑下一组之前删掉上一组的 `<dump 目录>/checkpoint`。
 
 ## 和旧曲线对照
 

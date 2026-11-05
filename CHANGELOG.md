@@ -2,12 +2,21 @@
 
 ## v0.2.0 [dev]
 
+- Added
+
+  - In MLPerf training benchmark, the reference impl of GPT-OSS-20B given by Primus-Megatron is inconsistent with OpenAI's release in the following ways:
+      * DeepSeek-V3-style MoE
+      * No linear bias
+      * No expert balancing
+      * Initialization follows Megatron's default behavior with std=0.008
+    We introduce a "20b_megatron" flavor to cover these differences.
+
 - Changed
-  - **[BREAKING CHANGE]** Vendored TorchTitan is now the 20261023 tree.
+  - Vendored TorchTitan is now the 20261023 tree.
+  - **[BREAKING CHANGE]** Replacing training tensor wrapper with LPT modules.
+    - The upstream's decision to introduce spmd_types breaks the custom kernel dispatch of `torch._grouped_mm`. Luckily they now have `Linear` module and `GroupedLinear` module for easy conversion. We have a `lpt_module` method generating LPT modules based on original ones.
   - Dotted CLI overrides for parallelism and `training.max_context_length` are applied by replaying the recorded `build_model_config` with the original flavor and attention backend. `expert_parallel_degree > 1` disables CUDA graphs because the stock expert-parallel dispatcher synchronizes with the CPU.
   - Llama 3 uses `CosSinRoPE` so the Hugging Face query/key layout survives the TorchTitan update.
-- Fixed
-
 
 ## v0.1.0 [dev]
 

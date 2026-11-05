@@ -24,8 +24,14 @@ class PerChannelNormObserver(Observer):
         self.register_buffer("num_samples", torch.zeros([1], dtype=torch.int32, device=self.device))
 
     def make_empty_row_scalars(self) -> torch.Tensor:
-        weight = self.module().weight
-        num_columns = weight.shape[1]
+        module = self.module()
+        weight = module.weight
+        if isinstance(module, torch.nn.Linear):
+            num_columns = weight.shape[-1]
+        elif TransformerConv1D and isinstance(module, TransformerConv1D):
+            num_columns = weight.shape[0]
+        else:
+            num_columns = weight.shape[1]
         S = torch.zeros(num_columns, device=self.device)
         if isinstance(weight, DTensor):
             S = DTensor.from_local(S, device_mesh=weight.device_mesh, placements=(Partial("avg"),))
@@ -51,16 +57,14 @@ class PerChannelNormObserver(Observer):
 
             module = self.module()
             inp = x_orig.detach()
-            if inp.dim() == 2:
-                inp = inp.unsqueeze(0)
-
-            num_added = inp.shape[0]  # note this is the number of dataset samples, not
-            # multiplied by the sequence length
-
             if isinstance(module, torch.nn.Linear) or (TransformerConv1D and isinstance(module, TransformerConv1D)):
-                if inp.dim() == 3:
-                    inp = inp.reshape((-1, inp.shape[-1]))
-                inp = inp.t()
+                num_added = inp.shape[0] if inp.dim() > 2 else 1
+                inp = inp.reshape((-1, inp.shape[-1])).t()
+            else:
+                if inp.dim() == 2:
+                    inp = inp.unsqueeze(0)
+                num_added = inp.shape[0]  # note this is the number of dataset samples, not
+                # multiplied by the sequence length
 
             if isinstance(module, torch.nn.Conv2d):
                 unfold = torch.nn.Unfold(

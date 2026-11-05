@@ -19,7 +19,7 @@ import torch
 from torch.nn import Module
 from pydantic import Field, PrivateAttr, model_validator
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.tools.logging import logger
+import logging
 from torchtitan.tools.utils import device_type
 
 from alto.observers import Observer
@@ -30,17 +30,25 @@ from alto.utils.pytorch.module import (
     get_prunable_layers,
     match_targets,
 )
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from torchtitan.protocols.model import BaseModel
+    from torchtitan.models.base import BaseModel
 
 LAYER_OBSERVER_BASE_NAME = "sparsity"
 
 DEFAULT_SUBLAYER_GROUPS = [
-    ["wq", "wk", "wv", "q_proj", "k_proj", "v_proj"],
+    ["wqkv", "wq", "wk", "wv", "q_proj", "k_proj", "v_proj"],
     ["wo", "o_proj"],
-    ["w1", "w3", "gate_proj", "up_proj"],
+    ["w13", "w1", "w3", "gate_proj", "up_proj"],
     ["w2", "down_proj"],
 ]
+
+
+def flatten_output_dims(weight: torch.Tensor) -> torch.Tensor:
+    """Present a stacked native linear weight as its logical 2D GEMM matrix."""
+    return weight.flatten(0, -2) if weight.ndim > 2 else weight
 
 
 def calibrate_input_hook(module: Module, args: Any, base_name: str):
@@ -108,7 +116,7 @@ class SparsityModifierBase(Modifier):
             if isinstance(self.sparsity, (list, dict)):
                 if len(self._target_layers) == len(self.sparsity):
                     continue
-                if len(self.sparsity) == m.n_layers:
+                if len(self.sparsity) == len(m.layers):
                     continue
                 if self._is_dict_with_digit_keys(self.sparsity) and len(self.sparsity) == len(
                         get_layers(self.sequential_targets, m)):
@@ -144,8 +152,7 @@ class SparsityModifierBase(Modifier):
                     "forward_pre",
                 )
 
-        logger.info(f"{self.__class__.__name__}: {len(self._module_names)} modules, "
-                    f"{len(self._sequential_blocks)} sequential blocks")
+        logger.info(f'{self.__class__.__name__}: {len(self._module_names)} modules, {len(self._sequential_blocks)} sequential blocks')
         return True
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
@@ -160,16 +167,14 @@ class SparsityModifierBase(Modifier):
 
     def on_post_step(self, model_parts: list[Module], **kwargs) -> bool:
         if not self.sequential:
-            logger.info(f"{self.__class__.__name__}.on_post_step: mode=global-single-forward")
+            logger.info(f'{self.__class__.__name__}.on_post_step: mode=global-single-forward')
             return self._fallback_post_step()
         if not self._captured_inputs:
-            logger.warning("No block inputs captured; falling back to global-single-forward")
+            logger.warning('No block inputs captured; falling back to global-single-forward')
             return self._fallback_post_step()
 
         mode = f"sequential-{self.sequential_granularity}"
-        logger.info(f"{self.__class__.__name__}.on_post_step: mode={mode}, "
-                    f"{len(self._captured_inputs)} microbatches, "
-                    f"{len(self._sequential_blocks)} blocks")
+        logger.info(f'{self.__class__.__name__}.on_post_step: mode={mode}, {len(self._captured_inputs)} microbatches, {len(self._sequential_blocks)} blocks')
         block_inputs = self._captured_inputs
         n_blocks = len(self._sequential_blocks)
 
@@ -177,7 +182,7 @@ class SparsityModifierBase(Modifier):
             block_mods = self._block_modules.get(blk_idx, set())
 
             if not block_mods:
-                logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: no target modules, propagating")
+                logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: no target modules, propagating')
                 block_inputs = self._forward_block(block, block_inputs)
                 continue
 
@@ -186,7 +191,7 @@ class SparsityModifierBase(Modifier):
             else:
                 self._process_block_whole(blk_idx, blk_name, block, block_inputs, block_mods)
 
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward")
+            logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: block-level re-forward')
             block_inputs = self._forward_block(block, block_inputs)
 
         self._cleanup()
@@ -199,15 +204,14 @@ class SparsityModifierBase(Modifier):
             if mod in self._layer_observers:
                 self._layer_observers[mod].clear_stats()
                 self._layer_observers[mod].enable()
-        logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: "
-                    f"collecting stats, {len(block_mods)} modules")
+        logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: collecting stats, {len(block_mods)} modules')
         with torch.no_grad():
             for inp_args, inp_kwargs in block_inputs:
                 block(*inp_args, **inp_kwargs)
         for mod in block_mods:
             if mod in self._layer_observers:
                 self._layer_observers[mod].disable(clear=False)
-        logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}]: compressing")
+        logger.info(f'  Block {blk_idx}/{n_blocks} [{blk_name}]: compressing')
         self._scoped_compress(block_mods)
 
     def _process_block_sublayer(self, blk_idx, blk_name, block, block_inputs, block_mods):
@@ -227,13 +231,11 @@ class SparsityModifierBase(Modifier):
             if not group_mods:
                 continue
             remaining -= group_mods
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: "
-                        f"{[mod_name_map.get(m, '?') for m in group_mods]}")
+            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] sub-group {grp_idx}: {[mod_name_map.get(m, '?') for m in group_mods]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, group_mods)
 
         if remaining:
-            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: "
-                        f"{[mod_name_map.get(m, '?') for m in remaining]}")
+            logger.info(f"  Block {blk_idx}/{n_blocks} [{blk_name}] remaining: {[mod_name_map.get(m, '?') for m in remaining]}")
             self._process_block_whole(blk_idx, blk_name, block, block_inputs, remaining)
 
     def on_finalize(self, model_parts: list[Module], **kwargs) -> bool:
@@ -324,9 +326,7 @@ class SparsityModifierBase(Modifier):
                 if isinstance(module, torch.nn.Embedding):
                     continue
                 if name.endswith("output"):
-                    logger.warning("`output` was previously auto-ignored by SparseGPT and Wanda "
-                                   "modifiers and is not advised. Please add `re:.*output` to "
-                                   "your ignore list if this was unintentional")
+                    logger.warning('`output` was previously auto-ignored by SparseGPT and Wanda modifiers and is not advised. Please add `re:.*output` to your ignore list if this was unintentional')
                 yield index, name, module
 
     def _initialize_module_name_mappings(self):

@@ -11,7 +11,10 @@ import re
 from dataclasses import dataclass, field
 
 from torch.nn import Module
-from torchtitan.tools.logging import logger
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 __all__ = ["LayerMapping", "resolve_mappings"]
 
@@ -83,8 +86,7 @@ def resolve_mappings(
                         break
 
             if not balance_modules:
-                logger.warning(f"SmoothQuant/AWQ: no balance layers found for "
-                               f"{smooth_name}, skipping")
+                logger.warning(f'SmoothQuant/AWQ: no balance layers found for {smooth_name}, skipping')
                 continue
 
             resolved.append(

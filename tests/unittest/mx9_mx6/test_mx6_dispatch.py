@@ -10,7 +10,7 @@ tests the *wiring* one layer up: after ``patch_fake_quantize()`` replaces
 ``format == "mx6"`` must route to the REAL packed Triton kernel
 (``convert_to_mx`` with ``target_dtype="mx6"``), NOT the ``mx6_fake_quantize``
 emulation -- this mirrors "mx9"'s method exactly (see
-``alto/models/patcher.py`` and commit ``95b1114`` for mx9's validated
+``alto/patches/patcher.py`` and commit ``95b1114`` for mx9's validated
 precedent). Plain int8 args (no ``format``) must fall through to the original
 implementation untouched.
 

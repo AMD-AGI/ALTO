@@ -34,8 +34,6 @@ from alto.kernels.fp4.mxfp4.mxfp_quantization import (
 from alto.kernels.dge import dge_bwd
 from alto.kernels.hadamard_transform.transform import (HadamardFactory, HadamardTransform)
 from ..macro_block_scaling import macro_block_scaling, macro_block_descaling
-from ...fp4_common.tensor_wrappers import unwrap_weight_wrapper
-
 # ============ Triton kernel for contiguous grouped GEMM backward inputs ============
 
 
@@ -627,7 +625,6 @@ class MXFP4GroupedGEMM(torch.autograd.Function):
             quant_axis_w = -2
             requant_axis_w = -1
 
-        expert_weights = unwrap_weight_wrapper(expert_weights)
         if use_macro_block_scaling:
             inputs_scaled, input_mbs = macro_block_scaling(inputs, axis=-1, use_2d_block=use_2dblock_x)
             expert_weights_scaled, expert_weight_mbs = macro_block_scaling(expert_weights,

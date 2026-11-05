@@ -7,7 +7,7 @@
 #
 # Usage:
 #   bash examples/ALPS_Llama_3.1_8B.sh
-#   NGPU=1 COMM_MODE=local_tensor bash examples/ALPS_Llama_3.1_8B.sh
+#   COMM_MODE=fake_backend bash examples/ALPS_Llama_3.1_8B.sh  # config dry run
 rm -rf outputs/
 set -ex
 

@@ -117,7 +117,7 @@ def apis(monkeypatch, request):
     recipe_mod = _load(monkeypatch, "alto.config.recipe", "alto/config/recipe.py")
     sys.modules["alto.config"].Recipe = recipe_mod.Recipe
 
-    patcher = _load(monkeypatch, "alto.models.patcher", "alto/models/patcher.py")
+    patcher = _load(monkeypatch, "alto.patches.patcher", "alto/patches/patcher.py")
     patcher.ModelPatcher.patch_fake_quantize()
 
     _make_pkg(monkeypatch, "alto.apis", os.path.join(ROOT, "alto/apis"))

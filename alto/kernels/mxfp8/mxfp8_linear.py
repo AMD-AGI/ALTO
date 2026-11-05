@@ -12,8 +12,6 @@ from torch.library import triton_op, wrap_triton
 import triton
 import triton.language as tl
 
-from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
-
 from .mxfp8_quantization import (
     BLOCK_SIZE_DEFAULT,
     SUPPORTED_FORMATS,
@@ -311,8 +309,6 @@ class MXFP8LinearFunction(torch.autograd.Function):
         use_2dblock_x: bool = False,
         use_2dblock_w: bool = False,
     ) -> torch.Tensor:
-        weight = unwrap_weight_wrapper(weight)
-
         if fp8_variant not in SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported FP8 variant: {fp8_variant}. Supported: {SUPPORTED_FORMATS}")
         if x.dtype not in (torch.float32, torch.bfloat16):

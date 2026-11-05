@@ -18,11 +18,14 @@ import numpy as np
 
 import torch
 from torch.nn import Module
-from torchtitan.tools.logging import logger
 
-from alto.modifiers.sparsification.base import SparsityModifierBase
+from alto.modifiers.sparsification.base import SparsityModifierBase, flatten_output_dims
 from alto.observers.hessian import PRECISION, HessianObserver
 from alto.utils.pytorch.module import TransformerConv1D
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 __all__ = ["AlpsModifier"]
 
@@ -95,7 +98,7 @@ class AlpsModifier(SparsityModifierBase):
             sparsity = self._module_sparsities[module]
             num_samples = observer.num_samples
 
-            logger.info(f"Sparsifying {name} using {num_samples.item()} samples")
+            logger.info(f'Sparsifying {name} using {num_samples.item()} samples')
             assert isinstance(observer, HessianObserver), "AlpsModifier requires hessian observer"
             sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
@@ -133,6 +136,7 @@ class AlpsModifier(SparsityModifierBase):
             W = W.flatten(1)
         elif TransformerConv1D and isinstance(module, TransformerConv1D):
             W.transpose_(0, 1)
+        W = flatten_output_dims(W)
         W_mask_T = torch.zeros_like(W, dtype=torch.bool).T
         # Dampening: add small diagonal to H for numerical stability
         damp1 = self.dampening_frac * torch.mean(torch.diag(H)).item()
@@ -374,13 +378,13 @@ class AlpsModifier(SparsityModifierBase):
             R_k = R_k1 - alpha.unsqueeze(0) * (A @ P_k)
             R_k = R_k * A_supp  # keep residual zero outside support
             residual_norm = torch.norm(A @ X_k - B, dim=1)
-            logger.info("%03d | %8.4e" % (k, torch.max(residual_norm / B_norm)))
+            logger.info('%03d | %8.4e' % (k, torch.max(residual_norm / B_norm)))
             if (residual_norm <= stopping_matrix).all():
                 optimal = True
                 break
         end = time.perf_counter()
         if optimal:
-            logger.info("Terminated in %d steps (optimal). Took %.3f ms." % (k, (end - start) * 1000))
+            logger.info('Terminated in %d steps (optimal). Took %.3f ms.' % (k, (end - start) * 1000))
         else:
-            logger.info("Terminated in %d steps (reached maxiter). Took %.3f ms." % (k, (end - start) * 1000))
+            logger.info('Terminated in %d steps (reached maxiter). Took %.3f ms.' % (k, (end - start) * 1000))
         return X_k

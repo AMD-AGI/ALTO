@@ -47,7 +47,7 @@ class TrainingOpConfig:
       * MXFP4: apply a blockwise scale factor containing shared mantissa to each block
       * NVFP4: not implemented
     """
-    
+
     use_uos: bool = False
     """
     use 7.25 instead of 6 for MXFP4 target range.

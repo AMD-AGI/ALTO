@@ -14,10 +14,13 @@ from abc import abstractmethod
 from pydantic import ConfigDict
 import torch
 from torch.nn import Module
-from torchtitan.tools.logging import logger
 from alto.modifiers.utils import HooksMixin
+import logging
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from torchtitan.protocols.model import BaseModel
+    from torchtitan.models.base import BaseModel
 
 __all__ = ["Modifier"]
 
@@ -116,7 +119,7 @@ class Modifier(HooksMixin):
         match self.sequential_targets:
             case None:
                 block_class_name = next(iter(model.layers.values())).__class__.__name__
-                logger.info(f"Inferred sequential targets: {block_class_name}")
+                logger.info(f'Inferred sequential targets: {block_class_name}')
                 return [block_class_name]
             case str():
                 return [self.sequential_targets]

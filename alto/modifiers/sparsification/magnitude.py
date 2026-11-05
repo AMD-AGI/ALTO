@@ -11,10 +11,13 @@
 
 import torch
 from torch.nn import Module
-from torchtitan.tools.logging import logger
 
-from alto.modifiers.sparsification.base import SparsityModifierBase
+from alto.modifiers.sparsification.base import SparsityModifierBase, flatten_output_dims
 from alto.utils.pytorch.module import TransformerConv1D
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 __all__ = ["MagnitudeModifier"]
 
@@ -59,7 +62,7 @@ class MagnitudeModifier(SparsityModifierBase):
     def compress_modules(self):
         for module, name in self._module_names.items():
             sparsity = self._module_sparsities[module]
-            logger.info(f"Sparsifying {name} to {sparsity}")
+            logger.info(f'Sparsifying {name} to {sparsity}')
             sparsified_weight, W_mask = self._sparsify_weight(
                 module=module,
                 sparsity=sparsity,
@@ -93,6 +96,7 @@ class MagnitudeModifier(SparsityModifierBase):
         if TransformerConv1D and isinstance(module, TransformerConv1D):
             W = W.t()
 
+        W = flatten_output_dims(W)
         W_metric = torch.abs(W)
 
         # initialize a mask to be all False

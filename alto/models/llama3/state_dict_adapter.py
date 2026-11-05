@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import torch
-from torchtitan.models.llama3 import (
+from torchtitan.models.llama3.state_dict_adapter import (
     Llama3StateDictAdapter as OriginalLlama3StateDictAdapter,)
 from alto.components import StateDictAdapterMixin
 
@@ -23,9 +23,3 @@ class Llama3StateDictAdapter(OriginalLlama3StateDictAdapter):
 
     def update_storage_plan(self, state_dict: dict[str, torch.Tensor]):
         StateDictAdapterMixin.update_storage_plan(self, state_dict)
-
-    def _permute(self, w: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return w
-
-    def _reverse_permute(self, w: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return w

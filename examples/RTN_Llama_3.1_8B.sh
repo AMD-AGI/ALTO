@@ -14,12 +14,6 @@
 #    - Runs on a single GPU without torchrun or NCCL initialization
 #    - Useful for validating configuration and model setup
 #    Example: NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
-#
-# 2. "local_tensor" - Single-GPU debugging mode with simulated multi-GPU behavior
-#    - All communication and computation execute on a single shared GPU
-#    - Simulates the full training workflow without actual distributed communication
-#    - Useful for debugging distributed training logic locally
-#    Example: NGPU=32 COMM_MODE="local_tensor" ./run_train.sh
 rm -rf outputs/
 set -ex
 

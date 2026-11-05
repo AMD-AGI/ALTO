@@ -13,7 +13,7 @@ defaults to the last one. A recipe only needs to set it where that is the wrong
 axis, such as MX on Conv2d, whose blocks run along the input channels.
 
 The actual ``fake_quantize`` dispatch (``args.format == "mx9"`` -> mx9) lives in
-``alto.models.patcher.ModelPatcher.patch_fake_quantize`` where the single wrap of
+``alto.patches.patcher.ModelPatcher.patch_fake_quantize`` where the single wrap of
 ``compressed_tensors...forward.fake_quantize`` already happens.
 
 ``inject_format_field()`` is called at the top of this package's ``__init__`` (before

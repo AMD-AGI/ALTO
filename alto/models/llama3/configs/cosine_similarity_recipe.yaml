@@ -7,5 +7,5 @@ pruning_stage:
       sparsity: 0.25
       pruning_dimension: "layer"
       targets:
-        - "re:.*\\.wq$"
+        - "re:.*\\.wqkv$"
       ignore: ["lm_head"]

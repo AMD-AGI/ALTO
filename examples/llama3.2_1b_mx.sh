@@ -10,7 +10,7 @@
 #
 # Weight and input activations are quantized dynamically. format=="mx6"/"mx9"
 # dispatches to the packed Triton kernel (convert_to_mx / convert_from_mx) in
-# alto/models/patcher.py, not the fake-quantize emulation.
+# alto/patches/patcher.py, not the fake-quantize emulation.
 #
 # Usage (MX and MODEL_PATH are both required):
 #   MODEL_PATH=/path/to/Llama-3.2-1B MX=9 bash examples/llama3.2_1b_mx.sh
@@ -57,7 +57,8 @@ CHECKPOINT_FOLDER=${CHECKPOINT_FOLDER:-"./outputs/ckpt_${CONFIG}_$(date +%Y%m%d_
 
 exec bash examples/run.sh \
     --hf_assets_path "${MODEL_PATH}" \
-    --checkpoint.initial_load_path "${MODEL_PATH}" \
-    --checkpoint.folder "${CHECKPOINT_FOLDER}" \
+    --checkpointer.initial_load_path "${MODEL_PATH}" \
+    --checkpointer.initial_load_in_hf true \
+    --checkpointer.folder "${CHECKPOINT_FOLDER}" \
     --validator.steps "${VALIDATOR_STEPS}" \
     "$@"

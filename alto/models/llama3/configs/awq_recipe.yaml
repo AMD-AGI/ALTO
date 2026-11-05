@@ -10,13 +10,10 @@ quantization_stage:
       mappings:
         - smooth_layer: "re:.*attention_norm"
           balance_layers:
-            - "re:.*attention.wq"
-            - "re:.*attention.wk"
-            - "re:.*attention.wv"
+            - "re:.*attention.qkv_linear.wqkv"
         - smooth_layer: "re:.*ffn_norm"
           balance_layers:
-            - "re:.*feed_forward.w1"
-            - "re:.*feed_forward.w3"
+            - "re:.*feed_forward.w13"
       config_groups:
         group_0:
           weights:

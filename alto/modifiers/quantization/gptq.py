@@ -21,7 +21,7 @@ from compressed_tensors.quantization import (
 from compressed_tensors.utils import getattr_chain, match_named_modules
 from pydantic import PrivateAttr
 from torch.nn import Module
-from torchtitan.tools.logging import logger
+import logging
 from torchtitan.tools.utils import device_type
 
 from alto.observers.base import Observer
@@ -29,9 +29,17 @@ from alto.observers.hessian import PRECISION, HessianGPTQObserver
 from .base import QuantizationModifier
 from .calibration import calibrate_activations, update_weight_zp_scale
 
+logger = logging.getLogger(__name__)
+
+
 __all__ = ["GPTQModifier"]
 
 HESSIAN_BASE_NAME = "gptq_hessian"
+
+
+def _flatten_output_dims(tensor: torch.Tensor) -> torch.Tensor:
+    """Flatten native stacked projection axes for GPTQ's 2D matrix algorithm."""
+    return tensor.flatten(0, -2) if tensor.ndim > 2 else tensor
 
 
 def _hessian_hook(module: Module, args: Any, base_name: str):
@@ -80,7 +88,7 @@ class GPTQModifier(QuantizationModifier):
                 )
                 self._hessian_observers[module] = obs
 
-        logger.info(f"GPTQModifier: {len(self._hessian_observers)} Hessian observers")
+        logger.info(f'GPTQModifier: {len(self._hessian_observers)} Hessian observers')
         return result
 
     def on_pre_step(self, model_parts: list[Module], **kwargs) -> bool:
@@ -158,13 +166,18 @@ class GPTQModifier(QuantizationModifier):
     def _gptq_quantize(self, module: Module):
         obs = self._hessian_observers[module]
         quant_args = getattr_chain(module, "quantization_scheme.weights")
-        logger.info(f"Quantizing {self._hessian_names[module]} ({obs.num_samples} samples)")
+        logger.info(f'Quantizing {self._hessian_names[module]} ({obs.num_samples} samples)')
 
-        W_orig = module.weight.data.clone()
+        weight_shape = module.weight.shape
+        W_orig = _flatten_output_dims(module.weight.data.clone())
         update_weight_zp_scale(module)
 
-        scale = module.weight_scale.data.clone().to(PRECISION)
-        zp = module.weight_zero_point.data.clone() if hasattr(module, "weight_zero_point") else None
+        scale = _flatten_output_dims(module.weight_scale.data.clone()).to(PRECISION)
+        zp = (
+            _flatten_output_dims(module.weight_zero_point.data.clone())
+            if hasattr(module, "weight_zero_point")
+            else None
+        )
         gs = getattr(module, "weight_global_scale", None)
 
         loss, W_q = _gptq_block_quantize(
@@ -177,9 +190,9 @@ class GPTQModifier(QuantizationModifier):
             self.block_size,
             self.dampening_frac,
         )
-        module.weight.data.copy_(W_q.to(module.weight.dtype))
+        module.weight.data.copy_(W_q.reshape(weight_shape).to(module.weight.dtype))
         module.quantization_status = QuantizationStatus.COMPRESSED
-        logger.info(f"  {self._hessian_names[module]}: loss={loss:.6f}")
+        logger.info(f'  {self._hessian_names[module]}: loss={loss:.6f}')
 
 
 # ======================================================================
@@ -222,7 +235,7 @@ def _gptq_block_quantize(W, H, scale, zp, quant_args, global_scale, blocksize, d
         H = torch.cholesky_inverse(H)
         Hinv = torch.linalg.cholesky(H, upper=True)
     except torch._C._LinAlgError:
-        logger.warning("Hessian inversion failed, falling back to RTN.")
+        logger.warning('Hessian inversion failed, falling back to RTN.')
         Hinv = torch.eye(num_cols, dtype=PRECISION, device=H.device)
 
     Q, losses = torch.zeros_like(W), torch.zeros(num_rows, device=W.device)

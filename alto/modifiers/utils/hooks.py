@@ -14,9 +14,12 @@ from compressed_tensors.modeling import (
     register_query_hook,
     register_value_hook,
 )
-from torchtitan.tools.logging import logger
+import logging
 from pydantic import BaseModel
 from torch.utils.hooks import RemovableHandle
+
+logger = logging.getLogger(__name__)
+
 
 __all__ = ["HooksMixin"]
 
@@ -103,7 +106,7 @@ class HooksMixin(BaseModel):
         register_function = self._get_register_function(target, hook_type)
         handle = register_function(wrapped_hook, **kwargs)
         self._hooks.add(handle)
-        logger.debug(f"{self} added {handle}")
+        logger.debug(f'{self} added {handle}')
 
         return handle
 

@@ -29,7 +29,6 @@ from typing import Optional
 import torch
 
 from alto.kernels.dge import dge_bwd
-from alto.kernels.fp4.fp4_common import unwrap_weight_wrapper
 from alto.kernels.fp4.nvfp4.nvfp_quantization import _qdq, convert_from_nvfp4
 from alto.kernels.hadamard_transform import HadamardTransform
 from .autotune import ALIGN_SIZE_M
@@ -79,7 +78,6 @@ class NVFP4GroupedGEMM(torch.autograd.Function):
     ) -> torch.Tensor:
         M_bufferlen = inputs.shape[0]
         original_dtype = inputs.dtype
-        expert_weights = unwrap_weight_wrapper(expert_weights)
         # Align weight dtype with activation so saved QDQ tensors share a
         # common dtype across forward / backward under AMP autocast.
         if expert_weights.dtype != original_dtype:

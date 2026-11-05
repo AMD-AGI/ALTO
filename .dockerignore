@@ -1,0 +1,67 @@
+# Version control
+.git
+**/.git
+.github
+.gitignore
+.gitattributes
+.gitmodules
+
+# Python caches and bytecode
+__pycache__
+**/__pycache__
+*.py[cod]
+*.pyc
+*.pyo
+*$py.class
+.pytest_cache
+**/.pytest_cache
+.mypy_cache
+**/.mypy_cache
+.ruff_cache
+**/.ruff_cache
+.hypothesis
+**/.hypothesis
+.tox
+.nox
+.coverage
+.coverage.*
+htmlcov
+*.egg-info
+**/*.egg-info
+.eggs
+/dist
+/build
+/wheels
+
+# Virtual environments and local secrets
+.venv
+venv
+env
+.env
+.env.*
+*.env
+
+# Training outputs, checkpoints, and traces
+outputs
+**/outputs
+*outputs
+comm_traces
+**/comm_traces
+common_traces
+**/common_traces
+profiling
+**/profiling
+wandb
+**/wandb
+*.log
+
+# Local datasets and downloaded weights at the repository root
+/datasets
+/models
+
+# Editor and agent metadata
+.vscode
+.idea
+.cursor
+.cursorignore
+.cursorindexingignore

@@ -162,6 +162,81 @@ To train the same model with NVFP4 instead, set `scheme: "nvfp4"` and `two_level
 
 ## Export and evaluation
 
+### Dynamic INT8 with power-of-two scales
+
+The existing `int8_dynamic` API accepts `scale_type="pot"`. Scale calculation
+uses PoT rounding, while range reduction and QDQ reuse compressed-tensors'
+ordinary INT8 path. `scale_type` has two options:
+
+| Value | Scale policy |
+|---|---|
+| `"float"` (default) | Ordinary floating-point scales, preserving the existing INT8 behavior. |
+| `"pot"` | Scales rounded up to powers of two using the positive INT8 endpoint, `amax / 127`. |
+
+Applications select the policy explicitly in their recipe. ALTO does not
+select it based on model names, module paths or application-specific settings.
+For example, to use PoT scales with per-tensor activations and dynamic weights:
+
+```python
+from alto.apis import apply_quantization, create_quantization_recipe
+
+recipe = create_quantization_recipe(
+    "int8_dynamic",
+    targets=("Linear", "Conv2d"),
+    scale_type="pot",
+    activation_strategy="tensor",
+    dynamic_weights=True,
+)
+apply_quantization(model, recipe)
+```
+
+Weights and input activations both compute scales from the current tensor on
+each forward pass. The scale is `2 ** ceil(log2(absmax / 127))`, with scale 1
+for a zero range; values use round-to-nearest-even, zero point 0 and signed
+INT8 limits `[-128, 127]`. Arithmetic follows the input tensor's dtype.
+No calibration data is required. Original weights and biases are preserved. This uses quantize /
+dequantize evaluation with floating-point Linear/Conv2d operations, not an INT8
+GEMM kernel.
+
+`scale_type` only changes the scale policy. Omitting the other options keeps
+static per-tensor weights and dynamic activations (per-token for Linear,
+per-tensor for Conv2d). Omitting all options preserves the original ordinary
+floating-point scales. `int8_static` can also use `scale_type="pot"` and still
+requires a calibration callback. Both scale policies use the same
+`int8_dynamic` or `int8_static` entry point.
+
+The ALTO API accepts a module or subtree; the caller selects the precision for
+each part of its model. For example, an application can use INT8 on an encoder
+and MX6 on a head. Exclude
+`nn.MultiheadAttention.out_proj` when it is accessed through the functional
+attention implementation, which bypasses the module's quantized forward.
+For example:
+
+```python
+apply_quantization(model.encoder, recipe)
+apply_quantization(model.head, create_quantization_recipe(
+    "mx6", targets=("Linear", "Conv2d"), ignore=(r"re:.*attn\.out_proj$",),
+))
+```
+
+Recipes can be saved with `recipe.yaml("int8.yaml")` and loaded
+with `load_quantization_recipe()`. In custom recipe groups, use the following
+arguments for both `weights` and `input_activations`:
+
+```yaml
+num_bits: 8
+type: int
+symmetric: true
+strategy: tensor
+dynamic: true
+scale_type: pot
+```
+
+Old recipes with `format: int8_pot` are normalized to `scale_type: pot` on
+loading their quantization configuration. There is no separate PoT QDQ branch.
+
+### Hugging Face export
+
 TorchTitan typically saves checkpoints in PyTorch DCP format; you can convert to Hugging Face Safetensors and run lm-eval tasks with the bundled export utility:
 
 ```bash

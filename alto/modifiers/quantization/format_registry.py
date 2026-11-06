@@ -1,27 +1,13 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 #
 # SPDX-License-Identifier: MIT
-"""Runtime patch that wires emulated formats into the standard quant path.
+"""Add ALTO's format, block_axis, and scale_type fields to QuantizationArgs.
 
-Importing this module injects real ``format`` and ``block_axis`` fields into
-``compressed_tensors.QuantizationArgs`` so recipe values like ``format: mx9``
-survive pydantic parsing and become readable via
-``getattr(args, "format", None)`` (``QuantizationArgs`` rejects unknown fields).
-
-``block_axis`` is the tensor axis the packed formats group elements along, and
-defaults to the last one. A recipe only needs to set it where that is the wrong
-axis, such as MX on Conv2d, whose blocks run along the input channels.
-
-The actual ``fake_quantize`` dispatch (``args.format == "mx9"`` -> mx9) lives in
-``alto.patches.patcher.ModelPatcher.patch_fake_quantize`` where the single wrap of
-``compressed_tensors...forward.fake_quantize`` already happens.
-
-``inject_format_field()`` is called at the top of this package's ``__init__`` (before
-``QuantizationModifier`` is imported) so the fields exist before the modifier
-compiles its nested ``QuantizationScheme`` schema.
+Rebuild the nested pydantic schemas before recipes are parsed. MX dispatch and
+INT8 scale calculation are installed by alto.patches.patcher.ModelPatcher.
 """
 
-from typing import Optional
+from typing import Literal, Optional
 
 _FORMAT_FIELD_INJECTED = False
 
@@ -41,6 +27,7 @@ def inject_format_field() -> None:
     for name, field in (
         ("format", FieldInfo(annotation=Optional[str], default=None)),
         ("block_axis", FieldInfo(annotation=int, default=DEFAULT_BLOCK_AXIS)),
+        ("scale_type", FieldInfo(annotation=Literal["float", "pot"], default="float")),
     ):
         if name not in QuantizationArgs.model_fields:
             QuantizationArgs.model_fields[name] = field
@@ -55,6 +42,16 @@ def inject_format_field() -> None:
         QuantizationConfig.model_rebuild(force=True)
 
     _FORMAT_FIELD_INJECTED = True
+
+
+def validate_scale_type(args):
+    """PoT changes symmetric INT8 scales; tensor layout and QDQ stay upstream."""
+    if args is None or args.scale_type == "float":
+        return
+    if not (args.num_bits == 8 and args.type == "int" and args.symmetric and args.format is None and
+            args.scale_dtype is None):
+        raise ValueError("scale_type=pot requires symmetric INT8 (num_bits=8, type=int), "
+                         "with no format or scale_dtype override")
 
 
 inject_format_field()

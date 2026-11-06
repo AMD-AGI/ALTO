@@ -4,17 +4,19 @@
 """Build, load, and apply post-training quantization recipes."""
 
 import copy
+import logging
 import os
 import re
 from typing import Callable, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
-from torchtitan.tools.logging import logger
 
 from alto.config import Recipe
 from alto.kernels.mx import MX_QUANT_BIT
 from alto.modifiers.quantization import QuantizationModifier
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "apply_quantization",
@@ -33,23 +35,40 @@ _INT8_DYNAMIC_STRATEGY = {"Linear": "token", "Conv2d": "tensor"}
 
 
 def create_quantization_recipe(
-        scheme: str,
-        targets: Sequence[str] = ("Linear",),
-        ignore: Sequence[str] = (),
+    scheme: str,
+    targets: Sequence[str] = ("Linear",),
+    ignore: Sequence[str] = (),
+    *,
+    scale_type: str = "float",
+    activation_strategy: Optional[str] = None,
+    dynamic_weights: bool = False,
 ) -> Recipe:
     """Build a weight + input-activation recipe, one group per module type.
 
     :param scheme: fully dynamic ``"mx6"``/``"mx9"``; ``"int8_dynamic"``, with
         static per-tensor weights and activations scaled at run time, per token
-        on Linear and per tensor on Conv2d; or static per-tensor
-        ``"int8_static"`` with minmax activation calibration
-    :param targets: module types, out of ``Linear`` and ``Conv2d``. Conv2d
-        requires the caller to install its quantization initialization first
+        on Linear and per tensor on Conv2d; or static per-tensor ``"int8_static"``
+        with minmax calibration
+    :param targets: module types, out of ``Linear`` and ``Conv2d``
     :param ignore: module names covering their subtree, or ``re:`` patterns
+    :param scale_type: ``"float"`` (default) or ``"pot"`` for INT8 scales;
+        PoT uses ceil(log2(amax / 127)) and scale 1 for zero range
+    :param activation_strategy: dynamic INT8 input granularity, ``"tensor"`` or
+        ``"token"``; None preserves the per-module defaults
+    :param dynamic_weights: calculate INT8 weight scales on every forward pass;
+        False preserves the original static-weight behavior
     :return: a recipe for :func:`apply_quantization`
     """
     if scheme not in SCHEMES:
         raise ValueError(f"unsupported scheme {scheme!r}; choose one of: {', '.join(SCHEMES)}")
+    if scale_type not in ("float", "pot"):
+        raise ValueError("scale_type must be 'float' or 'pot'")
+    if scheme in MX_QUANT_BIT and (scale_type != "float" or activation_strategy is not None or dynamic_weights):
+        raise ValueError("scale_type, activation_strategy and dynamic_weights overrides apply to INT8 only")
+    if activation_strategy not in (None, "tensor", "token"):
+        raise ValueError("activation_strategy must be 'tensor' or 'token'")
+    if scheme == "int8_static" and activation_strategy is not None:
+        raise ValueError("activation_strategy applies to int8_dynamic only")
     targets = list(dict.fromkeys([targets] if isinstance(targets, str) else targets))
     if not targets or any(target not in _BLOCK_AXIS for target in targets):
         raise ValueError(f"targets must be drawn from {', '.join(_BLOCK_AXIS)}; got {targets}")
@@ -59,13 +78,14 @@ def create_quantization_recipe(
     for target in targets:
         weights = {"num_bits": 8, "type": "int", "symmetric": True, "strategy": "tensor"}
         if scheme in MX_QUANT_BIT:
-            weights.update(num_bits=MX_QUANT_BIT[scheme], dynamic=True,
-                           format=scheme, block_axis=_BLOCK_AXIS[target])
+            weights.update(num_bits=MX_QUANT_BIT[scheme], dynamic=True, format=scheme, block_axis=_BLOCK_AXIS[target])
+        else:
+            weights.update(dynamic=dynamic_weights, scale_type=scale_type)
         inputs = dict(weights)
         if scheme == "int8_dynamic":
-            inputs.update(strategy=_INT8_DYNAMIC_STRATEGY[target], dynamic=True)
+            inputs.update(strategy=activation_strategy or _INT8_DYNAMIC_STRATEGY[target], dynamic=True)
         elif scheme == "int8_static":
-            inputs["observer"] = "minmax"
+            inputs.update(dynamic=False, observer="minmax")
         config_groups[f"group_{target.lower()}"] = {
             "targets": [target],
             "weights": weights,

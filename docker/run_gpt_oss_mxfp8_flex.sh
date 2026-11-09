@@ -8,6 +8,7 @@
 #   ./docker/run_gpt_oss_mxfp8_flex.sh mxfp8-attn    # 8-GPU 20b_megatron, MXFP8 attention
 #
 # Extra arguments go to examples/run.sh, e.g. `mxfp8-attn --training.steps 100`.
+# Every non-shell run tees its output to logs/ in the repo.
 # The 20b modes need HF_HUB_DIR (holds models--openai--gpt-oss-20b) and
 # MEGATRON_DATA_DIR (holds the c4 .bin/.idx files); they are mounted where
 # alto/models/gpt_oss/config_registry.py expects them. The repo is mounted over
@@ -36,6 +37,12 @@ case "${MODE}" in
         exit 2
         ;;
 esac
+# Borrowed nodes can be reclaimed at any time, so logs live in the repo on shared storage.
+if [[ "${MODE}" != shell ]]; then
+    LOG_FILE="logs/gpt_oss_${MODE//-/_}_$(date -u +%Y%m%dT%H%M%SZ).log"
+    echo "Logging to ${ALTO_DIR}/${LOG_FILE}"
+    TRAIN_COMMAND="mkdir -p logs && ( ${TRAIN_COMMAND} ) 2>&1 | tee ${LOG_FILE}"
+fi
 
 DATA_MOUNTS=()
 if [[ "${MODE}" == bf16-flex || "${MODE}" == mxfp8-attn ]]; then

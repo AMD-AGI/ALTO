@@ -212,3 +212,6 @@ __marimo__/
 datasets/
 /models/
 comm_traces/
+
+# Training logs written by docker/ launchers
+logs/

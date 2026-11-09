@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+import os
+
 from torchtitan.trainer import Trainer
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.models.gpt_oss.config_registry import (
@@ -14,6 +16,7 @@ from alto.components.converter import ModelOptConverter
 __all__ = [
     "gpt_oss_debugmodel",
     "gpt_oss_debugmodel_lpt",
+    "gpt_oss_debugmodel_lpt_mxfp8_attn",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
@@ -21,6 +24,7 @@ __all__ = [
     "gpt_oss_20b_c4_mxfp8_attn",
     "gpt_oss_20b_c4_mxfp8_linear",
     "gpt_oss_20b_c4_mxfp8_linear_attn",
+    "gpt_oss_20b_lpt_mxfp8_attn",
 ]
 
 
@@ -40,6 +44,14 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
     config = gpt_oss_debugmodel()
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_debugmodel_lpt_mxfp8_attn() -> Trainer.Config:
+    config = gpt_oss_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_mxfp8_attn_recipe.yaml",),
     ],)
     return config
 
@@ -135,7 +147,7 @@ def gpt_oss_20b_c4() -> Trainer.Config:
     config.dataloader.dataset_path = None
     config.validator.dataloader.dataset = "c4_validation"
     config.validator.dataloader.dataset_path = None
-    config.checkpoint.interval = 5000
+    config.checkpoint.interval = 10000
     config.comm.train_timeout_seconds = 600
     return config
 
@@ -164,5 +176,34 @@ def gpt_oss_20b_c4_mxfp8_linear_attn() -> Trainer.Config:
     config.model_converters = ModelConvertersContainer.Config(converters=[
         ModelOptConverter.Config(
             recipe="./alto/models/gpt_oss/configs/mxfp8_linear_attn_consistent_delta_recipe.yaml",),
+    ],)
+    return config
+
+
+def gpt_oss_20b_lpt_mxfp8_attn() -> Trainer.Config:
+    """Real GPT-OSS-20B smoke path with MXFP8 BlockMask attention.
+
+    Keeps the production LPT shape (mxfp4 Linear/MoE) but routes Attention through
+    mxfp8_e4m3. Steps are shortened for integration validation only; the existing
+    ``gpt_oss_20b_lpt`` config is left unchanged.
+
+    Local smoke defaults point at the workspace HF assets and c4_test so this can
+    run without the production megatron dataset mount.
+    """
+    config = gpt_oss_20b_pretrain()
+    config.hf_assets_path = "/workspace/hf_models/gpt-oss-20b"
+    config.dump_folder = "gpt_oss_20b-lpt-mxfp8-attn-smoke-outputs"
+    config.training.steps = 10
+    config.lr_scheduler.warmup_steps = 0
+    config.lr_scheduler.decay_ratio = 1.0
+    config.dataloader.dataset = "c4_test"
+    config.dataloader.dataset_path = None
+    # Smoke default keeps EP=8; set GPT_OSS_SMOKE_EP when fewer free GPUs are available.
+    if "GPT_OSS_SMOKE_EP" in os.environ:
+        config.parallelism.expert_parallel_degree = int(os.environ["GPT_OSS_SMOKE_EP"])
+    config.validator.enable = False
+    config.checkpoint.enable = False
+    config.model_converters = ModelConvertersContainer.Config(converters=[
+        ModelOptConverter.Config(recipe="./alto/models/gpt_oss/configs/lpt_mxfp8_attn_recipe.yaml",),
     ],)
     return config

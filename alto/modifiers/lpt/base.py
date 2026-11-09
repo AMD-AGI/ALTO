@@ -37,6 +37,13 @@ class LowPrecisionTrainingModifier(Modifier):
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     use_uos: bool = False
 
+    attention_consistent_delta: bool = False
+    """
+    Derive the MXFP8 attention backward's delta from the quantized dO that the
+    dP GEMM consumes, so ``ds = p * (dp - delta)`` cancels dO's quantization
+    error instead of amplifying it. Leaves every backward dot on e4m3.
+    """
+
     deosc_step: int = 0
     """
     Step to enable weight de-oscillation.
@@ -142,6 +149,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
                     use_uos=self.use_uos,
+                    attention_consistent_delta=self.attention_consistent_delta,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

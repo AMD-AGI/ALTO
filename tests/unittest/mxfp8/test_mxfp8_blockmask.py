@@ -1,0 +1,465 @@
+"""Tests for the MXFP8 Flex BlockMask adapter and the kernel path it feeds.
+
+Everything except ``test_blockmask_kernel_matches_reference`` runs on CPU: the
+table walk and the mask materialization are plain PyTorch, so they can be
+validated before CDNA4 hardware is in the loop.
+"""
+
+import pytest
+import torch
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+from alto.kernels.mxfp8.blockmask import blockmask_attention_fp32_reference, prepare_block_mask
+from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
+
+from .utils import (
+    calc_cossim,
+    calc_snr,
+    mxfp8_attention_backward_reference_stage2,
+    mxfp8_attention_forward_reference,
+    mxfp8_blockmask_forward_reference,
+)
+
+cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA/ROCm device is required.")
+
+
+def _causal_window(window: int):
+    def mask_mod(batch, head, q_idx, kv_idx):
+        return (kv_idx <= q_idx) & ((q_idx - kv_idx) < window)
+
+    return mask_mod
+
+
+def _dense_mask(mask_mod, batch: int, heads: int, q_len: int, kv_len: int, device: str):
+    b = torch.arange(batch, device=device)[:, None, None, None]
+    h = torch.arange(heads, device=device)[None, :, None, None]
+    q = torch.arange(q_len, device=device)[None, None, :, None]
+    kv = torch.arange(kv_len, device=device)[None, None, None, :]
+    return mask_mod(b, h, q, kv)
+
+
+def test_prepare_blockmask_materializes_partial_slots_and_caches():
+    mask_mod = _causal_window(1)
+    block_mask = create_block_mask(mask_mod, 1, 1, 256, 256, device="cpu", BLOCK_SIZE=128)
+
+    prepared = prepare_block_mask(block_mask)
+    assert prepare_block_mask(block_mask) is prepared
+    assert prepared.kv_partial_mask.shape[1:] == (128, 128)
+    assert prepared.q_partial_mask.shape[1:] == (128, 128)
+
+    for q_block in range(prepared.kv_indices.shape[2]):
+        count = int(prepared.kv_num_blocks[0, 0, q_block])
+        for slot in range(count):
+            kv_block = int(prepared.kv_indices[0, 0, q_block, slot])
+            flat_slot = (q_block * prepared.kv_indices.shape[3]) + slot
+            expected = _dense_mask(mask_mod, 1, 1, 256, 256, "cpu")[0, 0,
+                q_block * 128:(q_block + 1) * 128, kv_block * 128:(kv_block + 1) * 128]
+            assert torch.equal(prepared.kv_partial_mask[flat_slot], expected)
+
+    for kv_block in range(prepared.q_indices.shape[2]):
+        count = int(prepared.q_num_blocks[0, 0, kv_block])
+        for slot in range(count):
+            q_block = int(prepared.q_indices[0, 0, kv_block, slot])
+            flat_slot = (kv_block * prepared.q_indices.shape[3]) + slot
+            expected = _dense_mask(mask_mod, 1, 1, 256, 256, "cpu")[0, 0,
+                q_block * 128:(q_block + 1) * 128, kv_block * 128:(kv_block + 1) * 128]
+            assert torch.equal(prepared.q_partial_mask[flat_slot], expected)
+
+
+def test_sparse_blockmask_matches_dense_window_and_gqa_gradients():
+    torch.manual_seed(7)
+    mask_mod = _causal_window(128)
+    block_mask = create_block_mask(mask_mod, 1, 1, 256, 256, device="cpu", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+
+    q = torch.randn(1, 2, 256, 32, requires_grad=True)
+    k = torch.randn(1, 1, 256, 32, requires_grad=True)
+    v = torch.randn(1, 1, 256, 32, requires_grad=True)
+    scale = 32**-0.5
+    output, lse = blockmask_attention_fp32_reference(q, k, v, prepared, scale)
+
+    dense = _dense_mask(mask_mod, 1, 2, 256, 256, "cpu")
+    scores = (q @ k.repeat_interleave(2, dim=1).transpose(-1, -2)) * scale
+    dense_lse = torch.logsumexp(scores.masked_fill(~dense, float("-inf")), dim=-1)
+    expected = torch.softmax(scores.masked_fill(~dense, float("-inf")), dim=-1) @ v.repeat_interleave(2, dim=1)
+    assert torch.allclose(output, expected, atol=2e-5, rtol=2e-5)
+    assert torch.allclose(lse, dense_lse, atol=2e-5, rtol=2e-5)
+
+    do = torch.randn_like(output)
+    got_grads = torch.autograd.grad((output * do).sum(), (q, k, v), retain_graph=True)
+    ref_grads = torch.autograd.grad((expected * do).sum(), (q, k, v))
+    for got, expected_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got, expected_grad, atol=2e-5, rtol=2e-5)
+
+
+def test_sparse_blockmask_empty_query_rows_are_zero():
+    def no_tokens(batch, head, q_idx, kv_idx):
+        return torch.zeros_like(q_idx + kv_idx, dtype=torch.bool)
+
+    block_mask = create_block_mask(no_tokens, 1, 1, 128, 128, device="cpu", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, 1, 128, 32, requires_grad=True)
+    k = torch.randn(1, 1, 128, 32, requires_grad=True)
+    v = torch.randn(1, 1, 128, 32, requires_grad=True)
+    output, lse = blockmask_attention_fp32_reference(q, k, v, prepared, 32**-0.5)
+
+    assert torch.count_nonzero(output) == 0
+    assert torch.count_nonzero(lse) == 0
+    dq, dk, dv = torch.autograd.grad(output.sum(), (q, k, v), allow_unused=True)
+    assert torch.count_nonzero(dq) == 0
+    assert torch.count_nonzero(dk) == 0
+    assert torch.count_nonzero(dv) == 0
+
+
+def _call_kernel(q, k, v, prepared, **overrides):
+    kwargs = dict(
+        bias=None,
+        alibi_slopes=None,
+        sm_scale=q.shape[-1]**-0.5,
+        dropout_p=0.0,
+        cu_seqlens_q=0,
+        cu_seqlens_k=0,
+        max_seqlens_q=q.shape[2],
+        max_seqlens_k=k.shape[2],
+        causal=False,
+        return_scores=False,
+        use_exp2=True,
+        layout="bhsd",
+        block_mask=prepared,
+    )
+    kwargs.update(overrides)
+    return triton_attention_mxfp8(q, k, v, **kwargs)
+
+
+@pytest.mark.parametrize("overrides, message", [
+    ({"causal": True}, "gets causality from the mask tables"),
+    ({"layout": "thd"}, "requires layout 'bhsd'"),
+    ({"dropout_p": 0.1}, "does not support dropout"),
+    ({"return_scores": True}, "does not return scores"),
+])
+def test_blockmask_entry_rejects_inputs_it_cannot_honor(overrides, message):
+    """Anything the table walk ignores must fail loudly, not be silently dropped."""
+    block_mask = create_block_mask(_causal_window(128), 1, 1, 128, 128, device="cpu", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, 2, 128, 64)
+    k = torch.randn(1, 2, 128, 64)
+    v = torch.randn(1, 2, 128, 64)
+    with pytest.raises(ValueError, match=message):
+        _call_kernel(q, k, v, prepared, **overrides)
+
+
+def test_blockmask_entry_rejects_sequence_length_mismatch():
+    block_mask = create_block_mask(_causal_window(128), 1, 1, 256, 256, device="cpu", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, 2, 128, 64)
+    k = torch.randn(1, 2, 128, 64)
+    v = torch.randn(1, 2, 128, 64)
+    with pytest.raises(ValueError, match="BlockMask was built for"):
+        _call_kernel(q, k, v, prepared)
+
+
+@cuda_only
+@pytest.mark.parametrize("window", [1, 128, 256, 1024])
+@pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
+def test_blockmask_kernel_matches_reference(window, num_head_q, num_head_kv):
+    """Kernel vs a reference that quantizes identically and walks the same order.
+
+    Both sides see the same mxfp8 operands and the same full-then-partial block
+    sequence, so a gap here is a Triton port bug (index tables, partial mask
+    addressing, empty-row handling) rather than quantization error.
+    """
+    torch.manual_seed(1234)
+    seqlen, head_dim = 512, 128
+    block_mask = create_block_mask(_causal_window(window), None, None, seqlen, seqlen, device="cuda", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+
+    q = torch.randn(2, num_head_q, seqlen, head_dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(2, num_head_kv, seqlen, head_dim, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(2, num_head_kv, seqlen, head_dim, device="cuda", dtype=torch.bfloat16)
+
+    o_kernel, lse_kernel, _ = _call_kernel(q.contiguous(), k.contiguous(), v.contiguous(), prepared)
+    o_ref, lse_ref = mxfp8_blockmask_forward_reference(q, k, v, prepared, head_dim**-0.5)
+
+    assert calc_cossim(o_ref, o_kernel) > 0.99
+    assert calc_snr(o_ref, o_kernel) > 30
+    assert torch.allclose(lse_kernel.float(), lse_ref.float(), atol=2e-2, rtol=2e-2)
+
+
+@cuda_only
+def test_blockmask_kernel_empty_query_tile_is_zero():
+    """An empty table must use the kernel early exit, not create -inf or NaN."""
+    def no_tokens(batch, head, q_idx, kv_idx):
+        return torch.zeros_like(q_idx + kv_idx, dtype=torch.bool)
+
+    block_mask = create_block_mask(no_tokens, None, None, 128, 128, device="cuda", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, 2, 128, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+
+    output, lse, _ = _call_kernel(q, k, v, prepared)
+    assert torch.count_nonzero(output) == 0
+    assert torch.count_nonzero(lse) == 0
+
+
+@cuda_only
+def test_blockmask_kernel_partial_tile_empty_rows_are_zero():
+    """Rows empty inside a nonempty partial tile must not poison the softmax."""
+    def alternating_diagonal(batch, head, q_idx, kv_idx):
+        return (q_idx % 2 == 0) & (q_idx == kv_idx)
+
+    block_mask = create_block_mask(alternating_diagonal, None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, 2, 256, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+
+    output, lse, _ = _call_kernel(q, k, v, prepared)
+    dense_mask = _dense_mask(alternating_diagonal, 1, 2, 256, 256, "cuda")
+    expected, expected_lse = mxfp8_attention_forward_reference(
+        q, k, v, 64**-0.5, causal=False, mask=dense_mask
+    )
+
+    assert torch.count_nonzero(output[:, :, 1::2]) == 0
+    assert torch.count_nonzero(lse[:, :, 1::2]) == 0
+    assert torch.allclose(output, expected, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(lse, expected_lse, atol=2e-2, rtol=2e-2)
+
+
+@cuda_only
+def test_blockmask_kernel_uses_per_batch_per_head_tables():
+    """Non-broadcast B/H dimensions must use their real strides, not stride zero."""
+    def shifted_diagonal(batch, head, q_idx, kv_idx):
+        return kv_idx == ((q_idx + batch + head) % 256)
+
+    block_mask = create_block_mask(shifted_diagonal, 2, 4, 256, 256, device="cuda", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(2, 4, 256, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+
+    output, lse, _ = _call_kernel(q, k, v, prepared)
+    dense_mask = _dense_mask(shifted_diagonal, 2, 4, 256, 256, "cuda")
+    expected, expected_lse = mxfp8_attention_forward_reference(
+        q, k, v, 64**-0.5, causal=False, mask=dense_mask
+    )
+
+    assert calc_cossim(expected, output) > 0.99
+    assert torch.allclose(lse, expected_lse, atol=2e-2, rtol=2e-2)
+
+
+@cuda_only
+# window=1 is a one-element softmax, so the true dQ/dK are zero; with a
+# consistent delta the reference returns exact zeros and cosine similarity
+# would only compare rounding noise.
+@pytest.mark.parametrize("window, consistent_delta", [
+    (1, False), (128, False), (256, False), (128, True), (256, True),
+])
+@pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
+@pytest.mark.parametrize("head_dim", [64, 192])
+def test_blockmask_backward_matches_same_quantization_reference(window, consistent_delta, num_head_q, num_head_kv,
+                                                                head_dim):
+    """dQ/dK/dV must consume the same sparse tables as the forward pass."""
+    torch.manual_seed(5678)
+    block_mask = create_block_mask(_causal_window(window), None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, num_head_q, 256, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, num_head_kv, 256, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn_like(k, requires_grad=True)
+    do = torch.randn_like(q)
+
+    output = _call_kernel(q, k, v, prepared, consistent_delta=consistent_delta)[0]
+    (output * do).sum().backward()
+
+    ref_output, ref_lse = mxfp8_blockmask_forward_reference(
+        q.detach(), k.detach(), v.detach(), prepared, head_dim**-0.5
+    )
+    dense_mask = _dense_mask(_causal_window(window), 1, num_head_q, 256, 256, "cuda")
+    ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
+        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, head_dim**-0.5, causal=False, mask=dense_mask,
+        consistent_delta=consistent_delta,
+    )
+
+    for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
+        assert calc_cossim(expected, actual) > 0.99
+        assert calc_snr(expected, actual) > 30
+
+
+@cuda_only
+def test_blockmask_backward_keeps_unattended_key_blocks_zero():
+    """A key block no query can see must receive exactly zero dK and dV."""
+    def first_key_block_only(batch, head, q_idx, kv_idx):
+        return kv_idx < 128
+
+    prepared = prepare_block_mask(
+        create_block_mask(first_key_block_only, None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
+    )
+    q = torch.randn(1, 2, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn_like(q, requires_grad=True)
+    v = torch.randn_like(q, requires_grad=True)
+    do = torch.randn_like(q)
+
+    output = _call_kernel(q, k, v, prepared)[0]
+    (output * do).sum().backward()
+    dense_mask = _dense_mask(first_key_block_only, 1, 2, 256, 256, "cuda")
+    ref_output, ref_lse = mxfp8_attention_forward_reference(q.detach(), k.detach(), v.detach(), 64**-0.5,
+                                                             causal=False, mask=dense_mask)
+    ref_dq, _, _ = mxfp8_attention_backward_reference_stage2(
+        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, 64**-0.5, causal=False, mask=dense_mask
+    )
+    assert calc_cossim(ref_dq, q.grad) > 0.99
+    assert calc_snr(ref_dq, q.grad) > 30
+    assert torch.count_nonzero(k.grad[:, :, 128:]) == 0
+    assert torch.count_nonzero(v.grad[:, :, 128:]) == 0
+
+
+@cuda_only
+def test_blockmask_backward_uses_per_batch_per_head_tables():
+    """Backward must retain B/H table strides for both KV-side and Q-side walks."""
+    def shifted_diagonal(batch, head, q_idx, kv_idx):
+        return kv_idx == ((q_idx + batch + head) % 256)
+
+    prepared = prepare_block_mask(
+        create_block_mask(shifted_diagonal, 2, 4, 256, 256, device="cuda", BLOCK_SIZE=128)
+    )
+    q = torch.randn(2, 4, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn_like(q, requires_grad=True)
+    v = torch.randn_like(q, requires_grad=True)
+    do = torch.randn_like(q)
+
+    output, lse, _ = _call_kernel(q, k, v, prepared)
+    (output * do).sum().backward()
+    dense_mask = _dense_mask(shifted_diagonal, 2, 4, 256, 256, "cuda")
+    # The table-walk reference intentionally supports only broadcast B/H tables,
+    # so this non-broadcast stride test must use the kernel's own O/LSE.
+    ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
+        q.detach(), k.detach(), v.detach(), do, output.detach(), lse.detach(), 64**-0.5,
+        causal=False, mask=dense_mask
+    )
+
+    for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
+        assert calc_cossim(expected, actual) > 0.99
+        assert calc_snr(expected, actual) > 30
+
+
+@cuda_only
+def test_blockmask_backward_empty_query_tile_is_zero():
+    """A table with no edges must produce zero gradients without touching K/V."""
+    def no_tokens(batch, head, q_idx, kv_idx):
+        return torch.zeros_like(q_idx + kv_idx, dtype=torch.bool)
+
+    prepared = prepare_block_mask(
+        create_block_mask(no_tokens, None, None, 128, 128, device="cuda", BLOCK_SIZE=128)
+    )
+    q = torch.randn(1, 2, 128, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn_like(q, requires_grad=True)
+    v = torch.randn_like(q, requires_grad=True)
+
+    _call_kernel(q, k, v, prepared)[0].sum().backward()
+    assert torch.count_nonzero(q.grad) == 0
+    assert torch.count_nonzero(k.grad) == 0
+    assert torch.count_nonzero(v.grad) == 0
+
+
+@cuda_only
+def test_blockmask_backward_partial_tile_empty_rows_are_zero():
+    """Empty rows inside a partial tile must have zero dQ and not poison dK/dV."""
+    def alternating_diagonal(batch, head, q_idx, kv_idx):
+        return (q_idx % 2 == 0) & (q_idx == kv_idx)
+
+    prepared = prepare_block_mask(
+        create_block_mask(alternating_diagonal, None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
+    )
+    q = torch.randn(1, 2, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn_like(q, requires_grad=True)
+    v = torch.randn_like(q, requires_grad=True)
+    do = torch.randn_like(q)
+
+    output, _, _ = _call_kernel(q, k, v, prepared)
+    (output * do).sum().backward()
+    dense_mask = _dense_mask(alternating_diagonal, 1, 2, 256, 256, "cuda")
+    ref_output, ref_lse = mxfp8_attention_forward_reference(q.detach(), k.detach(), v.detach(), 64**-0.5,
+                                                             causal=False, mask=dense_mask)
+    ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
+        q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, 64**-0.5, causal=False, mask=dense_mask
+    )
+
+    assert torch.count_nonzero(q.grad[:, :, 1::2]) == 0
+    for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
+        assert calc_cossim(expected, actual) > 0.99
+        assert calc_snr(expected, actual) > 30
+
+
+@cuda_only
+@pytest.mark.parametrize("window", [128, 1024])
+@pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
+def test_blockmask_kernel_matches_bf16_flex_attention(window, num_head_q, num_head_kv):
+    """The public MXFP8 path must retain the established MXFP8-vs-Flex accuracy."""
+    torch.manual_seed(9012)
+    seqlen, head_dim = 512, 128
+    block_mask = create_block_mask(
+        _causal_window(window), None, None, seqlen, seqlen, device="cuda", BLOCK_SIZE=128
+    )
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, num_head_q, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, num_head_kv, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn_like(k, requires_grad=True)
+    do = torch.randn_like(q)
+
+    output, lse, _ = _call_kernel(q, k, v, prepared)
+    (output * do).sum().backward()
+    kernel_grads = (q.grad.detach(), k.grad.detach(), v.grad.detach())
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    ref_output, ref_lse = flex_attention(
+        q_ref, k_ref, v_ref, block_mask=block_mask, scale=head_dim**-0.5,
+        enable_gqa=num_head_q != num_head_kv, return_lse=True,
+    )
+    (ref_output * do).sum().backward()
+    pairs = [
+        ("o", ref_output, output),
+        ("lse", ref_lse, lse),
+        ("dQ", q_ref.grad, kernel_grads[0]),
+        ("dK", k_ref.grad, kernel_grads[1]),
+        ("dV", v_ref.grad, kernel_grads[2]),
+    ]
+    for name, expected, actual in pairs:
+        assert calc_cossim(expected, actual) > 0.99, name
+        assert calc_snr(expected, actual) > 18, name
+
+
+@cuda_only
+@pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
+def test_blockmask_lse_gradient_matches_bf16_flex_attention(num_head_q, num_head_kv):
+    """GPT-OSS's attention sink differentiates through the returned LSE.
+
+    The loss reads only the LSE, so every dQ/dK bit comes from ``dlse``: a
+    backward that drops it returns zeros here. dV must be zero, since the LSE
+    does not depend on V.
+    """
+    torch.manual_seed(7890)
+    seqlen, head_dim = 512, 64
+    block_mask = create_block_mask(_causal_window(128), None, None, seqlen, seqlen, device="cuda", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask)
+    q = torch.randn(1, num_head_q, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, num_head_kv, seqlen, head_dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn_like(k, requires_grad=True)
+    dlse = torch.randn(1, num_head_q, seqlen, device="cuda", dtype=torch.float32)
+
+    _, lse, _ = _call_kernel(q, k, v, prepared)
+    (lse * dlse).sum().backward()
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    _, ref_lse = flex_attention(
+        q_ref, k_ref, v.detach(), block_mask=block_mask, scale=head_dim**-0.5,
+        enable_gqa=num_head_q != num_head_kv, return_lse=True,
+    )
+    (ref_lse * dlse).sum().backward()
+
+    assert torch.count_nonzero(v.grad) == 0
+    for name, expected, actual in (("dQ", q_ref.grad, q.grad), ("dK", k_ref.grad, k.grad)):
+        assert calc_cossim(expected, actual) > 0.99, name
+        assert calc_snr(expected, actual) > 18, name

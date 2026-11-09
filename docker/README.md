@@ -113,9 +113,9 @@ special_tokens_map.json  tokenizer_config.json  tokenizer.json
 
 - 4 卡冒烟实测吞吐：bf16 8,800 tps/卡，attn 6,200，linear-attn 3,700。m355 上 8 卡 BF16 实测
   20000 步约 11 小时，按同样比例换算：attn 约 17 小时，linear-attn 约 28 小时，suite 合计约 28 小时。
-- checkpoint 每 5000 步存一次，保留最近 2 份（torchtitan 不允许少于 2 份）。一份约 250GB
-  （20B 参数的 fp32 权重加 Adam 状态，估算值）。torchtitan 先存新的再删旧的，所以存第 15000 步时会短暂有
-  3 份，约 750GB；最后一步只存权重。磁盘不够时，跑下一组之前删掉上一组的 `<dump 目录>/checkpoint`。
+- checkpoint 每 10000 步存一次，保留最近 2 份（torchtitan 不允许少于 2 份）。一份约 250GB
+  （20B 参数的 fp32 权重加 Adam 状态，估算值）。20000 步的训练只会存第 10000 步（完整状态）和最后一步
+  （只存权重），峰值不超过 2 份，约 500GB。磁盘不够时，跑下一组之前删掉上一组的 `<dump 目录>/checkpoint`。
 
 ## 和旧曲线对照
 

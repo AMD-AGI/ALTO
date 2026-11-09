@@ -15,6 +15,8 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-wanghanthu/alto:pytorch2.14.0-rocm10.1.0}"
 DOCKER="${DOCKER:-sudo docker}"
+# On a borrowed node the login user may not own the repo; run as the owner.
+RUN_AS="${RUN_AS:-$(id -u):$(id -g)}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 ALTO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # The venv is tied to the image's torch; sharing one across images mixes wheels.
@@ -63,7 +65,7 @@ ${DOCKER} run --rm --init \
     --network host \
     --ipc=host \
     --shm-size 8G \
-    --user "$(id -u):$(id -g)" \
+    --user "${RUN_AS}" \
     -e HOME=/tmp/alto-home \
     -e WANDB_MODE="${WANDB_MODE:-online}" \
     -e WANDB_PROJECT="${WANDB_PROJECT:-alto-gpt-oss-20b-mxfp8-flex}" \

@@ -39,6 +39,7 @@ __all__ = [
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_pretrain_flex",
     "gpt_oss_20b_mxfp8_attn",
+    "gpt_oss_20b_mxfp8_attn_aligned",
     "gpt_oss_20b_lpt",
 ]
 
@@ -270,6 +271,23 @@ def gpt_oss_20b_mxfp8_attn() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-mxfp8-attn-cdelta-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe=MXFP8_ATTN_RECIPE)],
+    )
+    return config
+
+
+def gpt_oss_20b_mxfp8_attn_aligned() -> Trainer.Config:
+    """``gpt_oss_20b_mxfp8_attn`` with each document padded to the MX block.
+
+    Padding happens before packing, so a 32-token scale group never contains
+    two documents. The unaligned config stays byte-for-byte the 20k run.
+    """
+    config = gpt_oss_20b_mxfp8_attn()
+    config.dump_folder = (
+        "gpt_oss_20b-pretrain-mxfp8-attn-aligned-cdelta-lr4e-4-outputs"
+    )
+    config.dataloader.dataset = megatron_packed_dataset(C4_TRAIN_IDX, seq_align=32)
+    config.validator.dataloader.dataset = megatron_packed_dataset(
+        C4_VAL_IDX, seq_align=32
     )
     return config
 

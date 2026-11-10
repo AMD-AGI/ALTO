@@ -39,6 +39,18 @@ DEBUG = os.environ.get('FLASH_ATTENTION_TRITON_AMD_DEBUG', '0').lower() in ('1',
 PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', 'true', 'yes')
 
 
+def _as_int32_cu_seqlens(cu_seqlens, device=None):
+    """Varlen offsets are an int32 tensor. The kernel loads them as pointer elements and uses the values as token offsets."""
+    if isinstance(cu_seqlens, torch.Tensor):
+        cu_seqlens = cu_seqlens.to(dtype=torch.int32).contiguous()
+        if device is not None:
+            cu_seqlens = cu_seqlens.to(device=device)
+        return cu_seqlens
+    if device is None:
+        return cu_seqlens
+    return torch.empty(0, dtype=torch.int32, device=device)
+
+
 def get_shape_from_layout(q, k, v, layout, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=None, max_seqlen_k=None):
     if layout == 'bhsd':
         batch_q, nheads_q, max_seqlen_q, head_size_q = q.shape
@@ -392,6 +404,18 @@ def _dk_dot(
 
 
 @triton.jit
+def _apply_window(qk_scaled, offs_m, offs_n, seqlen_q, seqlen_k, WINDOW_LEFT: tl.constexpr, WINDOW_RIGHT: tl.constexpr):
+    """Keep keys in ``[q + Sk - Sq - left, q + Sk - Sq + right]`` inclusive. A negative side is unbounded."""
+    if WINDOW_LEFT >= 0 or WINDOW_RIGHT >= 0:
+        shift = seqlen_k - seqlen_q
+        if WINDOW_LEFT >= 0:
+            qk_scaled = tl.where(offs_n[None, :] >= offs_m[:, None] + shift - WINDOW_LEFT, qk_scaled, float("-inf"))
+        if WINDOW_RIGHT >= 0:
+            qk_scaled = tl.where(offs_n[None, :] <= offs_m[:, None] + shift + WINDOW_RIGHT, qk_scaled, float("-inf"))
+    return qk_scaled
+
+
+@triton.jit
 def _attn_fwd_inner(
     acc,
     l_i,
@@ -448,6 +472,8 @@ def _attn_fwd_inner(
     RETURN_SCORES: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    WINDOW_LEFT: tl.constexpr,
+    WINDOW_RIGHT: tl.constexpr,
 ):
     if USE_EXP2:
         RCP_LN2: tl.constexpr = 1.4426950408889634
@@ -513,6 +539,8 @@ def _attn_fwd_inner(
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
             qk_scaled = tl.where(causal_mask, qk_scaled, float("-inf"))
+        qk_scaled = _apply_window(
+            qk_scaled, OFFS_M, start_n + OFFS_N, actual_seqlen_q, actual_seqlen_k, WINDOW_LEFT, WINDOW_RIGHT)
         if bias_ptrs is not None:
             bias_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
             bias = load_fn(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q, actual_seqlen_k)
@@ -527,8 +555,19 @@ def _attn_fwd_inner(
             qk_scaled += alibi_block
         # Online softmax. The row sum uses the dequantized numerator, and that
         # same tile multiplies V, so the weights induced by MXFP4 still sum to one.
-        m_ij = tl.maximum(m_i, tl.max(qk_scaled, 1))
-        q_shifted = qk_scaled - m_ij[:, None]
+        # A row whose keys all sit outside the window is -inf. tl.max of that row is
+        # not a reliable -inf, so detect it from the mask and leave the running state.
+        row_all_masked = tl.max((qk_scaled != float("-inf")).to(tl.int32), 1) == 0
+        row_max = tl.max(tl.where(qk_scaled == float("-inf"), -1.0e30, qk_scaled), 1)
+        m_ij = tl.where(row_all_masked, m_i, tl.maximum(m_i, row_max))
+        # row_all_masked is [BLOCK_M]. BLOCK_M == BLOCK_N, so a bare 1D mask
+        # broadcasts along columns and the fully masked rows of this tile wipe
+        # valid keys of the earlier rows.
+        q_shifted = tl.where(
+            row_all_masked[:, None] | (qk_scaled == float("-inf")),
+            float("-inf"),
+            qk_scaled - m_ij[:, None],
+        )
         if RETURN_SCORES:
             scores_scaled_shifted_mask = (OFFS_M[:, None] < actual_seqlen_q) & (
                 (start_n + tl.arange(0, BLOCK_N))[None, :] < actual_seqlen_k)
@@ -583,7 +622,7 @@ def _attn_fwd_inner(
             tl.store(exp_scores_ptrs, p_deq, mask=exp_score_mask)
 
         l_ij = tl.sum(p_deq, 1)
-        m_diff = m_i - m_ij
+        m_diff = tl.where(row_all_masked, 0.0, m_i - m_ij)
         if USE_EXP2:
             alpha = tl.math.exp2(m_diff * RCP_LN2)
         else:
@@ -694,7 +733,86 @@ def _attn_fwd_blocks(
     USE_BIAS: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    window_block_min,
+    window_block_max,
+    WINDOW_LEFT: tl.constexpr,
+    WINDOW_RIGHT: tl.constexpr,
 ):
+    if WINDOW_LEFT >= 0 or WINDOW_RIGHT >= 0:
+        n_skip = window_block_min
+        k_ptrs += n_skip * BLOCK_N * stride_kn
+        v_ptrs += n_skip * BLOCK_N * stride_vk
+        ks_ptrs += n_skip * BLOCK_N_SCALE * stride_kscale_n
+        vs_ptrs += n_skip * BLOCK_N_SCALE * stride_vscale_k
+        if USE_BIAS:
+            bias_ptrs += n_skip * BLOCK_N * stride_bn
+        if RETURN_SCORES:
+            score_ptrs += n_skip * BLOCK_N
+            scores_scaled_shifted_ptrs += n_skip * BLOCK_N
+            exp_scores_ptrs += n_skip * BLOCK_N
+        if IS_CAUSAL:
+            offs_n_causal = offs_n + (seqlen_q - seqlen_k)
+        else:
+            offs_n_causal = 0
+        return _attn_fwd_inner(
+            acc,
+            l_i,
+            m_i,
+            q,
+            qs,
+            k_ptrs,
+            v_ptrs,
+            ks_ptrs,
+            vs_ptrs,
+            bias_ptrs,
+            stride_kn,
+            stride_vk,
+            stride_bn,
+            stride_kscale_n,
+            stride_vscale_k,
+            start_m,
+            seqlen_k,
+            seqlen_k_scale,
+            seqlen_q,
+            dropout_p,
+            philox_seed,
+            batch_philox_offset,
+            exp_scores_ptrs,
+            window_block_min * BLOCK_N,
+            window_block_max * BLOCK_N,
+            offs_n_causal,
+            window_block_max - window_block_min,
+            n_extra_tokens,
+            alibi_slope,
+            score_ptrs,
+            scores_scaled_shifted_ptrs,
+            IS_CAUSAL,
+            BLOCK_M,
+            HALF_BLOCK_DMODEL_QK,
+            SCALE_BLOCK_DMODEL_QK,
+            HALF_BLOCK_DMODEL_V,
+            BLOCK_DMODEL_V,
+            BLOCK_N,
+            BLOCK_N_SCALE,
+            offs_m,
+            offs_n,
+            PRE_LOAD_V,
+            True,
+            ENABLE_DROPOUT,
+            PADDED_HEAD_QK,
+            PADDED_HEAD_V,
+            HALF_ACTUAL_BLOCK_DMODEL_QK,
+            SCALE_ACTUAL_BLOCK_DMODEL_QK,
+            HALF_ACTUAL_BLOCK_DMODEL_V,
+            ACTUAL_BLOCK_DMODEL_V,
+            SM_SCALE,
+            USE_EXP2=USE_EXP2,
+            RETURN_SCORES=RETURN_SCORES,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
+            USE_ASM=USE_ASM,
+            WINDOW_LEFT=WINDOW_LEFT,
+            WINDOW_RIGHT=WINDOW_RIGHT,
+        )
     block_min = 0
     block_max = n_blocks * BLOCK_N
     if n_full_blocks > 0:
@@ -755,6 +873,8 @@ def _attn_fwd_blocks(
             RETURN_SCORES=RETURN_SCORES,
             QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
             USE_ASM=USE_ASM,
+            WINDOW_LEFT=WINDOW_LEFT,
+            WINDOW_RIGHT=WINDOW_RIGHT,
         )
         block_min = block_max
         block_max = n_blocks * BLOCK_N
@@ -830,6 +950,8 @@ def _attn_fwd_blocks(
             RETURN_SCORES=RETURN_SCORES,
             QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
             USE_ASM=USE_ASM,
+            WINDOW_LEFT=WINDOW_LEFT,
+            WINDOW_RIGHT=WINDOW_RIGHT,
         )
     return acc, l_i, m_i
 
@@ -920,6 +1042,8 @@ def attn_fwd(
     USE_EXP2: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    WINDOW_LEFT: tl.constexpr,
+    WINDOW_RIGHT: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
@@ -951,8 +1075,8 @@ def attn_fwd(
     PADDED_HEAD_V: tl.constexpr = (ACTUAL_BLOCK_DMODEL_V != BLOCK_DMODEL_V)
 
     if VARLEN:
-        cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
-        cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1)
+        cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z).to(tl.int32)
+        cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1).to(tl.int32)
         # print("cu_seqlens_q_start:", cu_seqlens_q_start)
 
         seqlen_q = cu_seqlens_q_end - cu_seqlens_q_start
@@ -960,8 +1084,8 @@ def attn_fwd(
         # small for all start_m so for those we return early.
         if start_m * BLOCK_M > seqlen_q:
             return
-        cu_seqlens_k_start = tl.load(cu_seqlens_k + off_z)
-        cu_seqlens_k_end = tl.load(cu_seqlens_k + off_z + 1)
+        cu_seqlens_k_start = tl.load(cu_seqlens_k + off_z).to(tl.int32)
+        cu_seqlens_k_end = tl.load(cu_seqlens_k + off_z + 1).to(tl.int32)
         seqlen_k = cu_seqlens_k_end - cu_seqlens_k_start
     else:
         cu_seqlens_q_start = 0
@@ -990,31 +1114,60 @@ def attn_fwd(
         # This is what adjusts the block_max for the current WG, only
         # if IS_CAUSAL. Otherwise we want to always iterate through all n_blocks
         n_blocks = min(n_blocks, n_blocks_seqlen)
-        # If we have no blocks after adjusting for seqlen deltas, this WG is part of
-        # the blocks that are all 0. We exit early.
-        if n_blocks <= 0:
-            o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
-            o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d_v[None, :] * stride_on
-            acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_V], dtype=Out.type.element_ty)
-            o_ptrs_mask = offs_m[:, None] < seqlen_q
-            if PADDED_HEAD_V:
-                o_ptrs_mask = o_ptrs_mask & (offs_d_v[None, :] < ACTUAL_BLOCK_DMODEL_V)
-            # We still need to write 0s to the result
-            tl.store(o_ptrs, acc, mask=o_ptrs_mask)
-            # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
-            # statically known.
-            l_offset = LSE + off_z * stride_lse_z + off_h_q * stride_lse_h + cu_seqlens_q_start * stride_lse_m
-            l_ptrs = l_offset + offs_m * stride_lse_m
+    window_block_min = 0
+    window_block_max = n_blocks
+    if WINDOW_LEFT >= 0 or WINDOW_RIGHT >= 0:
+        shift = seqlen_k - seqlen_q
+        m0 = start_m * BLOCK_M
+        if WINDOW_LEFT >= 0:
+            k_lo = m0 + shift - WINDOW_LEFT
+        else:
+            k_lo = 0
+        if WINDOW_RIGHT >= 0:
+            k_hi = m0 + BLOCK_M - 1 + shift + WINDOW_RIGHT
+        else:
+            k_hi = seqlen_k - 1
+        if k_lo < 0:
+            k_lo = 0
+        if k_hi > seqlen_k - 1:
+            k_hi = seqlen_k - 1
+        causal_k_hi = n_blocks * BLOCK_N - 1
+        if k_hi > causal_k_hi:
+            k_hi = causal_k_hi
+        if k_lo > k_hi:
+            n_blocks = 0
+        else:
+            window_block_min = k_lo // BLOCK_N
+            window_block_max = k_hi // BLOCK_N + 1
+            if window_block_max > n_blocks:
+                window_block_max = n_blocks
+            if window_block_min >= window_block_max:
+                n_blocks = 0
+    # If we have no blocks after adjusting for seqlen deltas, this WG is part of
+    # the blocks that are all 0. We exit early.
+    if n_blocks <= 0:
+        o_offset = Out + off_z * stride_oz + off_h_q * stride_oh + cu_seqlens_q_start * stride_om
+        o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d_v[None, :] * stride_on
+        acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_V], dtype=Out.type.element_ty)
+        o_ptrs_mask = offs_m[:, None] < seqlen_q
+        if PADDED_HEAD_V:
+            o_ptrs_mask = o_ptrs_mask & (offs_d_v[None, :] < ACTUAL_BLOCK_DMODEL_V)
+        # We still need to write 0s to the result
+        tl.store(o_ptrs, acc, mask=o_ptrs_mask)
+        # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
+        # statically known.
+        l_offset = LSE + off_z * stride_lse_z + off_h_q * stride_lse_h + cu_seqlens_q_start * stride_lse_m
+        l_ptrs = l_offset + offs_m * stride_lse_m
 
-            l = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)
+        l = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)
 
-            # mask_m_offsets = start_m + tl.arange(0, BLOCK_M)
-            # lse_mask = mask_m_offsets < causal_start_idx
-            # softmax_lse = tl.where(lse_mask, 0.0, softmax_lse)
-            l_ptrs_mask = offs_m < MAX_SEQLENS_Q
-            tl.store(l_ptrs, l, mask=l_ptrs_mask)
-            # TODO: Should dropout and return encoded softmax be handled here too?
-            return
+        # mask_m_offsets = start_m + tl.arange(0, BLOCK_M)
+        # lse_mask = mask_m_offsets < causal_start_idx
+        # softmax_lse = tl.where(lse_mask, 0.0, softmax_lse)
+        l_ptrs_mask = offs_m < MAX_SEQLENS_Q
+        tl.store(l_ptrs, l, mask=l_ptrs_mask)
+        # TODO: Should dropout and return encoded softmax be handled here too?
+        return
 
     n_extra_tokens = 0
     if seqlen_k < BLOCK_N:
@@ -1159,6 +1312,10 @@ def attn_fwd(
         USE_BIAS,
         QUANT_BLOCK_SIZE,
         USE_ASM,
+        window_block_min,
+        window_block_max,
+        WINDOW_LEFT,
+        WINDOW_RIGHT,
     )
     # epilogue
     l_recip = 1 / l_i[:, None]
@@ -1199,6 +1356,8 @@ def attn_fwd(
         # zero out nans caused by -infs when doing causal
         lse_mask = (start_m_idx + tl.arange(0, BLOCK_M)) < causal_start_idx
         softmax_lse = tl.where(lse_mask, 0.0, softmax_lse)
+    if WINDOW_LEFT >= 0 or WINDOW_RIGHT >= 0:
+        softmax_lse = tl.where(m_i == float("-inf"), 0.0, softmax_lse)
 
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few rows.
     # This is only true for the last M block. For others, overflow_size will be -ve
@@ -1326,6 +1485,8 @@ def _masked_scores(
     USE_BIAS: tl.constexpr,
     USE_ALIBI: tl.constexpr,
     USE_ASM: tl.constexpr,
+    WINDOW_LEFT: tl.constexpr,
+    WINDOW_RIGHT: tl.constexpr,
 ):
     qk = _qk_dot(q, qs, k, ks, BLOCK_M, BLOCK_N, BLOCK_D, QUANT_BLOCK_SIZE, USE_ASM)
     qk *= sm_scale
@@ -1336,7 +1497,8 @@ def _masked_scores(
         qk += bias
     if USE_ALIBI:
         qk += alibi
-    return tl.where(valid, qk, float("-inf"))
+    qk = tl.where(valid, qk, float("-inf"))
+    return _apply_window(qk, offs_m, offs_n, seqlen_q, seqlen_k, WINDOW_LEFT, WINDOW_RIGHT)
 
 
 @triton.jit
@@ -1461,6 +1623,8 @@ def _attn_bwd(
     ENABLE_DROPOUT: tl.constexpr,
     USE_EXP2: tl.constexpr,
     USE_ASM: tl.constexpr,
+    WINDOW_LEFT: tl.constexpr,
+    WINDOW_RIGHT: tl.constexpr,
 ):
     start_n = tl.program_id(0) * BLOCK_N
     off_h_k = tl.program_id(1)
@@ -1468,10 +1632,10 @@ def _attn_bwd(
     GROUP_SIZE: tl.constexpr = HQ // HK
 
     if VARLEN:
-        q_start = tl.load(cu_seqlens_q + off_z)
-        seqlen_q = tl.load(cu_seqlens_q + off_z + 1) - q_start
-        k_start = tl.load(cu_seqlens_k + off_z)
-        seqlen_k = tl.load(cu_seqlens_k + off_z + 1) - k_start
+        q_start = tl.load(cu_seqlens_q + off_z).to(tl.int32)
+        seqlen_q = tl.load(cu_seqlens_q + off_z + 1).to(tl.int32) - q_start
+        k_start = tl.load(cu_seqlens_k + off_z).to(tl.int32)
+        seqlen_k = tl.load(cu_seqlens_k + off_z + 1).to(tl.int32) - k_start
     else:
         q_start = 0
         k_start = 0
@@ -1512,6 +1676,8 @@ def _attn_bwd(
         else:
             batch_philox_offset = 0
         for start_m in range(0, seqlen_q, BLOCK_M):
+            # Visit every query tile. Out-of-window scores are -inf, so those
+            # tiles add zeros. Skipping them in this loop faults under Triton.
             offs_m = start_m + tl.arange(0, BLOCK_M)
             k, ks, v, vs = _load_kv_dequant(
                 k_base, v_base, ks_base, vs_base, stride_kn, stride_kk, stride_vk, stride_vn, stride_kscale_n,
@@ -1547,7 +1713,7 @@ def _attn_bwd(
                 alibi_tile = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk_scaled = _masked_scores(
                 q, qs, k, ks, offs_m, offs_n, seqlen_q, seqlen_k, sm_scale, bias_tile, alibi_tile, BLOCK_M, BLOCK_N,
-                BLOCK_D_QK, QUANT_BLOCK_SIZE, CAUSAL, USE_BIAS, USE_ALIBI, USE_ASM)
+                BLOCK_D_QK, QUANT_BLOCK_SIZE, CAUSAL, USE_BIAS, USE_ALIBI, USE_ASM, WINDOW_LEFT, WINDOW_RIGHT)
             prob = _softmax_prob(qk_scaled, lse, BLOCK_M, BLOCK_N, USE_EXP2, ENABLE_DROPOUT, philox_seed,
                                  batch_philox_offset, dropout_p, start_m // BLOCK_M, start_n, seqlen_k)
             dp = _dp_dot(do, do_deq, v, vs, BLOCK_M, BLOCK_N, BLOCK_D_V, QUANT_BLOCK_SIZE, USE_ASM)
@@ -1602,7 +1768,11 @@ def attention_mxfp4_backward(
     causal: bool,
     use_exp2: bool,
     layout: str,
+    window_left: int,
+    window_right: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens_q = _as_int32_cu_seqlens(cu_seqlens_q)
+    cu_seqlens_k = _as_int32_cu_seqlens(cu_seqlens_k)
     is_varlen = layout == "thd"
     batch, nheads_q, nheads_k, head_size_qk, head_size_v, _, _ = get_shape_from_layout(
         q, k, v, layout, cu_seqlens_q, cu_seqlens_k, max_seqlens_q, max_seqlens_k)
@@ -1693,6 +1863,8 @@ def attention_mxfp4_backward(
         ENABLE_DROPOUT=dropout_p > 0.0,
         USE_EXP2=use_exp2,
         USE_ASM=is_cdna4(),
+        WINDOW_LEFT=window_left,
+        WINDOW_RIGHT=window_right,
         num_warps=4,
         num_stages=1,
     )
@@ -1758,12 +1930,14 @@ def attention_mxfp4_forward_triton_impl(
     bias: Optional[torch.Tensor],
     dropout_p: float,
     layout: str,
-    cu_seqlens_q: Optional[int],
-    cu_seqlens_k: Optional[int],
+    cu_seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_k: Optional[torch.Tensor],
     max_seqlens_q: Optional[int],
     max_seqlens_k: Optional[int],
     return_scores: bool,
     use_exp2: bool,
+    window_left: int,
+    window_right: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if DEBUG:
         print()
@@ -1784,12 +1958,8 @@ def attention_mxfp4_forward_triton_impl(
         print("return_scores:", return_scores)
         print("use_exp2:", use_exp2)
 
-    assert q.is_contiguous()
-    assert k.is_contiguous()
-    assert v.is_contiguous()
-    assert q_scale.is_contiguous()
-    assert k_scale.is_contiguous()
-    assert v_scale.is_contiguous()
+    cu_seqlens_q = _as_int32_cu_seqlens(cu_seqlens_q)
+    cu_seqlens_k = _as_int32_cu_seqlens(cu_seqlens_k)
 
     # check if varlen
     is_varlen = layout == "thd"
@@ -1914,11 +2084,34 @@ def attention_mxfp4_forward_triton_impl(
         BLOCK_N=64,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        WINDOW_LEFT=window_left,
+        WINDOW_RIGHT=window_right,
     )
     return o, softmax_lse, exp_scores
 
 
-@torch.compiler.allow_in_graph
+def _quantize_attention_mxfp4(x: torch.Tensor, layout: str):
+    """Quantize one attention tensor on the sequence × head-dim plane.
+
+    ``convert_to_mxfp4(..., is_2d_block=True)`` groups the last two axes.
+    ``bhsd`` already stores those axes as ``(S, D)``. ``bshd`` is ``(S, H, D)``
+    and ``thd`` is ``(S, H, D)`` without a batch, so both are viewed as
+    ``(..., H, S, D)`` before quantization. Packed values stay in ``layout``.
+    Scales are stored so the kernel addresses a group with ``token // 32``.
+    """
+    if layout == "bhsd":
+        return torch.ops.torchtitan.convert_to_mxfp4(x, axis=-1, is_2d_block=True)
+    if layout == "bshd":
+        packed, scales = torch.ops.torchtitan.convert_to_mxfp4(
+            x.permute(0, 2, 1, 3), axis=-1, is_2d_block=True)
+        return packed.permute(0, 2, 1, 3), scales.permute(0, 2, 1, 3)
+    if layout == "thd":
+        packed, scales = torch.ops.torchtitan.convert_to_mxfp4(
+            x.transpose(0, 1), axis=-1, is_2d_block=True)
+        return packed.transpose(0, 1), scales.permute(1, 0, 2)
+    raise ValueError(f"Unsupported attention layout: {layout}")
+
+
 class _triton_attention_mxfp4(torch.autograd.Function):
 
     @staticmethod
@@ -1939,6 +2132,8 @@ class _triton_attention_mxfp4(torch.autograd.Function):
         return_scores: bool,
         use_exp2: bool,
         layout: str,
+        window_left: int,
+        window_right: int,
     ):
         input_dtype = q.dtype
         # H H^T = I, so the rotation cancels in QK^T and stays in the Q/K gradients.
@@ -1947,10 +2142,12 @@ class _triton_attention_mxfp4(torch.autograd.Function):
             qk_hadamard = HadamardFactory.create_transform(q.device)
         q = qk_hadamard(q)
         k = qk_hadamard(k)
-        q, q_scale = torch.ops.torchtitan.convert_to_mxfp4(q, axis=-1, is_2d_block=True)
-        k, k_scale = torch.ops.torchtitan.convert_to_mxfp4(k, axis=-1, is_2d_block=True)
-        v, v_scale = torch.ops.torchtitan.convert_to_mxfp4(v, axis=-1, is_2d_block=True)
+        q, q_scale = _quantize_attention_mxfp4(q, layout)
+        k, k_scale = _quantize_attention_mxfp4(k, layout)
+        v, v_scale = _quantize_attention_mxfp4(v, layout)
 
+        cu_seqlens_q = _as_int32_cu_seqlens(cu_seqlens_q, q.device)
+        cu_seqlens_k = _as_int32_cu_seqlens(cu_seqlens_k, q.device)
         output, softmax_lse, exp_scores = torch.ops.torchtitan.attention_mxfp4_forward_triton_impl(
             q,
             k,
@@ -1970,6 +2167,8 @@ class _triton_attention_mxfp4(torch.autograd.Function):
             max_seqlens_k=max_seqlens_k,
             return_scores=return_scores,
             use_exp2=use_exp2,
+            window_left=window_left,
+            window_right=window_right,
         )
 
         ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale)
@@ -1985,14 +2184,17 @@ class _triton_attention_mxfp4(torch.autograd.Function):
         ctx.cu_seqlens_k = cu_seqlens_k
         ctx.max_seqlens_q = max_seqlens_q
         ctx.max_seqlens_k = max_seqlens_k
-
+        ctx.window_left = window_left
+        ctx.window_right = window_right
         return output, softmax_lse, exp_scores
 
     @staticmethod
     def backward(ctx, grad_output, grad_lse, grad_scores):
+        # Match torch.nn.attention.varlen._backward: grad_lse is supplied because
+        # LSE is an output, and the flash backward does not consume it.
         del grad_lse, grad_scores
         if grad_output is None or not any(ctx.needs_input_grad[:3]):
-            return (None,) * 15
+            return (None,) * 17
         q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors
         dq, dk, dv = attention_mxfp4_backward(
             grad_output,
@@ -2015,13 +2217,15 @@ class _triton_attention_mxfp4(torch.autograd.Function):
             ctx.causal,
             ctx.use_exp2,
             ctx.layout,
+            ctx.window_left,
+            ctx.window_right,
         )
         dq = ctx.qk_hadamard(dq, inverse=True)
         dk = ctx.qk_hadamard(dk, inverse=True)
         grads = []
         for needed, grad in zip(ctx.needs_input_grad[:3], (dq, dk, dv)):
             grads.append(grad.to(ctx.input_dtype) if needed else None)
-        grads.extend([None] * 12)
+        grads.extend([None] * 14)
         return tuple(grads)
 
 
@@ -2039,13 +2243,16 @@ def fake_attention_mxfp4_forward_triton_impl(
     bias: Optional[torch.Tensor],
     dropout_p: float,
     layout: str,
-    cu_seqlens_q: Optional[int],
-    cu_seqlens_k: Optional[int],
+    cu_seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_k: Optional[torch.Tensor],
     max_seqlens_q: Optional[int],
     max_seqlens_k: Optional[int],
     return_scores: bool,
     use_exp2: bool,
+    window_left: int,
+    window_right: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    del window_left, window_right
     # check if varlen
     is_varlen = layout == "thd"
 
@@ -2098,7 +2305,25 @@ def triton_attention_mxfp4(
     return_scores: bool,
     use_exp2: bool,
     layout: str,
+    window_size: tuple[int, int] = (-1, -1),
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """MXFP4 attention.
+
+    ``window_size`` is ``(left, right)`` in the FlashAttention and
+    ``VarlenAttentionMetadata`` sense. Query ``i`` attends to keys in
+    ``[i + Sk - Sq - left, i + Sk - Sq + right]`` inclusive, so the current key
+    is kept and ``left`` counts only tokens before it. ``-1`` leaves that side
+    unbounded. ``(W, 0)`` is the causal window of the current token plus ``W``
+    earlier tokens.
+
+    Model configs count the current token inside the window. GPT-OSS
+    ``sliding_window_size=128`` and ``get_sliding_window_mask_mod(128)`` keep
+    ``q_idx - kv_idx < 128``, which is 127 tokens back.
+    ``SlidingWindowVarlenInnerAttention`` already stores that as
+    ``(sliding_window_size - 1, 0)``. Pass the same pair here: 128 becomes
+    ``(127, 0)``.
+    """
+    window_left, window_right = (int(window_size[0]), int(window_size[1]))
     return _triton_attention_mxfp4.apply(
         q,
         k,
@@ -2115,4 +2340,6 @@ def triton_attention_mxfp4(
         return_scores,
         use_exp2,
         layout,
+        window_left,
+        window_right,
     )

@@ -16,7 +16,22 @@ def _qdq(x, is_2d_block):
     return convert_from_mxfp4(packed, scale, axis=-1, is_2d_block=is_2d_block, output_dtype=torch.float32)
 
 
-def _online_reference(q, k, v, sm_scale, causal, hadamard, block=64):
+def _apply_window(scores, window_left, window_right):
+    if window_left < 0 and window_right < 0:
+        return scores
+    seqlen_q, seqlen_k = scores.shape[-2], scores.shape[-1]
+    q_idx = torch.arange(seqlen_q, device=scores.device)[:, None]
+    k_idx = torch.arange(seqlen_k, device=scores.device)[None, :]
+    shift = seqlen_k - seqlen_q
+    keep = torch.ones(seqlen_q, seqlen_k, dtype=torch.bool, device=scores.device)
+    if window_left >= 0:
+        keep = keep & (k_idx >= q_idx + shift - window_left)
+    if window_right >= 0:
+        keep = keep & (k_idx <= q_idx + shift + window_right)
+    return scores.masked_fill(~keep, float("-inf"))
+
+
+def _online_reference(q, k, v, sm_scale, causal, hadamard, block=64, window_size=(-1, -1)):
     """Online softmax whose row sum and PV both use the dequantized numerator."""
     qh = _qdq(hadamard(q), True)
     kh = _qdq(hadamard(k), True)
@@ -25,6 +40,7 @@ def _online_reference(q, k, v, sm_scale, causal, hadamard, block=64):
     if causal:
         index = torch.arange(scores.shape[-1], device=scores.device)
         scores = scores.masked_fill(index[:, None] < index[None, :], float("-inf"))
+    scores = _apply_window(scores, window_size[0], window_size[1])
     seqlen = scores.shape[-1]
     pad = (block - seqlen % block) % block
     tiled = torch.nn.functional.pad(scores, (0, pad), value=float("-inf")) if pad else scores
@@ -101,3 +117,165 @@ def test_backward_matches_dequantized_probability():
     for actual, target in zip((q.grad, k.grad, v.grad), expected):
         assert torch.isfinite(actual).all()
         assert _cosine(actual, target) > 0.999
+
+
+def test_sliding_window_matches_dequantized_probability():
+    torch.manual_seed(0)
+    batch, seqlen, heads, dim = 1, 128, 2, 128
+    for causal, window in ((True, (32, 0)), (False, (40, 16))):
+        q = torch.randn(batch, heads, seqlen, dim, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(batch, heads, seqlen, dim, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(batch, heads, seqlen, dim, device="cuda", dtype=torch.bfloat16)
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        scale = dim**-0.5
+        output, lse, _ = triton_attention_mxfp4(
+            q, k, v, None, None, scale, 0.0, 0, 0, seqlen, seqlen, causal, False, False, "bhsd", window_size=window
+        )
+        hadamard = _triton_attention_mxfp4.last_qk_hadamard
+        reference, scores, qh, kh, vh = _online_reference(
+            q.detach(), k.detach(), v.detach(), scale, causal, hadamard, window_size=window)
+        assert (output.float() - reference).abs().max() < 2e-2
+
+        grad_output = torch.randn_like(output)
+        output.backward(grad_output)
+        finite = torch.isfinite(scores)
+        probability = torch.where(finite, torch.exp(scores - lse.detach().unsqueeze(-1)), torch.zeros_like(scores))
+        grad_deq = _qdq(grad_output.float(), False)
+        d_probability = torch.matmul(grad_deq, vh.transpose(-1, -2))
+        delta = (output.float() * grad_deq).sum(dim=-1, keepdim=True)
+        d_scores = probability * (d_probability - delta) * scale
+        expected = (
+            hadamard(torch.matmul(d_scores, kh), inverse=True),
+            hadamard(torch.matmul(d_scores.transpose(-1, -2), qh), inverse=True),
+            torch.matmul(probability.transpose(-1, -2), grad_deq),
+        )
+        for actual, target in zip((q.grad, k.grad, v.grad), expected):
+            assert torch.isfinite(actual).all()
+            assert _cosine(actual, target) > 0.999
+
+
+def test_thd_quantizes_on_sequence_dim_plane():
+    from alto.kernels.hadamard_transform.transform import HadamardFactory
+
+    class _Identity:
+        def __call__(self, value, inverse=False, left_mul=False):
+            del inverse, left_mul
+            return value
+
+    raw = HadamardFactory.__dict__["create_transform"]
+    HadamardFactory.create_transform = classmethod(lambda cls, device: _Identity())
+    try:
+        torch.manual_seed(0)
+        heads, seqlen, dim = 4, 64, 64
+        q_bhsd = torch.randn(1, heads, seqlen, dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        k_bhsd = torch.randn(1, heads, seqlen, dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        v_bhsd = torch.randn(1, heads, seqlen, dim, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        q_bshd = q_bhsd.detach().transpose(1, 2).requires_grad_()
+        k_bshd = k_bhsd.detach().transpose(1, 2).requires_grad_()
+        v_bshd = v_bhsd.detach().transpose(1, 2).requires_grad_()
+        q_thd = q_bhsd.detach()[0].transpose(0, 1).requires_grad_()
+        k_thd = k_bhsd.detach()[0].transpose(0, 1).requires_grad_()
+        v_thd = v_bhsd.detach()[0].transpose(0, 1).requires_grad_()
+        scale = dim**-0.5
+        common = dict(bias=None, alibi_slopes=None, sm_scale=scale, dropout_p=0.0, causal=True, return_scores=False,
+                      use_exp2=True, window_size=(-1, -1))
+        out_bhsd, lse_bhsd, _ = triton_attention_mxfp4(
+            q_bhsd, k_bhsd, v_bhsd, cu_seqlens_q=0, cu_seqlens_k=0, max_seqlens_q=seqlen, max_seqlens_k=seqlen,
+            layout="bhsd", **common)
+        out_bshd, lse_bshd, _ = triton_attention_mxfp4(
+            q_bshd, k_bshd, v_bshd, cu_seqlens_q=0, cu_seqlens_k=0, max_seqlens_q=seqlen, max_seqlens_k=seqlen,
+            layout="bshd", **common)
+        cu = torch.tensor([0, seqlen], device="cuda", dtype=torch.int32)
+        out_thd, lse_thd, _ = triton_attention_mxfp4(
+            q_thd, k_thd, v_thd, cu_seqlens_q=cu, cu_seqlens_k=cu, max_seqlens_q=seqlen, max_seqlens_k=seqlen,
+            layout="thd", **common)
+        assert not q_bshd.is_contiguous()
+        assert not q_thd.is_contiguous()
+        assert torch.equal(out_bshd.transpose(1, 2), out_bhsd)
+        assert torch.equal(lse_bshd, lse_bhsd)
+        assert torch.equal(out_thd.transpose(0, 1), out_bhsd[0])
+        assert torch.equal(lse_thd.transpose(0, 1), lse_bhsd[0])
+        out_bhsd.sum().backward()
+        out_bshd.sum().backward()
+        out_thd.sum().backward()
+        assert torch.equal(q_bshd.grad.transpose(1, 2), q_bhsd.grad)
+        assert torch.equal(k_bshd.grad.transpose(1, 2), k_bhsd.grad)
+        assert torch.equal(v_bshd.grad.transpose(1, 2), v_bhsd.grad)
+        assert torch.equal(q_thd.grad.transpose(0, 1), q_bhsd.grad[0])
+        assert torch.equal(k_thd.grad.transpose(0, 1), k_bhsd.grad[0])
+        assert torch.equal(v_thd.grad.transpose(0, 1), v_bhsd.grad[0])
+    finally:
+        HadamardFactory.create_transform = raw
+
+
+def test_varlen_int64_cu_seqlens_keeps_sequences():
+    from alto.kernels.fp4.mxfp4.triton_flash_attention_mxfp4 import attention_mxfp4_forward_triton_impl
+    from alto.kernels.hadamard_transform.transform import HadamardFactory
+
+    class _Identity:
+        def __call__(self, value, inverse=False, left_mul=False):
+            del inverse, left_mul
+            return value
+
+    raw = HadamardFactory.__dict__["create_transform"]
+    HadamardFactory.create_transform = classmethod(lambda cls, device: _Identity())
+    try:
+        torch.manual_seed(0)
+        heads, dim = 4, 64
+        lengths = (32, 64)
+        total = sum(lengths)
+        q = torch.randn(total, heads, dim, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        cu64 = torch.tensor([0, lengths[0], total], device="cuda", dtype=torch.int64)
+        cu32 = cu64.to(torch.int32)
+        scale = dim**-0.5
+
+        def run(cu, query, key, value):
+            return triton_attention_mxfp4(
+                query, key, value, None, None, scale, 0.0, cu, cu, max(lengths), max(lengths), True, False, True,
+                "thd", window_size=(-1, 0))
+
+        out64, lse64, _ = run(cu64, q, k, v)
+        out32, lse32, _ = run(cu32, q, k, v)
+        assert torch.equal(out64, out32)
+        assert torch.equal(lse64, lse32)
+        assert out64.shape == q.shape
+
+        k_other = k.clone()
+        k_other[lengths[0]:] += 1
+        out_other, _, _ = run(cu64, q, k_other, v)
+        assert torch.equal(out64[:lengths[0]], out_other[:lengths[0]])
+        assert not torch.equal(out64[lengths[0]:], out_other[lengths[0]:])
+
+        qg = q.detach().requires_grad_(True)
+        kg = k.detach().requires_grad_(True)
+        vg = v.detach().requires_grad_(True)
+        out, lse, _ = run(cu64, qg, kg, vg)
+        (out.sum() + lse.sum()).backward()
+        assert qg.grad.shape == q.shape
+        assert torch.isfinite(qg.grad).all()
+        assert torch.isfinite(kg.grad).all()
+        assert torch.isfinite(vg.grad).all()
+
+        raw_q = torch.randn(64, 32, 64, device="cuda", dtype=torch.bfloat16)
+        raw_k = torch.randn_like(raw_q)
+        raw_v = torch.randn_like(raw_q)
+        qp, qs = convert_to_mxfp4(raw_q, axis=-1, is_2d_block=True)
+        kp, ks = convert_to_mxfp4(raw_k, axis=-1, is_2d_block=True)
+        vp, vs = convert_to_mxfp4(raw_v, axis=-1, is_2d_block=True)
+        one = torch.tensor([0, 64], device="cuda", dtype=torch.int64)
+        kwargs = dict(
+            sm_scale=scale, alibi_slopes=None, causal=True, bias=None, dropout_p=0.0, layout="thd",
+            max_seqlens_q=64, max_seqlens_k=64, return_scores=False, use_exp2=True, window_left=-1, window_right=0)
+        out_i64, lse_i64, _ = attention_mxfp4_forward_triton_impl(
+            qp, kp, vp, qs, ks, vs, cu_seqlens_q=one, cu_seqlens_k=one, **kwargs)
+        out_i32, lse_i32, _ = attention_mxfp4_forward_triton_impl(
+            qp, kp, vp, qs, ks, vs, cu_seqlens_q=one.to(torch.int32), cu_seqlens_k=one.to(torch.int32), **kwargs)
+        assert torch.equal(out_i64, out_i32)
+        assert torch.equal(lse_i64, lse_i32)
+        assert torch.isfinite(out_i64.float()).all()
+    finally:
+        HadamardFactory.create_transform = raw

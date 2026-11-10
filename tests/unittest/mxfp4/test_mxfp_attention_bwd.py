@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import pytest
 import torch
 
 from alto.kernels.fp4.mxfp4.mxfp_quantization import convert_from_mxfp4, convert_to_mxfp4
@@ -279,3 +280,16 @@ def test_varlen_int64_cu_seqlens_keeps_sequences():
         assert torch.isfinite(out_i64.float()).all()
     finally:
         HadamardFactory.create_transform = raw
+
+
+def test_varlen_rejects_sequence_not_aligned_to_quant_block():
+    torch.manual_seed(0)
+    heads, dim = 4, 64
+    q = torch.randn(96, heads, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    cu = torch.tensor([0, 48, 96], device="cuda", dtype=torch.int32)
+    with pytest.raises(AssertionError, match="quant block size"):
+        triton_attention_mxfp4(
+            q, k, v, None, None, dim**-0.5, 0.0, cu, cu, 48, 48, True, False, True, "thd",
+            window_size=(-1, 0))

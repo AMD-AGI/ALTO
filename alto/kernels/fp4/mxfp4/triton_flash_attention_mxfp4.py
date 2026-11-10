@@ -51,6 +51,27 @@ def _as_int32_cu_seqlens(cu_seqlens, device=None):
     return torch.empty(0, dtype=torch.int32, device=device)
 
 
+def _assert_sequences_quant_aligned(cu_seqlens, *, name: str) -> None:
+    """Each varlen sequence must occupy whole MXFP4 quant groups.
+
+    Scales are grouped on the packed token axis, 32 tokens at a time. A
+    boundary that is not a multiple of that block shares a group with the
+    next sequence, and the V scale slot no longer matches the group.
+    """
+    if not isinstance(cu_seqlens, torch.Tensor) or cu_seqlens.numel() == 0:
+        raise AssertionError(
+            "MXFP4 varlen attention requires "
+            f"{name} boundaries aligned to the quant block size "
+            f"({BLOCK_SIZE_DEFAULT})."
+        )
+    if torch.any((cu_seqlens % BLOCK_SIZE_DEFAULT) != 0):
+        raise AssertionError(
+            "MXFP4 attention requires every sequence boundary to be a "
+            f"multiple of the quant block size ({BLOCK_SIZE_DEFAULT}). "
+            f"{name}={cu_seqlens.detach().cpu().tolist()}."
+        )
+
+
 def get_shape_from_layout(q, k, v, layout, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=None, max_seqlen_k=None):
     if layout == 'bhsd':
         batch_q, nheads_q, max_seqlen_q, head_size_q = q.shape
@@ -261,8 +282,9 @@ def _dequant_v(
 ):
     """Dequantize V.
 
-    ``vs`` is ``[D, N/32]`` with each group of 32 head rows repeated. The
-    unpacked tile is ``[N, D]`` and consumes scales ``[N, D/32]``.
+    ``vs`` is ``[D, N/32]``. One E8M0 scale covers 32 tokens. Each group of
+    32 head rows repeats that byte. The unpacked tile is ``[N, D]`` and
+    consumes scales ``[N, D/32]``.
     """
     scale_groups: tl.constexpr = BLOCK_D // QUANT_BLOCK_SIZE
     k_groups: tl.constexpr = BLOCK_N // QUANT_BLOCK_SIZE
@@ -434,7 +456,6 @@ def _attn_fwd_inner(
     stride_vscale_k,
     start_m,
     actual_seqlen_k,
-    actual_seqlen_k_scale,
     actual_seqlen_q,
     dropout_p,
     philox_seed,
@@ -507,7 +528,9 @@ def _attn_fwd_inner(
         if PRE_LOAD_V:
             # We can use the same offsets as k, just with dims transposed.
             v = load_fn(v_ptrs, k_offs_n, v_offs_k, actual_seqlen_k, HALF_ACTUAL_BLOCK_DMODEL_V)
-            vs = load_fn(vs_ptrs, vs_offs_k, vs_offs_n, ACTUAL_BLOCK_DMODEL_V, actual_seqlen_k_scale, other=1)
+            vs = load_fn(
+                vs_ptrs, vs_offs_k, vs_offs_n, ACTUAL_BLOCK_DMODEL_V,
+                actual_seqlen_k // QUANT_BLOCK_SIZE, other=1)
         # -- compute qk ----
         qk = _qk_dot(
             q,
@@ -632,7 +655,9 @@ def _attn_fwd_inner(
         m_i = m_ij
         if not PRE_LOAD_V:
             v = load_fn(v_ptrs, k_offs_n, v_offs_k, actual_seqlen_k, HALF_ACTUAL_BLOCK_DMODEL_V)
-            vs = load_fn(vs_ptrs, vs_offs_k, vs_offs_n, ACTUAL_BLOCK_DMODEL_V, actual_seqlen_k_scale, other=1)
+            vs = load_fn(
+                vs_ptrs, vs_offs_k, vs_offs_n, ACTUAL_BLOCK_DMODEL_V,
+                actual_seqlen_k // QUANT_BLOCK_SIZE, other=1)
         acc += _pv_dot(
             p_deq,
             p_fp4,
@@ -699,7 +724,6 @@ def _attn_fwd_blocks(
     stride_vscale_k,
     start_m,
     seqlen_k,
-    seqlen_k_scale,
     seqlen_q,
     dropout_p,
     philox_seed,
@@ -772,7 +796,6 @@ def _attn_fwd_blocks(
             stride_vscale_k,
             start_m,
             seqlen_k,
-            seqlen_k_scale,
             seqlen_q,
             dropout_p,
             philox_seed,
@@ -835,7 +858,6 @@ def _attn_fwd_blocks(
             stride_vscale_k,
             start_m,
             seqlen_k,
-            seqlen_k_scale,
             seqlen_q,
             dropout_p,
             philox_seed,
@@ -912,7 +934,6 @@ def _attn_fwd_blocks(
             stride_vscale_k,
             start_m,
             seqlen_k,
-            seqlen_k_scale,
             seqlen_q,
             dropout_p,
             philox_seed,
@@ -1081,8 +1102,9 @@ def attn_fwd(
 
         seqlen_q = cu_seqlens_q_end - cu_seqlens_q_start
         # We have a one-size-fits-all grid in id(0). Some seqlens might be too
-        # small for all start_m so for those we return early.
-        if start_m * BLOCK_M > seqlen_q:
+        # small for all start_m so for those we return early. An empty slot
+        # has seqlen 0; writing that tile would land on the next sequence.
+        if start_m * BLOCK_M >= seqlen_q:
             return
         cu_seqlens_k_start = tl.load(cu_seqlens_k + off_z).to(tl.int32)
         cu_seqlens_k_end = tl.load(cu_seqlens_k + off_z + 1).to(tl.int32)
@@ -1092,10 +1114,6 @@ def attn_fwd(
         cu_seqlens_k_start = 0
         seqlen_q = MAX_SEQLENS_Q
         seqlen_k = MAX_SEQLENS_K
-
-    cu_seqlens_q_start_scale = cu_seqlens_q_start // QUANT_BLOCK_SIZE
-    cu_seqlens_k_start_scale = cu_seqlens_k_start // QUANT_BLOCK_SIZE
-    seqlen_k_scale = seqlen_k // QUANT_BLOCK_SIZE
 
     # Now we compute whether we need to exit early due to causal masking.
     # This is because for seqlen_q > seqlen_k, M rows of the attn scores
@@ -1161,10 +1179,9 @@ def attn_fwd(
 
         l = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)
 
-        # mask_m_offsets = start_m + tl.arange(0, BLOCK_M)
-        # lse_mask = mask_m_offsets < causal_start_idx
-        # softmax_lse = tl.where(lse_mask, 0.0, softmax_lse)
-        l_ptrs_mask = offs_m < MAX_SEQLENS_Q
+        # A query tile can extend past this sequence. MAX_SEQLENS_Q covers the
+        # longest one, so masking with it stores into the next document.
+        l_ptrs_mask = offs_m < seqlen_q
         tl.store(l_ptrs, l, mask=l_ptrs_mask)
         # TODO: Should dropout and return encoded softmax be handled here too?
         return
@@ -1182,18 +1199,20 @@ def attn_fwd(
     k_ptrs = k_offset + offs_d_qk_pack[:, None] * stride_kk + offs_n[None, :] * stride_kn
     v_offset = V + off_z * stride_vz + off_h_k * stride_vh + cu_seqlens_k_start * stride_vk
     v_ptrs = v_offset + offs_n[:, None] * stride_vk + offs_d_v_pack[None, :] * stride_vn
-    qs_offset = (q_scale_ptr + off_z * stride_qscale_z + off_h_q * stride_qscale_h +
-                 cu_seqlens_q_start_scale * stride_qscale_m)
-    qs_ptrs = (qs_offset + (offs_m[:, None] // QUANT_BLOCK_SIZE) * stride_qscale_m +
+    # Sequence boundaries are multiples of the quant block, so the group is
+    # cu_start // 32 plus the local token's group. Q and K share one scale
+    # element across each group of 32 tokens.
+    qs_ptrs = (q_scale_ptr + off_z * stride_qscale_z + off_h_q * stride_qscale_h +
+               (cu_seqlens_q_start // QUANT_BLOCK_SIZE + offs_m[:, None] // QUANT_BLOCK_SIZE) * stride_qscale_m +
                offs_d_qk_scale[None, :] * stride_qscale_k)
-    ks_offset = (k_scale_ptr + off_z * stride_kscale_z + off_h_k * stride_kscale_h +
-                 cu_seqlens_k_start_scale * stride_kscale_n)
     # k scale is N*K even though k is K*N, this is required by tl.dot_scaled
-    ks_ptrs = (ks_offset + (offs_n[:, None] // QUANT_BLOCK_SIZE) * stride_kscale_n +
+    ks_ptrs = (k_scale_ptr + off_z * stride_kscale_z + off_h_k * stride_kscale_h +
+               (cu_seqlens_k_start // QUANT_BLOCK_SIZE + offs_n[:, None] // QUANT_BLOCK_SIZE) * stride_kscale_n +
                offs_d_qk_scale[None, :] * stride_kscale_k)
-    vs_offset = (v_scale_ptr + off_z * stride_vscale_z + off_h_k * stride_vscale_h +
-                 cu_seqlens_k_start_scale * stride_vscale_k)
-    vs_ptrs = (vs_offset + (offs_d_v[:, None] // QUANT_BLOCK_SIZE) * stride_vscale_n +
+    # V keeps one scale per 32 tokens, shape [D, N/32].
+    vs_ptrs = (v_scale_ptr + off_z * stride_vscale_z + off_h_k * stride_vscale_h +
+               (cu_seqlens_k_start // QUANT_BLOCK_SIZE) * stride_vscale_k +
+               (offs_d_v[:, None] // QUANT_BLOCK_SIZE) * stride_vscale_n +
                offs_n_scale[None, :] * stride_vscale_k)
     if USE_BIAS:
         # Note: this might get large enough to overflow on some configs
@@ -1278,7 +1297,6 @@ def attn_fwd(
         stride_vscale_k,
         start_m,
         seqlen_k,
-        seqlen_k_scale,
         seqlen_q,
         dropout_p,
         philox_seed,
@@ -1404,7 +1422,8 @@ def _load_q_dequant(
         other=0,
     )
     qs = tl.load(
-        qs_base + (offs_m[:, None] // QUANT_BLOCK_SIZE) * stride_qscale_m + offs_scale[None, :] * stride_qscale_k,
+        qs_base + (offs_m[:, None] // QUANT_BLOCK_SIZE) * stride_qscale_m +
+        offs_scale[None, :] * stride_qscale_k,
         mask=(offs_m[:, None] < seqlen_q) & (offs_scale[None, :] < ACTUAL_D // QUANT_BLOCK_SIZE),
         other=1,
     )
@@ -1444,18 +1463,19 @@ def _load_kv_dequant(
         other=0,
     )
     ks = tl.load(
-        ks_base + (offs_n[:, None] // QUANT_BLOCK_SIZE) * stride_kscale_n + offs_scale[None, :] * stride_kscale_k,
+        ks_base + (offs_n[:, None] // QUANT_BLOCK_SIZE) * stride_kscale_n +
+        offs_scale[None, :] * stride_kscale_k,
         mask=(offs_n[:, None] < seqlen_k) & (offs_scale[None, :] < ACTUAL_D_QK // QUANT_BLOCK_SIZE),
         other=1,
     )
     offs_v_pack = tl.arange(0, BLOCK_D_V // 2)
     offs_v = tl.arange(0, BLOCK_D_V)
-    offs_ns = start_n // QUANT_BLOCK_SIZE + tl.arange(0, BLOCK_N // QUANT_BLOCK_SIZE)
     v = tl.load(
         v_base + offs_n[:, None] * stride_vk + offs_v_pack[None, :] * stride_vn,
         mask=(offs_n[:, None] < seqlen_k) & (offs_v_pack[None, :] < ACTUAL_D_V // 2),
         other=0,
     )
+    offs_ns = start_n // QUANT_BLOCK_SIZE + tl.arange(0, BLOCK_N // QUANT_BLOCK_SIZE)
     vs = tl.load(
         vs_base + (offs_v[:, None] // QUANT_BLOCK_SIZE) * stride_vscale_n + offs_ns[None, :] * stride_vscale_k,
         mask=(offs_v[:, None] < ACTUAL_D_V) & (offs_ns[None, :] < seqlen_k // QUANT_BLOCK_SIZE),
@@ -1963,6 +1983,9 @@ def attention_mxfp4_forward_triton_impl(
 
     # check if varlen
     is_varlen = layout == "thd"
+    if is_varlen:
+        _assert_sequences_quant_aligned(cu_seqlens_q, name="cu_seqlens_q")
+        _assert_sequences_quant_aligned(cu_seqlens_k, name="cu_seqlens_k")
 
     # NOTE: a large bias tensor leads to overflow during pointer arithmetic
     if (bias is not None):

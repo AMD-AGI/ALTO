@@ -19,7 +19,11 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.config.override import derive
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.models.common.attention import (
+    ScaledDotProductInnerAttention,
+    VarlenAttentionMetadata,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.linear import GroupedLinear, Linear
 
 from alto.config import TrainingOpConfig
@@ -90,9 +94,10 @@ def lpt_module(base: type) -> type:
 
     ``GroupedLinear`` subclasses override ``_grouped_mm``. ``Linear`` subclasses
     override ``_linear``. ``ScaledDotProductInnerAttention`` overrides
-    ``attention_BLHK``. Column/row collectives and ``GptOssGroupedLinear``'s
-    per-expert bias stay on the parent class, so those types do not need a
-    handwritten LPT module.
+    ``attention_BLHK``. ``VarlenInnerAttention`` overrides ``forward`` and keeps
+    packed-document ``cu_seqlens``. Column/row collectives and
+    ``GptOssGroupedLinear``'s per-expert bias stay on the parent class, so those
+    types do not need a handwritten LPT module.
     """
     cached = _LPT_CLASSES.get(base)
     if cached is not None:
@@ -101,13 +106,15 @@ def lpt_module(base: type) -> type:
         kind = "grouped"
     elif issubclass(base, Linear):
         kind = "linear"
+    elif issubclass(base, VarlenInnerAttention):
+        kind = "varlen"
     elif issubclass(base, ScaledDotProductInnerAttention):
         kind = "sdpa"
     else:
         raise TypeError(
-            f"{base.__qualname__} is not a Linear, GroupedLinear, or "
-            "ScaledDotProductInnerAttention, so it has no LPT compute method "
-            "to override."
+            f"{base.__qualname__} is not a Linear, GroupedLinear, "
+            "VarlenInnerAttention, or ScaledDotProductInnerAttention, so it "
+            "has no LPT compute method to override."
         )
 
     name = f"LPT{base.__name__}"
@@ -124,6 +131,10 @@ def lpt_module(base: type) -> type:
         if kind == "sdpa" and self.training_op_config.precision != "mxfp4":
             raise ValueError(
                 f"Unsupported SDPA precision: {self.training_op_config.precision}"
+            )
+        if kind == "varlen" and self.training_op_config.precision != "mxfp4":
+            raise ValueError(
+                f"Unsupported attention precision: {self.training_op_config.precision}"
             )
 
     def extra_repr(self) -> str:
@@ -149,7 +160,7 @@ def lpt_module(base: type) -> type:
             )
 
         namespace["_grouped_mm"] = _grouped_mm
-    else:
+    elif kind == "sdpa":
         def attention_BLHK(
             self, q_BLHK, k_BLHK, v_BLHV, *, scale, enable_gqa, is_causal,
         ):
@@ -162,6 +173,33 @@ def lpt_module(base: type) -> type:
             yield from ()
 
         namespace["attention_BLHK"] = attention_BLHK
+        namespace["iter_lpt_weights"] = iter_lpt_weights
+    else:
+        def forward(
+            self,
+            q_THK,
+            k_THK,
+            v_THV,
+            *,
+            attention_metadata,
+            scale=None,
+            out_transform=None,
+            **kwargs,
+        ):
+            del kwargs
+            return lpt_varlen_attention(
+                q_THK,
+                k_THK,
+                v_THV,
+                attention_metadata=attention_metadata,
+                scale=scale,
+                out_transform=out_transform,
+            )
+
+        def iter_lpt_weights(self):
+            yield from ()
+
+        namespace["forward"] = forward
         namespace["iter_lpt_weights"] = iter_lpt_weights
 
     generated = type(name, (base, LPTModule), namespace)
@@ -343,6 +381,64 @@ def lpt_attention_BLHK(
     return output.transpose(1, 2)
 
 
+def lpt_varlen_attention(
+    q_THK: torch.Tensor,
+    k_THK: torch.Tensor,
+    v_THV: torch.Tensor,
+    *,
+    attention_metadata: VarlenAttentionMetadata,
+    scale: float | None,
+    out_transform: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None,
+) -> torch.Tensor:
+    """Run MXFP4 varlen attention on packed ``[T, H, D]`` tokens.
+
+    ``attention_metadata.window_size`` is already ``(left, right)`` in the
+    FlashAttention sense. GPT-OSS sliding-window layers store
+    ``(sliding_window_size - 1, 0)`` there, so this function does not subtract
+    again. ``out_transform`` receives LSE shaped ``[T, H]`` for attention sinks.
+    """
+    if not isinstance(attention_metadata, VarlenAttentionMetadata):
+        raise TypeError(
+            "MXFP4 varlen attention requires VarlenAttentionMetadata, "
+            f"got {type(attention_metadata).__name__}."
+        )
+    attn_dtype = v_THV.dtype
+    if attn_dtype not in (torch.float16, torch.bfloat16):
+        attn_dtype = torch.bfloat16
+    q = q_THK.to(attn_dtype)
+    k = k_THK.to(attn_dtype)
+    v = v_THV.to(attn_dtype)
+    window_left, window_right = (
+        int(attention_metadata.window_size[0]),
+        int(attention_metadata.window_size[1]),
+    )
+    head_dim = q.shape[-1]
+    sm_scale = head_dim**-0.5 if scale is None else scale
+    with spmd.no_typecheck():
+        output, lse, _ = triton_attention_mxfp4(
+            q,
+            k,
+            v,
+            bias=None,
+            alibi_slopes=None,
+            sm_scale=sm_scale,
+            dropout_p=0.0,
+            cu_seqlens_q=attention_metadata.cu_seq_q,
+            cu_seqlens_k=attention_metadata.cu_seq_k,
+            max_seqlens_q=attention_metadata.max_q,
+            max_seqlens_k=attention_metadata.max_k,
+            causal=window_right == 0,
+            return_scores=False,
+            use_exp2=True,
+            layout="thd",
+            window_size=(window_left, window_right),
+        )
+        output = output.to(q_THK.dtype)
+        if out_transform is not None:
+            output = out_transform(output, lse)
+    return _annotate_like(output, q_THK)
+
+
 def _assign(parent, attr, value) -> None:
     if isinstance(parent, list):
         parent[attr] = value
@@ -384,6 +480,7 @@ def apply_lpt_module_configs(
         Linear.Config,
         GroupedLinear.Config,
         ScaledDotProductInnerAttention.Config,
+        VarlenInnerAttention.Config,
     )
     matches: dict[str, tuple[object, object, str | int, TrainingOpConfig]] = {}
     for training_op_config, targets in schemes:

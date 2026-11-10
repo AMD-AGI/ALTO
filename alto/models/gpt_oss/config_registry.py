@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+from dataclasses import replace
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.megatron import megatron_packed_dataset
@@ -77,6 +79,16 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
     )
     config.activation_remat = None
     config.debug.seed = 1234
+    # MXFP4 varlen attention quantizes across each document. Pad documents to
+    # the quant block before packing so every sequence boundary is aligned.
+    packing = config.dataloader.dataset
+    config.dataloader.dataset = replace(
+        packing,
+        dataset=replace(
+            packing.dataset,
+            processor=replace(packing.dataset.processor, seq_align=32),
+        ),
+    )
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             ModelOptConverter.Config(
@@ -149,8 +161,8 @@ def gpt_oss_20b() -> Trainer.Config:
 
 def gpt_oss_20b_pretrain() -> Trainer.Config:
     seq_len = 8192
-    local_batch_size = 1
-    global_batch_size = 16
+    local_batch_size = 2
+    global_batch_size = 32
     steps = 1_200_000
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
@@ -164,7 +176,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
             ),
         ),
         hf_assets_path=GPT_OSS_20B_PATH,
-        dump_folder="gpt_oss_20b-pretrain-subset-lr4e-4-outputs",
+        dump_folder="gpt_oss_20b-pretrain-subset-gbs32-lr4e-4-outputs",
         profiler=Profiler.Config(enable_profiling=False),
         metrics=MetricsProcessor.Config(
             log_freq=1,
@@ -209,10 +221,13 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
             initial_load_model_only=False,
         ),
         activation_remat=None,
-        debug=DebugConfig(seed=1234),
+        debug=DebugConfig(
+            seed=1234,
+            enable_structured_logging=False,
+        ),
         validator=Validator.Config(
-            freq=768,
-            steps=64,
+            freq=384,
+            steps=32,
             dataloader=GrainDataLoader.Config(
                 dataset=megatron_packed_dataset(C4_VAL_IDX),
                 shuffle=False,
@@ -223,8 +238,8 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
     seq_len = 8192
-    local_batch_size = 1
-    global_batch_size = 16
+    local_batch_size = 2
+    global_batch_size = 32
     steps = 1_200_000
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
@@ -239,8 +254,8 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
         ),
         hf_assets_path=GPT_OSS_20B_PATH,
         dump_folder=(
-            "gpt_oss_20b-pretrain-subset-mxfp4gemm_1d2d-hadamard-sr-uos-"
-            "lr4e-4-bitrefactor-outputs"
+            "gpt_oss_20b-pretrain-subset-gbs32-mxfp4gemm_1d2d-hadamard-sr-uos-"
+            "mxfp4attn-lr4e-4-outputs"
         ),
         profiler=Profiler.Config(enable_profiling=False),
         metrics=MetricsProcessor.Config(
@@ -250,7 +265,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
         ),
         model=model,
         dataloader=GrainDataLoader.Config(
-            dataset=megatron_packed_dataset(C4_TRAIN_IDX),
+            dataset=megatron_packed_dataset(C4_TRAIN_IDX, seq_align=32),
             shuffle=False,
         ),
         optim=Optim.Config(
@@ -286,12 +301,15 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
             initial_load_model_only=False,
         ),
         activation_remat=None,
-        debug=DebugConfig(seed=1234),
+        debug=DebugConfig(
+            seed=1234,
+            enable_structured_logging=False,
+        ),
         validator=Validator.Config(
-            freq=768,
-            steps=64,
+            freq=384,
+            steps=32,
             dataloader=GrainDataLoader.Config(
-                dataset=megatron_packed_dataset(C4_VAL_IDX),
+                dataset=megatron_packed_dataset(C4_VAL_IDX, seq_align=32),
                 shuffle=False,
             ),
         ),

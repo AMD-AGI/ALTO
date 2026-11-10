@@ -14,7 +14,9 @@ def make_generate_philox_randval_2x():
         """Generate two Philox random streams for stochastic rounding."""
         ms = tl.arange(0, m)
         ns = tl.arange(0, n)
-        rng_offsets = philox_offset + ms[:, None] * n + ns[None, :]
+        # int64 so a tile base past 2^31 still selects a disjoint Philox counter.
+        local = ms[:, None] * n + ns[None, :]
+        rng_offsets = philox_offset.to(tl.int64) + local.to(tl.int64)
         r1, r2, _, _ = tl.randint4x(philox_seed, rng_offsets)
         return r1, r2
 

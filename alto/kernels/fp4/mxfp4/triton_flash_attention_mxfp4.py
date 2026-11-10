@@ -330,17 +330,21 @@ def _repeat_transposed_scale(
 @triton.jit
 def _qdq_tile(
     x,
+    philox_seed,
+    philox_offset,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
+    USE_SR: tl.constexpr,
 ):
     """Quantize a tile along its last axis and dequantize it back to fp32."""
     scales = _calculate_scales(
-        x, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False)
+        x, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_UOS=USE_UOS)
     packed = _pack_fp4(
-        x, scales, None, None, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False,
-        USE_SR=False, USE_ASM=USE_ASM)
+        x, scales, philox_seed, philox_offset, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+        QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_SR=USE_SR, USE_ASM=USE_ASM)
     return _unpack_fp4(
         packed, scales, tl.float32, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
         IS_2D_BLOCK=False, USE_ASM=USE_ASM)
@@ -357,13 +361,18 @@ def _dp_dot(
     BLOCK_D: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
+    USE_SR: tl.constexpr,
+    philox_seed,
+    philox_offset,
 ):
     """dP = dO @ V^T. ``do_deq`` is the MXFP4 round-trip of ``do`` and is what delta uses."""
     if USE_ASM:
-        do_s = _calculate_scales(do, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_D, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False)
+        do_s = _calculate_scales(
+            do, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_D, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_UOS=USE_UOS)
         do_fp4 = _pack_fp4(
-            do, do_s, None, None, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_D, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False,
-            USE_SR=False, USE_ASM=USE_ASM)
+            do, do_s, philox_seed, philox_offset, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_D,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_SR=USE_SR, USE_ASM=USE_ASM)
         v_ks = _repeat_transposed_scale(vs, BLOCK_D, BLOCK_N, QUANT_BLOCK_SIZE)
         return tl.dot_scaled(
             do_fp4, do_s, "e2m1", tl.trans(v), v_ks, "e2m1", lhs_k_pack=True, rhs_k_pack=True, out_dtype=tl.float32)
@@ -381,13 +390,18 @@ def _dq_dot(
     BLOCK_D: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
+    USE_SR: tl.constexpr,
+    philox_seed,
+    philox_offset,
 ):
     """dQ = dS @ K. USE_ASM quantizes dS along N and consumes packed K."""
     if USE_ASM:
-        ds_s = _calculate_scales(ds, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False)
+        ds_s = _calculate_scales(
+            ds, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_UOS=USE_UOS)
         ds_fp4 = _pack_fp4(
-            ds, ds_s, None, None, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False,
-            USE_SR=False, USE_ASM=USE_ASM)
+            ds, ds_s, philox_seed, philox_offset, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_SR=USE_SR, USE_ASM=USE_ASM)
         ks_vs = _repeat_transposed_scale(ks, BLOCK_N, BLOCK_D, QUANT_BLOCK_SIZE)
         return tl.dot_scaled(
             ds_fp4, ds_s, "e2m1", tl.trans(k), ks_vs, "e2m1", lhs_k_pack=True, rhs_k_pack=False, out_dtype=tl.float32)
@@ -407,15 +421,19 @@ def _dk_dot(
     BLOCK_D: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
+    USE_SR: tl.constexpr,
+    philox_seed,
+    philox_offset,
 ):
     """dK = dS^T @ Q. USE_ASM quantizes dS along M and consumes packed Q."""
     if USE_ASM:
         dst = tl.trans(ds)
         dst_s = _calculate_scales(
-            dst, BLOCK_M=BLOCK_N, BLOCK_N=BLOCK_M, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False)
+            dst, BLOCK_M=BLOCK_N, BLOCK_N=BLOCK_M, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_UOS=USE_UOS)
         dst_fp4 = _pack_fp4(
-            dst, dst_s, None, None, BLOCK_M=BLOCK_N, BLOCK_N=BLOCK_M, QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
-            IS_2D_BLOCK=False, USE_SR=False, USE_ASM=USE_ASM)
+            dst, dst_s, philox_seed, philox_offset, BLOCK_M=BLOCK_N, BLOCK_N=BLOCK_M,
+            QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE, IS_2D_BLOCK=False, USE_SR=USE_SR, USE_ASM=USE_ASM)
         qs_vs = _repeat_transposed_scale(qs, BLOCK_M, BLOCK_D, QUANT_BLOCK_SIZE)
         return tl.dot_scaled(
             dst_fp4, dst_s, "e2m1", q, qs_vs, "e2m1", lhs_k_pack=True, rhs_k_pack=False, out_dtype=tl.float32)
@@ -493,6 +511,7 @@ def _attn_fwd_inner(
     RETURN_SCORES: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
     WINDOW_LEFT: tl.constexpr,
     WINDOW_RIGHT: tl.constexpr,
 ):
@@ -608,6 +627,7 @@ def _attn_fwd_inner(
             BLOCK_N=BLOCK_N,
             QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
             IS_2D_BLOCK=False,
+            USE_UOS=USE_UOS,
         )
         p_fp4 = _pack_fp4(
             p,
@@ -757,6 +777,7 @@ def _attn_fwd_blocks(
     USE_BIAS: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
     window_block_min,
     window_block_max,
     WINDOW_LEFT: tl.constexpr,
@@ -833,6 +854,7 @@ def _attn_fwd_blocks(
             RETURN_SCORES=RETURN_SCORES,
             QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
             USE_ASM=USE_ASM,
+            USE_UOS=USE_UOS,
             WINDOW_LEFT=WINDOW_LEFT,
             WINDOW_RIGHT=WINDOW_RIGHT,
         )
@@ -895,6 +917,7 @@ def _attn_fwd_blocks(
             RETURN_SCORES=RETURN_SCORES,
             QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
             USE_ASM=USE_ASM,
+            USE_UOS=USE_UOS,
             WINDOW_LEFT=WINDOW_LEFT,
             WINDOW_RIGHT=WINDOW_RIGHT,
         )
@@ -971,6 +994,7 @@ def _attn_fwd_blocks(
             RETURN_SCORES=RETURN_SCORES,
             QUANT_BLOCK_SIZE=QUANT_BLOCK_SIZE,
             USE_ASM=USE_ASM,
+            USE_UOS=USE_UOS,
             WINDOW_LEFT=WINDOW_LEFT,
             WINDOW_RIGHT=WINDOW_RIGHT,
         )
@@ -1063,6 +1087,7 @@ def attn_fwd(
     USE_EXP2: tl.constexpr,
     QUANT_BLOCK_SIZE: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
     WINDOW_LEFT: tl.constexpr,
     WINDOW_RIGHT: tl.constexpr,
 ):
@@ -1330,6 +1355,7 @@ def attn_fwd(
         USE_BIAS,
         QUANT_BLOCK_SIZE,
         USE_ASM,
+        USE_UOS,
         window_block_min,
         window_block_max,
         WINDOW_LEFT,
@@ -1624,6 +1650,7 @@ def _attn_bwd(
     dropout_p,
     philox_seed,
     philox_offset_base,
+    sr_philox_seed,
     sm_scale,
     max_seqlen_q,
     max_seqlen_k,
@@ -1643,6 +1670,8 @@ def _attn_bwd(
     ENABLE_DROPOUT: tl.constexpr,
     USE_EXP2: tl.constexpr,
     USE_ASM: tl.constexpr,
+    USE_UOS: tl.constexpr,
+    USE_SR: tl.constexpr,
     WINDOW_LEFT: tl.constexpr,
     WINDOW_RIGHT: tl.constexpr,
 ):
@@ -1715,7 +1744,18 @@ def _attn_bwd(
                     tl.float32)
             if ENABLE_DROPOUT:
                 do = do / (1.0 - dropout_p)
-            do_deq = _qdq_tile(do, BLOCK_M, BLOCK_D_V, QUANT_BLOCK_SIZE, USE_ASM)
+            # One Philox stream per quantized tensor. dO is indexed by the query
+            # row only, so every key tile replays the same rounding and row delta
+            # stays consistent. dS along N and along M are separate quantizations.
+            head_index = off_z.to(tl.int64) * HQ + off_h_q
+            q_blocks = ((max_seqlen_q + BLOCK_M - 1) // BLOCK_M).to(tl.int64)
+            k_blocks = ((max_seqlen_k + BLOCK_N - 1) // BLOCK_N).to(tl.int64)
+            do_sr_offset = (head_index * q_blocks * BLOCK_M + start_m) * (BLOCK_D_V // 2)
+            tile_index = (head_index * q_blocks + start_m // BLOCK_M) * k_blocks + start_n // BLOCK_N
+            ds_sr_offset = tile_index * (BLOCK_M * (BLOCK_N // 2))
+            dst_sr_offset = tile_index * (BLOCK_N * (BLOCK_M // 2))
+            do_deq = _qdq_tile(
+                do, sr_philox_seed, do_sr_offset, BLOCK_M, BLOCK_D_V, QUANT_BLOCK_SIZE, USE_ASM, USE_UOS, USE_SR)
             row_mask = offs_m < seqlen_q
             lse = tl.load(lse_base + offs_m * stride_lse_m, mask=row_mask, other=0.0)
             row_delta = tl.sum(o * do_deq, 1)
@@ -1736,10 +1776,16 @@ def _attn_bwd(
                 BLOCK_D_QK, QUANT_BLOCK_SIZE, CAUSAL, USE_BIAS, USE_ALIBI, USE_ASM, WINDOW_LEFT, WINDOW_RIGHT)
             prob = _softmax_prob(qk_scaled, lse, BLOCK_M, BLOCK_N, USE_EXP2, ENABLE_DROPOUT, philox_seed,
                                  batch_philox_offset, dropout_p, start_m // BLOCK_M, start_n, seqlen_k)
-            dp = _dp_dot(do, do_deq, v, vs, BLOCK_M, BLOCK_N, BLOCK_D_V, QUANT_BLOCK_SIZE, USE_ASM)
+            dp = _dp_dot(
+                do, do_deq, v, vs, BLOCK_M, BLOCK_N, BLOCK_D_V, QUANT_BLOCK_SIZE, USE_ASM, USE_UOS, USE_SR,
+                sr_philox_seed, do_sr_offset)
             ds = prob * (dp - row_delta[:, None]) * sm_scale
-            dq_tile = _dq_dot(ds, k, ks, BLOCK_M, BLOCK_N, BLOCK_D_QK, QUANT_BLOCK_SIZE, USE_ASM)
-            dk = dk + _dk_dot(ds, q, qs, BLOCK_M, BLOCK_N, BLOCK_D_QK, QUANT_BLOCK_SIZE, USE_ASM)
+            dq_tile = _dq_dot(
+                ds, k, ks, BLOCK_M, BLOCK_N, BLOCK_D_QK, QUANT_BLOCK_SIZE, USE_ASM, USE_UOS, USE_SR,
+                sr_philox_seed + 1, ds_sr_offset)
+            dk = dk + _dk_dot(
+                ds, q, qs, BLOCK_M, BLOCK_N, BLOCK_D_QK, QUANT_BLOCK_SIZE, USE_ASM, USE_UOS, USE_SR,
+                sr_philox_seed + 2, dst_sr_offset)
             dv = dv + tl.dot(tl.trans(prob), do_deq, out_dtype=tl.float32)
             dq_ptrs = (DQ + off_z * stride_dqz + off_h_q * stride_dqh + q_start * stride_dqm +
                        offs_m[:, None] * stride_dqm + offs_dq[None, :] * stride_dqk)
@@ -1790,6 +1836,8 @@ def attention_mxfp4_backward(
     layout: str,
     window_left: int,
     window_right: int,
+    use_uos: bool = False,
+    use_sr_grad: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     cu_seqlens_q = _as_int32_cu_seqlens(cu_seqlens_q)
     cu_seqlens_k = _as_int32_cu_seqlens(cu_seqlens_k)
@@ -1864,6 +1912,7 @@ def attention_mxfp4_backward(
         dropout_p=dropout_p,
         philox_seed=philox_seed,
         philox_offset_base=philox_offset,
+        sr_philox_seed=int(torch.randint(0, 2**31 - 3, ()).item()) if use_sr_grad else 0,
         sm_scale=sm_scale,
         max_seqlen_q=max_seqlens_q,
         max_seqlen_k=max_seqlens_k,
@@ -1883,6 +1932,8 @@ def attention_mxfp4_backward(
         ENABLE_DROPOUT=dropout_p > 0.0,
         USE_EXP2=use_exp2,
         USE_ASM=is_cdna4(),
+        USE_UOS=use_uos,
+        USE_SR=use_sr_grad,
         WINDOW_LEFT=window_left,
         WINDOW_RIGHT=window_right,
         num_warps=4,
@@ -1958,6 +2009,7 @@ def attention_mxfp4_forward_triton_impl(
     use_exp2: bool,
     window_left: int,
     window_right: int,
+    use_uos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if DEBUG:
         print()
@@ -2107,13 +2159,14 @@ def attention_mxfp4_forward_triton_impl(
         BLOCK_N=64,
         QUANT_BLOCK_SIZE=BLOCK_SIZE_DEFAULT,
         USE_ASM=is_cdna4(),
+        USE_UOS=use_uos,
         WINDOW_LEFT=window_left,
         WINDOW_RIGHT=window_right,
     )
     return o, softmax_lse, exp_scores
 
 
-def _quantize_attention_mxfp4(x: torch.Tensor, layout: str):
+def _quantize_attention_mxfp4(x: torch.Tensor, layout: str, *, use_uos: bool):
     """Quantize one attention tensor on the sequence × head-dim plane.
 
     ``convert_to_mxfp4(..., is_2d_block=True)`` groups the last two axes.
@@ -2123,14 +2176,14 @@ def _quantize_attention_mxfp4(x: torch.Tensor, layout: str):
     Scales are stored so the kernel addresses a group with ``token // 32``.
     """
     if layout == "bhsd":
-        return torch.ops.torchtitan.convert_to_mxfp4(x, axis=-1, is_2d_block=True)
+        return torch.ops.torchtitan.convert_to_mxfp4(x, axis=-1, is_2d_block=True, use_uos=use_uos)
     if layout == "bshd":
         packed, scales = torch.ops.torchtitan.convert_to_mxfp4(
-            x.permute(0, 2, 1, 3), axis=-1, is_2d_block=True)
+            x.permute(0, 2, 1, 3), axis=-1, is_2d_block=True, use_uos=use_uos)
         return packed.permute(0, 2, 1, 3), scales.permute(0, 2, 1, 3)
     if layout == "thd":
         packed, scales = torch.ops.torchtitan.convert_to_mxfp4(
-            x.transpose(0, 1), axis=-1, is_2d_block=True)
+            x.transpose(0, 1), axis=-1, is_2d_block=True, use_uos=use_uos)
         return packed.transpose(0, 1), scales.permute(1, 0, 2)
     raise ValueError(f"Unsupported attention layout: {layout}")
 
@@ -2157,17 +2210,23 @@ class _triton_attention_mxfp4(torch.autograd.Function):
         layout: str,
         window_left: int,
         window_right: int,
+        use_hadamard: bool,
+        use_uos: bool,
+        use_sr_grad: bool,
     ):
         input_dtype = q.dtype
         # H H^T = I, so the rotation cancels in QK^T and stays in the Q/K gradients.
         # The transform object is saved on ctx; a later forward builds a new one.
-        with torch.no_grad():
-            qk_hadamard = HadamardFactory.create_transform(q.device)
-        q = qk_hadamard(q)
-        k = qk_hadamard(k)
-        q, q_scale = _quantize_attention_mxfp4(q, layout)
-        k, k_scale = _quantize_attention_mxfp4(k, layout)
-        v, v_scale = _quantize_attention_mxfp4(v, layout)
+        if use_hadamard:
+            with torch.no_grad():
+                qk_hadamard = HadamardFactory.create_transform(q.device)
+            q = qk_hadamard(q)
+            k = qk_hadamard(k)
+        else:
+            qk_hadamard = None
+        q, q_scale = _quantize_attention_mxfp4(q, layout, use_uos=use_uos)
+        k, k_scale = _quantize_attention_mxfp4(k, layout, use_uos=use_uos)
+        v, v_scale = _quantize_attention_mxfp4(v, layout, use_uos=use_uos)
 
         cu_seqlens_q = _as_int32_cu_seqlens(cu_seqlens_q, q.device)
         cu_seqlens_k = _as_int32_cu_seqlens(cu_seqlens_k, q.device)
@@ -2192,10 +2251,13 @@ class _triton_attention_mxfp4(torch.autograd.Function):
             use_exp2=use_exp2,
             window_left=window_left,
             window_right=window_right,
+            use_uos=use_uos,
         )
 
         ctx.save_for_backward(q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale)
         ctx.qk_hadamard = qk_hadamard
+        ctx.use_uos = use_uos
+        ctx.use_sr_grad = use_sr_grad
         _triton_attention_mxfp4.last_qk_hadamard = qk_hadamard
         ctx.input_dtype = input_dtype
         ctx.sm_scale = sm_scale
@@ -2217,7 +2279,7 @@ class _triton_attention_mxfp4(torch.autograd.Function):
         # LSE is an output, and the flash backward does not consume it.
         del grad_lse, grad_scores
         if grad_output is None or not any(ctx.needs_input_grad[:3]):
-            return (None,) * 17
+            return (None,) * 20
         q, k, v, output, softmax_lse, alibi_slopes, bias, q_scale, k_scale, v_scale = ctx.saved_tensors
         dq, dk, dv = attention_mxfp4_backward(
             grad_output,
@@ -2242,13 +2304,16 @@ class _triton_attention_mxfp4(torch.autograd.Function):
             ctx.layout,
             ctx.window_left,
             ctx.window_right,
+            use_uos=ctx.use_uos,
+            use_sr_grad=ctx.use_sr_grad,
         )
-        dq = ctx.qk_hadamard(dq, inverse=True)
-        dk = ctx.qk_hadamard(dk, inverse=True)
+        if ctx.qk_hadamard is not None:
+            dq = ctx.qk_hadamard(dq, inverse=True)
+            dk = ctx.qk_hadamard(dk, inverse=True)
         grads = []
         for needed, grad in zip(ctx.needs_input_grad[:3], (dq, dk, dv)):
             grads.append(grad.to(ctx.input_dtype) if needed else None)
-        grads.extend([None] * 14)
+        grads.extend([None] * 17)
         return tuple(grads)
 
 
@@ -2274,8 +2339,9 @@ def fake_attention_mxfp4_forward_triton_impl(
     use_exp2: bool,
     window_left: int,
     window_right: int,
+    use_uos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    del window_left, window_right
+    del window_left, window_right, use_uos
     # check if varlen
     is_varlen = layout == "thd"
 
@@ -2329,6 +2395,9 @@ def triton_attention_mxfp4(
     use_exp2: bool,
     layout: str,
     window_size: tuple[int, int] = (-1, -1),
+    use_hadamard: bool = True,
+    use_uos: bool = False,
+    use_sr_grad: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """MXFP4 attention.
 
@@ -2365,4 +2434,7 @@ def triton_attention_mxfp4(
         layout,
         window_left,
         window_right,
+        use_hadamard,
+        use_uos,
+        use_sr_grad,
     )

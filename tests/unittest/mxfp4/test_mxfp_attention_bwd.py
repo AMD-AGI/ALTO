@@ -293,3 +293,53 @@ def test_varlen_rejects_sequence_not_aligned_to_quant_block():
         triton_attention_mxfp4(
             q, k, v, None, None, dim**-0.5, 0.0, cu, cu, 48, 48, True, False, True, "thd",
             window_size=(-1, 0))
+
+
+def test_attention_honors_hadamard_uos_and_sr_grad():
+    from alto.kernels.hadamard_transform.transform import HadamardFactory
+
+    class _Scale:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, value, inverse=False, left_mul=False):
+            del inverse, left_mul
+            self.calls += 1
+            return value * 3
+
+    torch.manual_seed(0)
+    heads, dim = 4, 64
+    q = torch.randn(64, heads, dim, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    cu = torch.tensor([0, 64], device="cuda", dtype=torch.int32)
+    scale = dim**-0.5
+    transform = _Scale()
+    raw = HadamardFactory.__dict__["create_transform"]
+    HadamardFactory.create_transform = classmethod(lambda cls, device: transform)
+    try:
+        def run(**flags):
+            query = q.detach().requires_grad_(True)
+            out, _, _ = triton_attention_mxfp4(
+                query, k, v, None, None, scale, 0.0, cu, cu, 64, 64, True, False, True, "thd",
+                window_size=(-1, 0), **flags)
+            return out, query
+
+        plain, _ = run(use_hadamard=False, use_uos=False, use_sr_grad=False)
+        assert transform.calls == 0
+        uos, _ = run(use_hadamard=False, use_uos=True, use_sr_grad=False)
+        assert not torch.equal(plain, uos)
+        rotated, query = run(use_hadamard=True, use_uos=False, use_sr_grad=True)
+        assert transform.calls > 0
+        assert not torch.equal(plain, rotated)
+        # A constant upstream gradient is an exact FP4 value, so stochastic
+        # rounding leaves it unchanged. A random gradient crosses bin edges.
+        grad_out = torch.randn_like(rotated)
+        rotated.backward(grad_out)
+        again, query_again = run(use_hadamard=True, use_uos=False, use_sr_grad=True)
+        again.backward(grad_out)
+        assert torch.isfinite(query.grad).all()
+        assert torch.isfinite(query_again.grad).all()
+        assert not torch.equal(query.grad, query_again.grad)
+    finally:
+        HadamardFactory.create_transform = raw

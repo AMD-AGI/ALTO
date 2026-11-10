@@ -167,6 +167,7 @@ def lpt_module(base: type) -> type:
             return lpt_attention_BLHK(
                 q_BLHK, k_BLHK, v_BLHV,
                 scale=scale, enable_gqa=enable_gqa, is_causal=is_causal,
+                config=self.training_op_config,
             )
 
         def iter_lpt_weights(self):
@@ -194,6 +195,7 @@ def lpt_module(base: type) -> type:
                 attention_metadata=attention_metadata,
                 scale=scale,
                 out_transform=out_transform,
+                config=self.training_op_config,
             )
 
         def iter_lpt_weights(self):
@@ -344,6 +346,7 @@ def lpt_attention_BLHK(
     scale: float | None,
     enable_gqa: bool,
     is_causal: bool,
+    config: TrainingOpConfig,
 ) -> torch.Tensor:
     """Run MXFP4 attention on ``[B, L, H, D]`` inputs."""
     del enable_gqa
@@ -377,6 +380,9 @@ def lpt_attention_BLHK(
         return_scores=False,
         use_exp2=True,
         layout="bhsd",
+        use_hadamard=config.use_hadamard,
+        use_uos=config.use_uos,
+        use_sr_grad=config.use_sr_grad,
     )[0]
     return output.transpose(1, 2)
 
@@ -389,6 +395,7 @@ def lpt_varlen_attention(
     attention_metadata: VarlenAttentionMetadata,
     scale: float | None,
     out_transform: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None,
+    config: TrainingOpConfig,
 ) -> torch.Tensor:
     """Run MXFP4 varlen attention on packed ``[T, H, D]`` tokens.
 
@@ -432,6 +439,9 @@ def lpt_varlen_attention(
             use_exp2=True,
             layout="thd",
             window_size=(window_left, window_right),
+            use_hadamard=config.use_hadamard,
+            use_uos=config.use_uos,
+            use_sr_grad=config.use_sr_grad,
         )
         output = output.to(q_THK.dtype)
         if out_transform is not None:

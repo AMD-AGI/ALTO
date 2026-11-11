@@ -27,7 +27,6 @@ from compressed_tensors.quantization import (
     QuantizationConfig,
     QuantizationScheme,
     QuantizationStatus,
-    apply_quantization_config,
     disable_quantization,
     enable_quantization,
     is_attention_module,
@@ -40,6 +39,8 @@ from torch.utils.hooks import RemovableHandle
 
 from alto.modifiers.utils import HooksMixin
 from alto.observers import Observer
+from .conv2d_init import apply_quantization_config_conv2d
+from .format_registry import validate_scale_type
 from .calibration import (
     apply_calibration_status,
     calibrate_input_hook,
@@ -223,7 +224,7 @@ class QuantizationMixin(HooksMixin):
         for _, module in match_named_modules(model, self.resolved_targets, self.ignore):
             reset_quantization_status(module)  # reset any previously applied qconfigs
 
-        apply_quantization_config(model, self.resolved_config)
+        apply_quantization_config_conv2d(model, self.resolved_config)
 
         # disable quantization until calibration
         model.apply(disable_quantization)
@@ -343,6 +344,13 @@ class QuantizationMixin(HooksMixin):
             # was provided directly (not derived from scheme)
             for scheme_obj in config_groups.values():
                 self._apply_observer_overrides(scheme_obj)
+
+        for group in config_groups.values():
+            for args in (group.weights, group.input_activations, group.output_activations):
+                # Migrate recipes written before PoT became a scale policy.
+                if args is not None and args.format == "int8_pot":
+                    args.format, args.scale_type = None, "pot"
+                validate_scale_type(args)
 
         return QuantizationConfig(
             config_groups=config_groups,

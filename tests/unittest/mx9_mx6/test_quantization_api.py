@@ -66,6 +66,10 @@ def apis(monkeypatch, request):
     before = set(sys.modules)
     forward_module = importlib.import_module("compressed_tensors.quantization.lifecycle.forward")
     monkeypatch.setattr(forward_module, "fake_quantize", forward_module.fake_quantize)
+    quant_utils = importlib.import_module("compressed_tensors.quantization.utils")
+    quant_helpers = importlib.import_module("compressed_tensors.quantization.utils.helpers")
+    monkeypatch.setattr(quant_utils, "calculate_qparams", quant_utils.calculate_qparams)
+    monkeypatch.setattr(quant_helpers, "calculate_qparams", quant_helpers.calculate_qparams)
 
     _make_pkg(monkeypatch, "torchtitan", "")
     _make_pkg(monkeypatch, "torchtitan.tools", "")
@@ -340,7 +344,7 @@ def test_int8_dynamic_skips_calibrate_and_quantizes_each_token_on_its_own(apis):
     assert torch.allclose(model(spiked)[0, :-1], out[0, :-1])
 
 
-def test_a_dynamic_recipe_skips_calibrate_and_ends_frozen(apis):
+def test_a_dynamic_recipe_skips_calibrate_and_ends_frozen(apis, caplog):
     model = _Net()
     calls = []
     recipe = apis.create_quantization_recipe("mx6")
@@ -349,7 +353,7 @@ def test_a_dynamic_recipe_skips_calibrate_and_ends_frozen(apis):
     apis.apply_quantization(model, recipe, calibrate=lambda: calls.append(None))
 
     assert calls == []
-    assert any("needs no calibration data" in message for message in apis.logger.warnings)
+    assert "needs no calibration data" in caplog.text
     for name in QUANTIZABLE:
         module = model.get_submodule(name)
         assert module.quantization_scheme.weights.format == "mx6"

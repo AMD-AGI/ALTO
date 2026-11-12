@@ -4,11 +4,14 @@
 
 import grain.python as grain
 import numpy as np
+import pytest
 import torch
 
 from alto.models.gpt_oss.config_registry import (
     gpt_oss_20b_mxfp8_attn,
     gpt_oss_20b_mxfp8_attn_aligned,
+    gpt_oss_20b_pretrain_flex,
+    gpt_oss_20b_pretrain_flex_aligned,
 )
 from torchtitan.components.data.dataset import TextSequence
 from torchtitan.components.data.megatron import PretokenizedProcessor
@@ -91,9 +94,16 @@ def test_packed_rows_keep_aligned_document_boundaries():
     assert torch.all(boundaries % 32 == 0)
 
 
-def test_mxfp8_attn_document_alignment_is_a_separate_config():
-    baseline = gpt_oss_20b_mxfp8_attn()
-    aligned = gpt_oss_20b_mxfp8_attn_aligned()
+@pytest.mark.parametrize(
+    ("baseline_fn", "aligned_fn"),
+    [
+        (gpt_oss_20b_pretrain_flex, gpt_oss_20b_pretrain_flex_aligned),
+        (gpt_oss_20b_mxfp8_attn, gpt_oss_20b_mxfp8_attn_aligned),
+    ],
+)
+def test_document_alignment_is_a_separate_config(baseline_fn, aligned_fn):
+    baseline = baseline_fn()
+    aligned = aligned_fn()
 
     assert baseline.dataloader.dataset.dataset.processor.seq_align is None
     assert baseline.validator.dataloader.dataset.dataset.processor.seq_align is None

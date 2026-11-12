@@ -38,6 +38,7 @@ __all__ = [
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_pretrain_flex",
+    "gpt_oss_20b_pretrain_flex_aligned",
     "gpt_oss_20b_mxfp8_attn",
     "gpt_oss_20b_mxfp8_attn_aligned",
     "gpt_oss_20b_lpt",
@@ -275,19 +276,34 @@ def gpt_oss_20b_mxfp8_attn() -> Trainer.Config:
     return config
 
 
-def gpt_oss_20b_mxfp8_attn_aligned() -> Trainer.Config:
-    """``gpt_oss_20b_mxfp8_attn`` with each document padded to the MX block.
+def _align_documents(config: Trainer.Config) -> Trainer.Config:
+    """Pad every train and validation document to the 32-token MX block.
 
     Padding happens before packing, so a 32-token scale group never contains
-    two documents. The unaligned config stays byte-for-byte the 20k run.
+    two documents.
     """
-    config = gpt_oss_20b_mxfp8_attn()
-    config.dump_folder = (
-        "gpt_oss_20b-pretrain-mxfp8-attn-aligned-cdelta-lr4e-4-outputs"
-    )
     config.dataloader.dataset = megatron_packed_dataset(C4_TRAIN_IDX, seq_align=32)
     config.validator.dataloader.dataset = megatron_packed_dataset(
         C4_VAL_IDX, seq_align=32
+    )
+    return config
+
+
+def gpt_oss_20b_pretrain_flex_aligned() -> Trainer.Config:
+    """BF16 baseline for ``gpt_oss_20b_mxfp8_attn_aligned``: same padded data."""
+    config = _align_documents(gpt_oss_20b_pretrain_flex())
+    config.dump_folder = "gpt_oss_20b-pretrain-flex-aligned-lr4e-4-outputs"
+    return config
+
+
+def gpt_oss_20b_mxfp8_attn_aligned() -> Trainer.Config:
+    """``gpt_oss_20b_mxfp8_attn`` with each document padded to the MX block.
+
+    The unaligned config stays byte-for-byte the 20k run.
+    """
+    config = _align_documents(gpt_oss_20b_mxfp8_attn())
+    config.dump_folder = (
+        "gpt_oss_20b-pretrain-mxfp8-attn-aligned-cdelta-lr4e-4-outputs"
     )
     return config
 

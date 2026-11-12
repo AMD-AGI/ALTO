@@ -6,6 +6,8 @@
 #   ./docker/run_gpt_oss_mxfp8_flex.sh debug-mxfp8   # 2-GPU debugmodel, MXFP8 Flex
 #   ./docker/run_gpt_oss_mxfp8_flex.sh bf16-flex     # 8-GPU 20b_megatron baseline
 #   ./docker/run_gpt_oss_mxfp8_flex.sh mxfp8-attn    # 8-GPU 20b_megatron, MXFP8 attention
+#   ./docker/run_gpt_oss_mxfp8_flex.sh bf16-flex-aligned   # bf16-flex, documents padded to 32
+#   ./docker/run_gpt_oss_mxfp8_flex.sh mxfp8-attn-aligned  # mxfp8-attn, documents padded to 32
 #
 # Extra arguments go to examples/run.sh, e.g. `mxfp8-attn --training.steps 100`.
 # Every non-shell run tees its output to logs/ in the repo.
@@ -32,8 +34,10 @@ case "${MODE}" in
     debug-mxfp8) TRAIN_COMMAND="NGPU=2 MODULE=gpt_oss CONFIG=gpt_oss_debugmodel_mxfp8_attn ./examples/run.sh --parallelism.expert_parallel_degree 2 ${EXTRA_ARGS}" ;;
     bf16-flex) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_pretrain_flex ./examples/run.sh ${EXTRA_ARGS}" ;;
     mxfp8-attn) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_mxfp8_attn ./examples/run.sh ${EXTRA_ARGS}" ;;
+    bf16-flex-aligned) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_pretrain_flex_aligned ./examples/run.sh ${EXTRA_ARGS}" ;;
+    mxfp8-attn-aligned) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_mxfp8_attn_aligned ./examples/run.sh ${EXTRA_ARGS}" ;;
     *)
-        echo "Usage: $0 {shell|test|debug-bf16|debug-mxfp8|bf16-flex|mxfp8-attn} [run.sh args...]" >&2
+        echo "Usage: $0 {shell|test|debug-bf16|debug-mxfp8|bf16-flex|mxfp8-attn|bf16-flex-aligned|mxfp8-attn-aligned} [run.sh args...]" >&2
         exit 2
         ;;
 esac
@@ -45,7 +49,7 @@ if [[ "${MODE}" != shell ]]; then
 fi
 
 DATA_MOUNTS=()
-if [[ "${MODE}" == bf16-flex || "${MODE}" == mxfp8-attn ]]; then
+if [[ "${MODE}" == bf16-flex* || "${MODE}" == mxfp8-attn* ]]; then
     : "${HF_HUB_DIR:?set HF_HUB_DIR to the host dir containing models--openai--gpt-oss-20b}"
     : "${MEGATRON_DATA_DIR:?set MEGATRON_DATA_DIR to the host dir containing c4-train.en_6_text_document.idx}"
     DATA_MOUNTS=(
@@ -54,9 +58,12 @@ if [[ "${MODE}" == bf16-flex || "${MODE}" == mxfp8-attn ]]; then
     )
 fi
 
+# WANDB_ENV_FILE holds `WANDB_API_KEY=...`; it is sourced inside the container.
+# Only training modes log to wandb, so `shell` and `test` never need it.
 WANDB_MOUNT=()
-if [[ "${WANDB_MODE:-online}" != offline && -f "${HOME}/.netrc" ]]; then
-    WANDB_MOUNT=(-v "${HOME}/.netrc:/tmp/wandb.netrc:ro")
+if [[ "${MODE}" != shell && "${MODE}" != test && "${WANDB_MODE:-online}" != offline ]]; then
+    : "${WANDB_ENV_FILE:?set WANDB_ENV_FILE to a file containing WANDB_API_KEY=..., or WANDB_MODE=offline}"
+    WANDB_MOUNT=(-v "${WANDB_ENV_FILE}:/tmp/wandb_env:ro")
 fi
 
 ${DOCKER} run --rm --init \
@@ -74,6 +81,8 @@ ${DOCKER} run --rm --init \
     -e HOME=/tmp/alto-home \
     -e WANDB_MODE="${WANDB_MODE:-online}" \
     -e WANDB_PROJECT="${WANDB_PROJECT:-alto-gpt-oss-20b-mxfp8-flex}" \
+    -e WANDB_TEAM -e WANDB_RUN_NAME -e WANDB_RUN_GROUP -e WANDB_RUN_ID -e WANDB_RESUME \
+    -e USER=alto \
     --workdir /opt/alto \
     -v "${ALTO_DIR}:/opt/alto" \
     "${DATA_MOUNTS[@]}" \
@@ -82,8 +91,7 @@ ${DOCKER} run --rm --init \
     bash -lc '
 set -euo pipefail
 mkdir -p "$HOME"
-if [[ -f /tmp/wandb.netrc ]]; then
-    cp /tmp/wandb.netrc "$HOME/.netrc"
-    chmod 600 "$HOME/.netrc"
+if [[ -f /tmp/wandb_env ]]; then
+    set -a; source /tmp/wandb_env; set +a
 fi
 '"${TRAIN_COMMAND}"

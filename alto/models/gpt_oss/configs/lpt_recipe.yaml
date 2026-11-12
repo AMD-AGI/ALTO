@@ -4,7 +4,7 @@ training_stage:
       scheme: "mxfp4"
       # VarlenInnerAttention also matches SlidingWindowVarlenInnerAttention.
       # The LPT module keeps packed-document cu_seqlens and the metadata window.
-      targets: ["Linear", "GptOssGroupedLinear", "GroupedLinear", "VarlenInnerAttention"]
+      targets: ["Linear", "GptOssGroupedLinear", "GroupedLinear"]
       ignore: ["lm_head", "re:.*\\.router\\.gate"]
       use_2dblock_x: false
       use_2dblock_w: true
@@ -22,6 +22,6 @@ training_stage:
       two_level_scaling: none
 
       # weight de-oscillation, disabled by default
-      # deosc_step: 2000
-      # deosc_period: 200
-      # deosc_ratio: 4.0
+      deosc_step: 768
+      deosc_period: 100
+      deosc_ratio: 4.0

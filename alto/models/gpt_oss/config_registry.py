@@ -242,7 +242,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
     global_batch_size = 32
     steps = 1_200_000
     parallelism = ParallelismConfig(
-        expert_parallel_degree=8,
+        expert_parallel_degree=4,
         tensor_parallel_degree=1,
     )
     model = build_model_config("20b_megatron", seq_len=seq_len, parallelism=parallelism)
@@ -255,7 +255,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
         hf_assets_path=GPT_OSS_20B_PATH,
         dump_folder=(
             "gpt_oss_20b-pretrain-subset-gbs32-mxfp4gemm_1d2d-hadamard-sr-uos-"
-            "mxfp4attn-lr4e-4-outputs"
+            "deosc768_100_4-lr4e-4-outputs"
         ),
         profiler=Profiler.Config(enable_profiling=False),
         metrics=MetricsProcessor.Config(
@@ -294,12 +294,13 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
             steps=steps,
         ),
         parallelism=parallelism,
-        checkpointer=CheckpointManager.Config(
-            interval=1000,
-            keep_latest_k=2,
-            load_only=True,
-            initial_load_model_only=False,
-        ),
+        # checkpointer=CheckpointManager.Config(
+        #     interval=1000,
+        #     keep_latest_k=2,
+        #     load_only=True,
+        #     initial_load_model_only=False,
+        # ),
+        checkpointer=None,
         activation_remat=None,
         debug=DebugConfig(
             seed=1234,

@@ -51,6 +51,20 @@ def _as_int32_cu_seqlens(cu_seqlens, device=None):
     return torch.empty(0, dtype=torch.int32, device=device)
 
 
+def _reject_nonzero_dropout(dropout_p: float) -> None:
+    """MXFP4 attention does not apply dropout.
+
+    The row normalizer and the two PV products do not share one mask, and the
+    backward rebuilds probabilities from the pre-dropout LSE. Nonzero dropout
+    is rejected until those paths use the same mask.
+    """
+    if dropout_p != 0.0:
+        raise ValueError(
+            "MXFP4 attention does not support dropout. "
+            f"dropout_p must be 0, got {dropout_p}."
+        )
+
+
 def _assert_sequences_quant_aligned(cu_seqlens, *, name: str) -> None:
     """Each varlen sequence must occupy whole MXFP4 quant groups.
 
@@ -1839,6 +1853,7 @@ def attention_mxfp4_backward(
     use_uos: bool = False,
     use_sr_grad: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    _reject_nonzero_dropout(dropout_p)
     cu_seqlens_q = _as_int32_cu_seqlens(cu_seqlens_q)
     cu_seqlens_k = _as_int32_cu_seqlens(cu_seqlens_k)
     is_varlen = layout == "thd"
@@ -2011,6 +2026,7 @@ def attention_mxfp4_forward_triton_impl(
     window_right: int,
     use_uos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    _reject_nonzero_dropout(dropout_p)
     if DEBUG:
         print()
         print("attention_mxfp4_forward_triton_impl")
@@ -2214,6 +2230,7 @@ class _triton_attention_mxfp4(torch.autograd.Function):
         use_uos: bool,
         use_sr_grad: bool,
     ):
+        _reject_nonzero_dropout(dropout_p)
         input_dtype = q.dtype
         # H H^T = I, so the rotation cancels in QK^T and stays in the Q/K gradients.
         # The transform object is saved on ctx; a later forward builds a new one.
@@ -2342,6 +2359,7 @@ def fake_attention_mxfp4_forward_triton_impl(
     use_uos: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     del window_left, window_right, use_uos
+    _reject_nonzero_dropout(dropout_p)
     # check if varlen
     is_varlen = layout == "thd"
 
@@ -2414,6 +2432,8 @@ def triton_attention_mxfp4(
     ``SlidingWindowVarlenInnerAttention`` already stores that as
     ``(sliding_window_size - 1, 0)``. Pass the same pair here: 128 becomes
     ``(127, 0)``.
+
+    ``dropout_p`` must be 0. Nonzero dropout is rejected.
     """
     window_left, window_right = (int(window_size[0]), int(window_size[1]))
     return _triton_attention_mxfp4.apply(

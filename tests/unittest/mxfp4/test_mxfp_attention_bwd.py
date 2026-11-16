@@ -157,6 +157,17 @@ def test_sliding_window_matches_dequantized_probability():
             assert _cosine(actual, target) > 0.999
 
 
+def test_nonzero_dropout_is_rejected():
+    q = torch.randn(32, 4, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    with pytest.raises(ValueError, match="does not support dropout"):
+        triton_attention_mxfp4(
+            q, k, v, None, None, 1.0, 0.1, 0, 0, 32, 32, False, False, True, "bhsd",
+            use_hadamard=False,
+        )
+
+
 def test_thd_quantizes_on_sequence_dim_plane():
     from alto.kernels.hadamard_transform.transform import HadamardFactory
 

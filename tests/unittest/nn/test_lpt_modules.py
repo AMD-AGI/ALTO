@@ -163,7 +163,7 @@ def test_lpt_varlen_keeps_documents_window_and_sink_lse():
             del inverse, left_mul
             return value
 
-    raw = HadamardFactory.__dict__["create_transform"]
+    saved_create_transform = HadamardFactory.__dict__["create_transform"]
     HadamardFactory.create_transform = classmethod(lambda cls, device: _Identity())
     try:
         config = _mxfp4_config()
@@ -199,16 +199,16 @@ def test_lpt_varlen_keeps_documents_window_and_sink_lse():
             return apply_attention_sink_rescale(out, lse, sinks)
 
         with torch.no_grad():
-            raw = module(q, k, v, attention_metadata=full_metadata, scale=None)
+            full = module(q, k, v, attention_metadata=full_metadata, scale=None)
             k_changed = k.detach().clone()
             k_changed[32:] = k_changed[32:] + 1
             isolated = module(
                 q, k_changed, v, attention_metadata=full_metadata, scale=None
             )
-            assert torch.equal(raw[:32], isolated[:32])
-            assert not torch.equal(raw[32:], isolated[32:])
+            assert torch.equal(full[:32], isolated[:32])
+            assert not torch.equal(full[32:], isolated[32:])
             windowed = module(q, k, v, attention_metadata=window_metadata, scale=None)
-            assert not torch.equal(raw, windowed)
+            assert not torch.equal(full, windowed)
 
         sunk = module(
             q, k, v, attention_metadata=full_metadata, scale=None, out_transform=transform
@@ -231,4 +231,4 @@ def test_lpt_varlen_keeps_documents_window_and_sink_lse():
         with pytest.raises(ValueError, match="Unsupported attention precision"):
             module_cls(module_cls.Config(training_op_config=nvfp4))
     finally:
-        HadamardFactory.create_transform = raw
+        HadamardFactory.create_transform = saved_create_transform

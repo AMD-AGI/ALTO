@@ -165,7 +165,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
     global_batch_size = 32
     steps = 1_200_000
     parallelism = ParallelismConfig(
-        expert_parallel_degree=8,
+        expert_parallel_degree=4,
         tensor_parallel_degree=1,
     )
     model = build_model_config("20b_megatron", seq_len=seq_len, parallelism=parallelism)

@@ -1,0 +1,24 @@
+# Fully dynamic MX9 weights and activations.
+# HFTransformerModel wraps the causal LM under model; keep its lm_head in BF16.
+quantization_stage:
+  quantization_modifiers:
+    QuantizationModifier:
+      ignore: ["model.lm_head"]
+      sequential: false
+      config_groups:
+        group_0:
+          targets: ["Linear"]
+          weights:
+            num_bits: 8
+            type: "int"
+            symmetric: true
+            strategy: "tensor"
+            dynamic: true
+            format: "mx9"
+          input_activations:
+            num_bits: 8
+            type: "int"
+            symmetric: true
+            strategy: "tensor"
+            dynamic: true
+            format: "mx9"

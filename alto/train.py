@@ -300,6 +300,21 @@ def apply_loaded_overrides(config: Any, overrides: list[tuple[str, str | None]])
     apply_field_overrides(config, model_overrides)
 
 
+def trainer_for(config: Any) -> type[Trainer]:
+    """Pick the trainer class that matches the loaded config object.
+
+    Field overrides mutate that object in place, so a Flux recipe stays a
+    ``FluxTrainer.Config`` and still carries ``encoder`` and ``inference``.
+    """
+    from torchtitan.models.flux.trainer import FluxTrainer as TitanFluxTrainer
+
+    from alto.models.flux.trainer import FluxTrainer
+
+    if isinstance(config, TitanFluxTrainer.Config):
+        return FluxTrainer
+    return Trainer
+
+
 def main() -> None:
     """Run the config selected on the command line with ALTO's trainer.
 
@@ -328,7 +343,7 @@ def main() -> None:
 
     trainer: Trainer | None = None
     try:
-        trainer = Trainer(config)
+        trainer = trainer_for(config)(config)
         if config.create_seed_checkpoint:
             if int(os.environ["WORLD_SIZE"]) != 1:
                 raise RuntimeError("Must create seed checkpoint using a single device, to disable sharding.")

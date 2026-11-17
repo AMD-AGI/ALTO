@@ -61,5 +61,13 @@ class TrainingOpConfig:
     from ``dX`` and ``dW`` after the backward GEMMs.
     """
 
+    use_dx_hadamard: bool = False
+    """
+    Left-multiply a randomized Hadamard on the MXFP4 weight output channels
+    before quantization, then right-multiply the forward output to undo it.
+    The same quantized weight is reused for ``dX``. ``dW`` is rotated back
+    on that axis after the backward GEMM.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

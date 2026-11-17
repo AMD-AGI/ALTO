@@ -41,6 +41,12 @@ class LowPrecisionTrainingModifier(Modifier):
     Apply a separate randomized Hadamard on the MXFP4 linear forward GEMM.
     ``use_hadamard`` remains the dW GEMM transform.
     """
+    use_dx_hadamard: bool = False
+    """
+    Hadamard-rotate MXFP4 weight output channels before quantization and
+    rotate the forward output back. Independent of ``use_hadamard`` and
+    ``use_fwd_hadamard``.
+    """
 
     deosc_step: int = 0
     """
@@ -109,6 +115,15 @@ class LowPrecisionTrainingModifier(Modifier):
             raise ValueError("forward Hadamard is only supported for mxfp4")
         return self
 
+    @model_validator(mode="after")
+    def validate_dx_hadamard(self):
+        if not self.use_dx_hadamard:
+            return self
+        schemes = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
+        if any(scheme_name != "mxfp4" for scheme_name in schemes):
+            raise ValueError("dX Hadamard is only supported for mxfp4")
+        return self
+
     @field_validator("deosc_step", mode="after")
     def validate_deosc_step(cls, value: int) -> int:
         if value < 0:
@@ -157,6 +172,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     clip_mode=self.clip_mode,
                     use_uos=self.use_uos,
                     use_fwd_hadamard=self.use_fwd_hadamard,
+                    use_dx_hadamard=self.use_dx_hadamard,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

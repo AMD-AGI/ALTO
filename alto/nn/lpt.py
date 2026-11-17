@@ -238,6 +238,7 @@ def lpt_linear(
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
                 use_uos=config.use_uos,
                 use_fwd_hadamard=config.use_fwd_hadamard,
+                use_dx_hadamard=config.use_dx_hadamard,
             )
         elif config.precision == "nvfp4":
             y = _to_nvfp4_then_scaled_mm(

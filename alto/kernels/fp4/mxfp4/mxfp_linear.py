@@ -275,6 +275,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         hadamard_transform: Optional[HadamardTransform] = None,
         use_uos: bool = False,
         fwd_hadamard_transform: Optional[HadamardTransform] = None,
+        dx_hadamard_transform: Optional[HadamardTransform] = None,
     ):
         """
         Forward pass for the blockwise FP8 linear operation.
@@ -298,6 +299,10 @@ class MXFP4LinearFunction(torch.autograd.Function):
         if fwd_hadamard_transform is not None:
             x = fwd_hadamard_transform(x, left_mul=False)
             weight = fwd_hadamard_transform(weight, left_mul=False)
+        # Left-multiply W on the output channels before quantization.
+        # The GEMM then emits y @ H^T, which is rotated back after the product.
+        if dx_hadamard_transform is not None:
+            weight = dx_hadamard_transform(weight, left_mul=True)
 
         if use_macro_block_scaling:
             x_scaled, x_mbs = macro_block_scaling(x, axis=-1, use_2d_block=use_2dblock_x)
@@ -416,10 +421,14 @@ class MXFP4LinearFunction(torch.autograd.Function):
         ctx.use_sr_grad = use_sr_grad
         ctx.hadamard_transform = hadamard_transform
         ctx.fwd_hadamard_transform = fwd_hadamard_transform
+        ctx.dx_hadamard_transform = dx_hadamard_transform
         ctx.use_dge = use_dge
         ctx.clip_mode = clip_mode
         ctx.use_macro_block_scaling = use_macro_block_scaling
         ctx.use_uos = use_uos
+
+        if dx_hadamard_transform is not None:
+            y = dx_hadamard_transform(y, left_mul=False)
 
         return y.view(*original_shape[:-1], -1)  # Reshape back to original
 
@@ -433,6 +442,12 @@ class MXFP4LinearFunction(torch.autograd.Function):
             inputs_mxfp4, input_scales, weight_mxfp4, weight_scales, x_mbs, w_mbs = ctx.saved_tensors
         else:
             x_dq, w_dq, weight_mxfp4 = ctx.saved_tensors
+
+        # Adjoint of rotating the GEMM output back: y = y_raw @ H.
+        if ctx.dx_hadamard_transform is not None:
+            grad_output = ctx.dx_hadamard_transform(
+                grad_output, inverse=True, left_mul=False
+            )
 
         # dequant-quant as deepseek-v3 paper
         if ctx.use_2dblock_x:
@@ -576,8 +591,25 @@ class MXFP4LinearFunction(torch.autograd.Function):
             grad_weights = ctx.fwd_hadamard_transform(
                 grad_weights, inverse=True, left_mul=False
             )
+        if ctx.dx_hadamard_transform is not None:
+            grad_weights = ctx.dx_hadamard_transform(
+                grad_weights, inverse=True, left_mul=True
+            )
 
-        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None, None, None
+        return (
+            grad_inputs.view(*original_shape[:-1], -1),
+            grad_weights,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def _to_mxfp4_then_scaled_mm(
@@ -592,6 +624,7 @@ def _to_mxfp4_then_scaled_mm(
     use_macro_block_scaling: bool = False,
     use_uos: bool = False,
     use_fwd_hadamard: bool = False,
+    use_dx_hadamard: bool = False,
 ) -> torch.Tensor:
     with torch.no_grad():
         hadamard_transform = (
@@ -600,6 +633,11 @@ def _to_mxfp4_then_scaled_mm(
         fwd_hadamard_transform = (
             HadamardFactory.create_transform(device=b.device)
             if use_fwd_hadamard
+            else None
+        )
+        dx_hadamard_transform = (
+            HadamardFactory.create_transform(device=b.device)
+            if use_dx_hadamard
             else None
         )
     y = MXFP4LinearFunction.apply(
@@ -614,5 +652,6 @@ def _to_mxfp4_then_scaled_mm(
         hadamard_transform,
         use_uos,
         fwd_hadamard_transform,
+        dx_hadamard_transform,
     )
     return y

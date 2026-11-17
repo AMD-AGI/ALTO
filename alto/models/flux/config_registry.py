@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from torchtitan.components.model_converter import ModelConvertersContainer
+from torchtitan.components.optim import MPAdam
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan_recipes.tests.models.flux import (
     flux_debugmodel as flux_debugmodel_orig,
@@ -59,14 +60,34 @@ def flux_debugmodel() -> FluxTrainer.Config:
         seq_len=config.training.max_context_length,
         local_batch_size=32,
     )
+    config.optim.optimizer.optimizers[0].lr = 2e-4
+    config.optim.lr_scheduler.warmup_steps = 16
+    config.optim.lr_scheduler.decay_ratio = 0.0
+    config.optim.max_norm = 2.0
+    config.training.steps = 100
     config.dump_folder = "flux_debugmodel-outputs"
     return config
 
 
 def flux_debugmodel_lpt() -> FluxTrainer.Config:
-    """Flux debug model whose Linear layers, including conditioning, run in MXFP4."""
+    """Flux debug model whose Linear layers, including conditioning, run in MXFP4.
+
+    Weights are updated with MPAdam. The mantissa learning rate and weight
+    decay stay on the shared debug schedule. The exponent step is
+    ``lr * lr_e_ratio``.
+    """
     config = flux_debugmodel()
     config.dump_folder = "flux_debugmodel_lpt-outputs"
+    adam = config.optim.optimizer.optimizers[0]
+    config.optim.optimizer.optimizers = [
+        MPAdam.Config(
+            pattern=adam.pattern,
+            lr=adam.lr,
+            weight_decay=adam.weight_decay,
+            weight_decay_e=adam.weight_decay,
+            lr_e_ratio=20.0,
+        )
+    ]
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             ModelOptConverter.Config(

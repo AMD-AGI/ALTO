@@ -10,6 +10,7 @@ training_stage:
       use_2dblock_w: true
       use_hadamard: true
       use_sr_grad: true
+      use_uos: true
 
       # differential gradient estimation, disabled by default
       use_dge: false

@@ -274,6 +274,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         use_macro_block_scaling,
         hadamard_transform: Optional[HadamardTransform] = None,
         use_uos: bool = False,
+        fwd_hadamard_transform: Optional[HadamardTransform] = None,
     ):
         """
         Forward pass for the blockwise FP8 linear operation.
@@ -290,6 +291,13 @@ class MXFP4LinearFunction(torch.autograd.Function):
         original_shape = x.shape
         original_dtype = x.dtype
         x = x.reshape(-1, original_shape[-1])  # Ensure x is 2D
+
+        # Right-multiply the contraction axis with the forward Hadamard.
+        # Q(XH) @ Q(WH)^T stays in the original output space. ``hadamard_transform``
+        # is a different matrix and stays on the token axis of the dW GEMM.
+        if fwd_hadamard_transform is not None:
+            x = fwd_hadamard_transform(x, left_mul=False)
+            weight = fwd_hadamard_transform(weight, left_mul=False)
 
         if use_macro_block_scaling:
             x_scaled, x_mbs = macro_block_scaling(x, axis=-1, use_2d_block=use_2dblock_x)
@@ -407,6 +415,7 @@ class MXFP4LinearFunction(torch.autograd.Function):
         ctx.original_dtype = original_dtype
         ctx.use_sr_grad = use_sr_grad
         ctx.hadamard_transform = hadamard_transform
+        ctx.fwd_hadamard_transform = fwd_hadamard_transform
         ctx.use_dge = use_dge
         ctx.clip_mode = clip_mode
         ctx.use_macro_block_scaling = use_macro_block_scaling
@@ -560,7 +569,15 @@ class MXFP4LinearFunction(torch.autograd.Function):
             )
             grad_weights *= dge_bwd(w_fp4_values, torch.float4_e2m1fn_x2)
 
-        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None, None
+        if ctx.fwd_hadamard_transform is not None:
+            grad_inputs = ctx.fwd_hadamard_transform(
+                grad_inputs, inverse=True, left_mul=False
+            )
+            grad_weights = ctx.fwd_hadamard_transform(
+                grad_weights, inverse=True, left_mul=False
+            )
+
+        return grad_inputs.view(*original_shape[:-1], -1), grad_weights, None, None, None, None, None, None, None, None, None
 
 
 def _to_mxfp4_then_scaled_mm(
@@ -574,12 +591,17 @@ def _to_mxfp4_then_scaled_mm(
     use_hadamard: bool,
     use_macro_block_scaling: bool = False,
     use_uos: bool = False,
+    use_fwd_hadamard: bool = False,
 ) -> torch.Tensor:
-    if use_hadamard:
-        with torch.no_grad():
-            hadamard_transform = HadamardFactory.create_transform(device=b.device)
-    else:
-        hadamard_transform = None
+    with torch.no_grad():
+        hadamard_transform = (
+            HadamardFactory.create_transform(device=b.device) if use_hadamard else None
+        )
+        fwd_hadamard_transform = (
+            HadamardFactory.create_transform(device=b.device)
+            if use_fwd_hadamard
+            else None
+        )
     y = MXFP4LinearFunction.apply(
         a,
         b,
@@ -591,5 +613,6 @@ def _to_mxfp4_then_scaled_mm(
         use_macro_block_scaling,
         hadamard_transform,
         use_uos,
+        fwd_hadamard_transform,
     )
     return y

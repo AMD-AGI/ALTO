@@ -53,5 +53,13 @@ class TrainingOpConfig:
     use 7.25 instead of 6 for MXFP4 target range.
     """
 
+    use_fwd_hadamard: bool = False
+    """
+    Right-multiply a randomized Hadamard on the MXFP4 linear contraction
+    axis during the forward GEMM. Independent of ``use_hadamard``, which
+    rotates the token axis of the dW GEMM. The forward transform is removed
+    from ``dX`` and ``dW`` after the backward GEMMs.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

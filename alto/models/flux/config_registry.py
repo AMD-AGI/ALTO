@@ -78,16 +78,16 @@ def flux_debugmodel_lpt() -> FluxTrainer.Config:
     """
     config = flux_debugmodel()
     config.dump_folder = "flux_debugmodel_lpt-outputs"
-    adam = config.optim.optimizer.optimizers[0]
-    config.optim.optimizer.optimizers = [
-        MPAdam.Config(
-            pattern=adam.pattern,
-            lr=adam.lr,
-            weight_decay=adam.weight_decay,
-            weight_decay_e=adam.weight_decay,
-            lr_e_ratio=20.0,
-        )
-    ]
+    # adam = config.optim.optimizer.optimizers[0]
+    # config.optim.optimizer.optimizers = [
+    #     MPAdam.Config(
+    #         pattern=adam.pattern,
+    #         lr=adam.lr,
+    #         weight_decay=adam.weight_decay,
+    #         weight_decay_e=adam.weight_decay,
+    #         lr_e_ratio=20.0,
+    #     )
+    # ]
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             ModelOptConverter.Config(

@@ -36,6 +36,11 @@ class LowPrecisionTrainingModifier(Modifier):
     two_level_scaling: Literal["none", "tensorwise", "blockwise"] = "none"
     clip_mode: Literal["none", "static", "dynamic"] = "none"
     use_uos: bool = False
+    use_fwd_hadamard: bool = False
+    """
+    Apply a separate randomized Hadamard on the MXFP4 linear forward GEMM.
+    ``use_hadamard`` remains the dW GEMM transform.
+    """
 
     deosc_step: int = 0
     """
@@ -95,6 +100,15 @@ class LowPrecisionTrainingModifier(Modifier):
             raise ValueError("UOS is only supported with clip mode none")
         return self
 
+    @model_validator(mode="after")
+    def validate_fwd_hadamard(self):
+        if not self.use_fwd_hadamard:
+            return self
+        schemes = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
+        if any(scheme_name != "mxfp4" for scheme_name in schemes):
+            raise ValueError("forward Hadamard is only supported for mxfp4")
+        return self
+
     @field_validator("deosc_step", mode="after")
     def validate_deosc_step(cls, value: int) -> int:
         if value < 0:
@@ -142,6 +156,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     two_level_scaling=self.two_level_scaling,
                     clip_mode=self.clip_mode,
                     use_uos=self.use_uos,
+                    use_fwd_hadamard=self.use_fwd_hadamard,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

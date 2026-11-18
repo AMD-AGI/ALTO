@@ -77,5 +77,13 @@ class TrainingOpConfig:
     multiple of the MX block size.
     """
 
+    fourier_n: int = 0
+    """
+    Number of complex Fourier coefficients in the high-precision residual.
+    ``0`` disables it. The locations are drawn once and frozen. The inverse
+    DFT is added with a dense GEMM after the quantized linear, so the base
+    weight stays on the quantized path.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

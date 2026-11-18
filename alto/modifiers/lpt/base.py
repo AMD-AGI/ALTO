@@ -53,6 +53,12 @@ class LowPrecisionTrainingModifier(Modifier):
     ``0`` leaves the linear unchanged. ``U`` and ``V`` are quantized with the
     same scheme as the main weight; ``sigma`` stays fp32.
     """
+    fourier_n: int = 0
+    """
+    Number of complex Fourier coefficients added to each targeted Linear.
+    ``0`` leaves the linear unchanged. Coefficients stay fp32; their inverse
+    DFT is applied as a dense residual after the quantized GEMM.
+    """
 
     deosc_step: int = 0
     """
@@ -129,6 +135,12 @@ class LowPrecisionTrainingModifier(Modifier):
             raise ValueError("lora_rank must be a multiple of the MX block size 32")
         return value
 
+    @field_validator("fourier_n", mode="after")
+    def validate_fourier_n(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("fourier_n must be non-negative")
+        return value
+
     @model_validator(mode="after")
     def validate_dx_hadamard(self):
         if not self.use_dx_hadamard:
@@ -188,6 +200,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_fwd_hadamard=self.use_fwd_hadamard,
                     use_dx_hadamard=self.use_dx_hadamard,
                     lora_rank=self.lora_rank,
+                    fourier_n=self.fourier_n,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

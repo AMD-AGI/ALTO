@@ -90,6 +90,72 @@ class LPTModule:
 
 _LPT_CLASSES: dict[type, type] = {}
 _LOW_RANK_PARAMETERS = ("u", "v", "sigma")
+_FOURIER_PARAMETERS = ("fourier_coef",)
+
+
+def _fourier_bins(out_features: int, in_features: int) -> int:
+    return out_features * (in_features // 2 + 1)
+
+
+def _fourier_index(out_features: int, in_features: int, count: int, device) -> torch.Tensor:
+    """Frozen Fourier locations. The draw depends only on the matrix shape."""
+    bins = _fourier_bins(out_features, in_features)
+    if count > bins:
+        raise ValueError(
+            f"fourier_n={count} exceeds the {bins} rFFT bins of a "
+            f"[{out_features}, {in_features}] weight."
+        )
+    seed = (
+        0x46545231
+        ^ (out_features * 0x9E3779B1)
+        ^ (in_features * 0x85EBCA77)
+        ^ (count * 0xC2B2AE35)
+    ) & 0xFFFFFFFF
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    index = torch.randperm(bins, generator=generator)[:count]
+    return index.to(device=device, dtype=torch.int64)
+
+
+def _add_fourier_parameters(module) -> None:
+    """Add the FourierFT coefficient table for one linear."""
+    count = module.training_op_config.fourier_n
+    if module.num_linears != 1:
+        raise ValueError("Fourier compensation does not support stacked linears.")
+    index = _fourier_index(
+        module.out_features, module.in_features, count, module.weight.device
+    )
+    module.register_buffer("fourier_index", index)
+    coef = torch.empty(count, 2, device=module.weight.device, dtype=torch.float32)
+    module.fourier_coef = torch.nn.Parameter(coef)
+    _reset_fourier(module)
+
+
+def _reset_fourier(module) -> None:
+    """Zero coefficients keep the residual at zero. Refill locations after ``to_empty``."""
+    if module.fourier_coef.is_meta:
+        return
+    torch.nn.init.zeros_(module.fourier_coef)
+    module.fourier_index.copy_(
+        _fourier_index(
+            module.out_features,
+            module.in_features,
+            module.fourier_coef.shape[0],
+            module.fourier_index.device,
+        )
+    )
+
+
+def _fourier_weight(coef: torch.Tensor, index: torch.Tensor, out_features: int, in_features: int):
+    """Inverse real FFT of a sparse coefficient table. ``coef`` is ``[n, 2]``."""
+    coef = coef.float()
+    half = in_features // 2 + 1
+    real = coef.new_zeros(out_features, half)
+    imag = coef.new_zeros(out_features, half)
+    real = real.reshape(-1).scatter(0, index, coef[:, 0]).view(out_features, half)
+    imag = imag.reshape(-1).scatter(0, index, coef[:, 1]).view(out_features, half)
+    spectrum = torch.complex(real, imag)
+    return torch.fft.irfft2(spectrum, s=(out_features, in_features), norm="ortho")
 
 
 def _add_low_rank_parameters(module) -> None:
@@ -184,12 +250,15 @@ def lpt_module(base: type) -> type:
             raise ValueError(
                 f"Unsupported attention precision: {self.training_op_config.precision}"
             )
-        if self.training_op_config.lora_rank:
+        if self.training_op_config.lora_rank or self.training_op_config.fourier_n:
             if kind != "linear":
                 raise NotImplementedError(
-                    "Low-rank compensation is implemented for Linear only."
+                    "Quantization compensation is implemented for Linear only."
                 )
-            _add_low_rank_parameters(self)
+            if self.training_op_config.lora_rank:
+                _add_low_rank_parameters(self)
+            if self.training_op_config.fourier_n:
+                _add_fourier_parameters(self)
 
     def extra_repr(self) -> str:
         parent = base.extra_repr(self)
@@ -212,19 +281,45 @@ def lpt_module(base: type) -> type:
                 self.remat_region_name("linear"),
                 recompute=self.remat_should_recompute("linear"),
             )
-            if self.training_op_config.lora_rank:
-                output = region(input, weight, bias, self.u, self.v, self.sigma)
-            else:
-                output = region(input, weight, bias)
+            extra = []
+            if self.training_op_config.lora_rank or self.training_op_config.fourier_n:
+                if self.training_op_config.lora_rank:
+                    extra.extend((self.u, self.v, self.sigma))
+                else:
+                    extra.extend((None, None, None))
+                if self.training_op_config.fourier_n:
+                    extra.extend((self.fourier_coef, self.fourier_index))
+            output = region(input, weight, bias, *extra)
             return self._unflatten_output(output, weight)
 
-        def _linear(self, input, weight, bias, u=None, v=None, sigma=None):
+        def _linear(
+            self,
+            input,
+            weight,
+            bias,
+            u=None,
+            v=None,
+            sigma=None,
+            fourier_coef=None,
+            fourier_index=None,
+        ):
             y = lpt_linear(input, weight, bias, self.training_op_config)
-            if u is not None:
+            if u is not None or fourier_coef is not None:
                 with spmd.no_typecheck():
-                    y = y + _low_rank_branch(
-                        input, v, sigma, u, self.training_op_config
-                    )
+                    if u is not None:
+                        y = y + _low_rank_branch(
+                            input, v, sigma, u, self.training_op_config
+                        )
+                    if fourier_coef is not None:
+                        delta = _fourier_weight(
+                            fourier_coef,
+                            fourier_index,
+                            weight.shape[-2],
+                            weight.shape[-1],
+                        )
+                        y = y + torch.nn.functional.linear(
+                            input, delta.to(dtype=y.dtype)
+                        )
                 y = _annotate_like(y, input)
             return y
 
@@ -232,19 +327,37 @@ def lpt_module(base: type) -> type:
             base.reset_parameters(self)
             if getattr(self, "u", None) is not None:
                 _reset_low_rank(self)
+            if getattr(self, "fourier_coef", None) is not None:
+                _reset_fourier(self)
 
         def _init_self_parameters(self) -> None:
             # ``param_init`` only names the parent linear's weight and bias.
-            saved = {}
+            names = []
             if self.training_op_config.lora_rank:
-                for name in _LOW_RANK_PARAMETERS:
-                    saved[name] = self._parameters.pop(name)
+                names.extend(_LOW_RANK_PARAMETERS)
+            if self.training_op_config.fourier_n:
+                names.extend(_FOURIER_PARAMETERS)
+            saved = {name: self._parameters.pop(name) for name in names}
             try:
                 base._init_self_parameters(self)
             finally:
                 self._parameters.update(saved)
-            if saved:
+            if self.training_op_config.lora_rank and saved:
                 _reset_low_rank(self)
+            if self.training_op_config.fourier_n and saved:
+                _reset_fourier(self)
+
+        def _init_self_buffers(self, *, buffer_device=None) -> None:
+            base._init_self_buffers(self, buffer_device=buffer_device)
+            if self.training_op_config.fourier_n and not self.fourier_index.is_meta:
+                self.fourier_index.copy_(
+                    _fourier_index(
+                        self.out_features,
+                        self.in_features,
+                        self.training_op_config.fourier_n,
+                        self.fourier_index.device,
+                    )
+                )
 
         def iter_lpt_weights(self):
             yield self.weight, self.training_op_config, self.lpt_qdq_axis
@@ -256,6 +369,7 @@ def lpt_module(base: type) -> type:
         namespace["_linear"] = _linear
         namespace["reset_parameters"] = reset_parameters
         namespace["_init_self_parameters"] = _init_self_parameters
+        namespace["_init_self_buffers"] = _init_self_buffers
         namespace["iter_lpt_weights"] = iter_lpt_weights
     elif kind == "grouped":
         def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
@@ -310,6 +424,15 @@ def lpt_module(base: type) -> type:
 
     generated = type(name, (base, LPTModule), namespace)
     generated.__qualname__ = name
+    if kind == "linear":
+        def _apply(self, fn, recurse=True):
+            result = super(generated, self)._apply(fn, recurse)
+            coef = getattr(self, "fourier_coef", None)
+            if coef is not None and not coef.is_meta and coef.dtype != torch.float32:
+                coef.data = coef.data.float()
+            return result
+
+        generated._apply = _apply
     _LPT_CLASSES[base] = generated
     return generated
 

@@ -55,8 +55,8 @@ def _install_dist_muon(config: FluxTrainer.Config) -> None:
                 pattern="^(?:%s)$" % "|".join(re.escape(name) for name in matrix_names),
                 bucket_configs=(BucketConfig(name="matrices", patterns=("*",)),),
                 compute_sharding_by_fqn={name: layout for name in matrix_names},
-                lr=_LR,
-                weight_decay=0.1,
+                lr=_LR / 0.2,
+                weight_decay=0.1 * 0.2,
                 adjust_lr_fn="match_rms_adamw",
             ),
             AdamW.Config(

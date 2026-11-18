@@ -2,11 +2,16 @@
 #
 # SPDX-License-Identifier: MIT
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
+import torch
+
 from torchtitan.components.model_converter import ModelConvertersContainer
-from torchtitan.components.optim import MPAdam
+from torchtitan.components.optim import AdamW, DistMuon, MPAdam, OptimizersContainer
+from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout, Owned
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan_recipes.tests.models.flux import (
     flux_debugmodel as flux_debugmodel_orig,
@@ -24,6 +29,45 @@ __all__ = [
 # with this repository as the working directory.
 _TORCHTITAN = Path(__file__).resolve().parents[3] / "3rdparty" / "torchtitan"
 _ASSETS = _TORCHTITAN / "tests" / "assets"
+_LR = 2e-4
+
+
+def _install_dist_muon(config: FluxTrainer.Config) -> None:
+    """Put every matrix on DistMuon and leave vectors on AdamW.
+
+    One GPU still stores parameters as DTensors on the size-1 ``dp_shard``
+    axis, so the compute layout owns each whole matrix on that axis.
+    ``match_rms_adamw`` keeps the configured learning rate on the AdamW scale.
+    """
+    module = config.model.build()
+    matrix_names = tuple(
+        name for name, parameter in module.named_parameters() if parameter.ndim >= 2
+    )
+    if not matrix_names:
+        raise RuntimeError("Flux has no matrix parameters for DistMuon")
+    layout = ComputeLayout(
+        shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()},
+        compute_dtype=torch.bfloat16,
+    )
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[
+            DistMuon.Config(
+                pattern="^(?:%s)$" % "|".join(re.escape(name) for name in matrix_names),
+                bucket_configs=(BucketConfig(name="matrices", patterns=("*",)),),
+                compute_sharding_by_fqn={name: layout for name in matrix_names},
+                lr=_LR,
+                weight_decay=0.1,
+                adjust_lr_fn="match_rms_adamw",
+            ),
+            AdamW.Config(
+                pattern=r".*",
+                lr=_LR,
+                betas=(0.9, 0.95),
+                eps=1e-8,
+                weight_decay=0.1,
+            ),
+        ]
+    )
 
 
 def flux_debugmodel() -> FluxTrainer.Config:
@@ -60,7 +104,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
         seq_len=config.training.max_context_length,
         local_batch_size=32,
     )
-    config.optim.optimizer.optimizers[0].lr = 2e-4
+    _install_dist_muon(config)
     config.optim.lr_scheduler.warmup_steps = 16
     config.optim.lr_scheduler.decay_ratio = 0.0
     config.optim.max_norm = 2.0
@@ -72,9 +116,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
 def flux_debugmodel_lpt() -> FluxTrainer.Config:
     """Flux debug model whose Linear layers, including conditioning, run in MXFP4.
 
-    Weights are updated with MPAdam. The mantissa learning rate and weight
-    decay stay on the shared debug schedule. The exponent step is
-    ``lr * lr_e_ratio``.
+    Matrix weights use the same DistMuon schedule as the BF16 debug run.
     """
     config = flux_debugmodel()
     config.dump_folder = "flux_debugmodel_lpt-outputs"

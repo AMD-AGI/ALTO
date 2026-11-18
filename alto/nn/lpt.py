@@ -17,6 +17,7 @@ from dataclasses import dataclass, fields
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 
 from torchtitan.config.override import derive
 from torchtitan.models.common.attention import (
@@ -36,6 +37,7 @@ from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import (
     _quantize_then_mxfp_scaled_grouped_mm,
 )
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.fp4.mxfp4.mxfp_quantization import BLOCK_SIZE_DEFAULT
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,
 )
@@ -87,6 +89,52 @@ class LPTModule:
 
 
 _LPT_CLASSES: dict[type, type] = {}
+_LOW_RANK_PARAMETERS = ("u", "v", "sigma")
+
+
+def _add_low_rank_parameters(module) -> None:
+    """Add ``U``, ``V``, and ``sigma`` for ``((X V) * sigma) U^T``."""
+    rank = module.training_op_config.lora_rank
+    block = BLOCK_SIZE_DEFAULT
+    if module.num_linears != 1:
+        raise ValueError("Low-rank compensation does not support stacked linears.")
+    if module.in_features % block != 0 or module.out_features % block != 0:
+        raise ValueError(
+            "Low-rank compensation requires in_features and out_features "
+            f"to be multiples of the MX block size {block}."
+        )
+    device = module.weight.device
+    dtype = module.weight.dtype
+    module.u = torch.nn.Parameter(
+        torch.empty(module.out_features, rank, device=device, dtype=dtype)
+    )
+    module.v = torch.nn.Parameter(
+        torch.empty(rank, module.in_features, device=device, dtype=dtype)
+    )
+    module.sigma = torch.nn.Parameter(
+        torch.empty(rank, device=device, dtype=torch.float32)
+    )
+    _reset_low_rank(module)
+
+
+def _reset_low_rank(module) -> None:
+    """One side starts at zero, so the branch is zero until ``V`` moves.
+
+    Meta parameters stay empty. ``to_empty`` plus ``init_states`` fills them
+    on the real device.
+    """
+    if module.u.is_meta:
+        return
+    torch.nn.init.normal_(module.u, mean=0.0, std=0.02)
+    torch.nn.init.zeros_(module.v)
+    torch.nn.init.ones_(module.sigma)
+
+
+def _low_rank_branch(x, v, sigma, u, config: TrainingOpConfig):
+    """Quantized rank branch. ``sigma`` multiplies in fp32."""
+    hidden = lpt_linear(x, v, None, config)
+    hidden = (hidden.float() * sigma.float()).to(dtype=hidden.dtype)
+    return lpt_linear(hidden, u, None, config)
 
 
 def lpt_module(base: type) -> type:
@@ -136,6 +184,12 @@ def lpt_module(base: type) -> type:
             raise ValueError(
                 f"Unsupported attention precision: {self.training_op_config.precision}"
             )
+        if self.training_op_config.lora_rank:
+            if kind != "linear":
+                raise NotImplementedError(
+                    "Low-rank compensation is implemented for Linear only."
+                )
+            _add_low_rank_parameters(self)
 
     def extra_repr(self) -> str:
         parent = base.extra_repr(self)
@@ -149,10 +203,60 @@ def lpt_module(base: type) -> type:
         "__module__": __name__,
     }
     if kind == "linear":
-        def _linear(self, input, weight, bias):
-            return lpt_linear(input, weight, bias, self.training_op_config)
+        def forward(self, input):
+            # Read each parameter once. A data-parallel read all-gathers, and
+            # the remat region must see the gathered factors on recompute.
+            weight, bias = self.weight, self.bias
+            region = remat.region(
+                self._linear,
+                self.remat_region_name("linear"),
+                recompute=self.remat_should_recompute("linear"),
+            )
+            if self.training_op_config.lora_rank:
+                output = region(input, weight, bias, self.u, self.v, self.sigma)
+            else:
+                output = region(input, weight, bias)
+            return self._unflatten_output(output, weight)
 
+        def _linear(self, input, weight, bias, u=None, v=None, sigma=None):
+            y = lpt_linear(input, weight, bias, self.training_op_config)
+            if u is not None:
+                with spmd.no_typecheck():
+                    y = y + _low_rank_branch(
+                        input, v, sigma, u, self.training_op_config
+                    )
+                y = _annotate_like(y, input)
+            return y
+
+        def reset_parameters(self) -> None:
+            base.reset_parameters(self)
+            if getattr(self, "u", None) is not None:
+                _reset_low_rank(self)
+
+        def _init_self_parameters(self) -> None:
+            # ``param_init`` only names the parent linear's weight and bias.
+            saved = {}
+            if self.training_op_config.lora_rank:
+                for name in _LOW_RANK_PARAMETERS:
+                    saved[name] = self._parameters.pop(name)
+            try:
+                base._init_self_parameters(self)
+            finally:
+                self._parameters.update(saved)
+            if saved:
+                _reset_low_rank(self)
+
+        def iter_lpt_weights(self):
+            yield self.weight, self.training_op_config, self.lpt_qdq_axis
+            if self.training_op_config.lora_rank:
+                yield self.u, self.training_op_config, -1
+                yield self.v, self.training_op_config, -1
+
+        namespace["forward"] = forward
         namespace["_linear"] = _linear
+        namespace["reset_parameters"] = reset_parameters
+        namespace["_init_self_parameters"] = _init_self_parameters
+        namespace["iter_lpt_weights"] = iter_lpt_weights
     elif kind == "grouped":
         def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
             return lpt_grouped_mm(

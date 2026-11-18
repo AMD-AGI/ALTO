@@ -47,6 +47,12 @@ class LowPrecisionTrainingModifier(Modifier):
     rotate the forward output back. Independent of ``use_hadamard`` and
     ``use_fwd_hadamard``.
     """
+    lora_rank: int = 0
+    """
+    Rank of the low-rank outlier branch added to each targeted Linear.
+    ``0`` leaves the linear unchanged. ``U`` and ``V`` are quantized with the
+    same scheme as the main weight; ``sigma`` stays fp32.
+    """
 
     deosc_step: int = 0
     """
@@ -115,6 +121,14 @@ class LowPrecisionTrainingModifier(Modifier):
             raise ValueError("forward Hadamard is only supported for mxfp4")
         return self
 
+    @field_validator("lora_rank", mode="after")
+    def validate_lora_rank(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("lora_rank must be non-negative")
+        if value % 32 != 0:
+            raise ValueError("lora_rank must be a multiple of the MX block size 32")
+        return value
+
     @model_validator(mode="after")
     def validate_dx_hadamard(self):
         if not self.use_dx_hadamard:
@@ -173,6 +187,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_uos=self.use_uos,
                     use_fwd_hadamard=self.use_fwd_hadamard,
                     use_dx_hadamard=self.use_dx_hadamard,
+                    lora_rank=self.lora_rank,
                 )
                 self._resolved_config[scheme_obj] = targets
         return self._resolved_config

@@ -69,5 +69,13 @@ class TrainingOpConfig:
     on that axis after the backward GEMM.
     """
 
+    lora_rank: int = 0
+    """
+    Rank of the outlier branch ``((X V) * sigma) U^T``. ``0`` disables it.
+    ``U`` and ``V`` use the same low-precision GEMM as ``W``. ``sigma`` stays
+    fp32. The rank is the contraction width of ``U``, so it has to be a
+    multiple of the MX block size.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

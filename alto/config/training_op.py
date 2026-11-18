@@ -53,5 +53,35 @@ class TrainingOpConfig:
     use 7.25 instead of 6 for MXFP4 target range.
     """
 
+    use_fwd_hadamard: bool = False
+    """
+    Right-multiply a randomized Hadamard on the MXFP4 linear contraction
+    axis during the forward GEMM. Independent of ``use_hadamard``, which
+    rotates the token axis of the dW GEMM. The forward transform is removed
+    from ``dX`` and ``dW`` after the backward GEMMs.
+    """
+
+    use_dx_hadamard: bool = False
+    """
+    Left-multiply a randomized Hadamard on the MXFP4 weight output channels
+    before quantization, then right-multiply the forward output to undo it.
+    The same quantized weight is reused for ``dX``. ``dW`` is rotated back
+    on that axis after the backward GEMM.
+    """
+
+    static_hadamard: bool = False
+    """
+    Reuse one Hadamard per MXFP4 linear instead of drawing a new one every
+    forward. ``False`` keeps the per-step randomization.
+    """
+
+    lora_rank: int = 0
+    """
+    Rank of the outlier branch ``((X V) * sigma) U^T``. ``0`` disables it.
+    ``U`` and ``V`` use the same low-precision GEMM as ``W``. ``sigma`` stays
+    fp32. The rank is the contraction width of ``U``, so it has to be a
+    multiple of the MX block size.
+    """
+
 
 torch.serialization.add_safe_globals([TrainingOpConfig])

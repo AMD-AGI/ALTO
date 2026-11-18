@@ -56,20 +56,24 @@ class HadamardFactory:
     def create_transform(
         cls,
         device: torch.device,
+        generator: Optional[torch.Generator] = None,
     ) -> 'HadamardTransform':
         """
         Create a HadamardTransform for applying to a module.
 
         Parameters default to class-level configuration set via configure().
         Any parameter explicitly provided will override the class default.
+        ``generator`` draws the random signs and permutation on the CPU so a
+        caller can freeze one transform without touching the CUDA generator.
 
         :param device: Device to create the transform on
+        :param generator: Optional CPU generator for the random Hadamard
         :return: HadamardTransform instance
         """
 
-        weight = cls._create_weight(device)
+        weight = cls._create_weight(device, generator)
         if cls.randomized:
-            perm = cls._create_permutation(weight, device)
+            perm = cls._create_permutation(weight, device, generator)
             weight = weight[perm][:, perm]
         return HadamardTransform(weight)
 
@@ -77,17 +81,26 @@ class HadamardFactory:
     def _create_weight(
         cls,
         device: device,
+        generator: Optional[torch.Generator] = None,
     ) -> Tensor:
         if not cls.randomized:
             data = deterministic_hadamard_matrix(cls.block_size, cls.dtype, device)
         else:
-            data = random_hadamard_matrix(cls.block_size, cls.dtype, device)
+            data = random_hadamard_matrix(
+                cls.block_size, cls.dtype, device, gen=generator
+            )
         return data
 
     @classmethod
-    def _create_permutation(cls, weight: Tensor, device: torch.device) -> Tensor:
-        data = torch.randperm(weight.size(0), device=device)
-        return data
+    def _create_permutation(
+        cls,
+        weight: Tensor,
+        device: torch.device,
+        generator: Optional[torch.Generator] = None,
+    ) -> Tensor:
+        if generator is None:
+            return torch.randperm(weight.size(0), device=device)
+        return torch.randperm(weight.size(0), generator=generator).to(device=device)
 
 
 class HadamardTransform:

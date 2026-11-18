@@ -62,7 +62,19 @@ def gpt_oss_debugmodel() -> Trainer.Config:
         global_batch_size=16,
     )
     config.activation_remat = None
+    config.metrics.enable_tensorboard = True
+    config.metrics.log_weight_update_distance = True
     config.debug.seed = 1234
+    # MXFP4 varlen attention quantizes across each document. Pad documents to
+    # the quant block before packing so every sequence boundary is aligned.
+    packing = config.dataloader.dataset
+    config.dataloader.dataset = replace(
+        packing,
+        dataset=replace(
+            packing.dataset,
+            processor=replace(packing.dataset.processor, seq_align=32),
+        ),
+    )
     return config
 
 
@@ -78,6 +90,8 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
         global_batch_size=16,
     )
     config.activation_remat = None
+    config.metrics.enable_tensorboard = True
+    config.metrics.log_weight_update_distance = True
     config.debug.seed = 1234
     # MXFP4 varlen attention quantizes across each document. Pad documents to
     # the quant block before packing so every sequence boundary is aligned.
@@ -182,6 +196,7 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
             log_freq=1,
             enable_tensorboard=True,
             enable_wandb=True,
+            log_weight_update_distance=True,
         ),
         model=model,
         dataloader=GrainDataLoader.Config(
@@ -262,6 +277,7 @@ def gpt_oss_20b_lpt() -> Trainer.Config:
             log_freq=1,
             enable_tensorboard=True,
             enable_wandb=True,
+            log_weight_update_distance=True,
         ),
         model=model,
         dataloader=GrainDataLoader.Config(

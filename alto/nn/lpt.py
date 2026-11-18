@@ -17,6 +17,7 @@ from dataclasses import dataclass, fields
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 
 from torchtitan.config.override import derive
 from torchtitan.models.common.attention import (
@@ -36,6 +37,8 @@ from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import (
     _quantize_then_mxfp_scaled_grouped_mm,
 )
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.hadamard_transform.transform import HadamardFactory
+from alto.kernels.fp4.mxfp4.mxfp_quantization import BLOCK_SIZE_DEFAULT
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,
 )
@@ -87,6 +90,68 @@ class LPTModule:
 
 
 _LPT_CLASSES: dict[type, type] = {}
+_LOW_RANK_PARAMETERS = ("u", "v", "sigma")
+_LAYER_HADAMARD_SEED = 0x48414431
+
+
+def _next_layer_hadamard_seed() -> int:
+    """One seed per linear. The three axis transforms are offsets of this seed."""
+    global _LAYER_HADAMARD_SEED
+    seed = _LAYER_HADAMARD_SEED
+    _LAYER_HADAMARD_SEED = (seed + 0x9E3779B1) & 0xFFFFFFFF
+    return seed
+
+
+def _fixed_hadamard(device, seed: int):
+    """Random Hadamard drawn once from a CPU generator."""
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    return HadamardFactory.create_transform(device, generator=generator)
+
+
+def _add_low_rank_parameters(module) -> None:
+    """Add ``U``, ``V``, and ``sigma`` for ``((X V) * sigma) U^T``."""
+    rank = module.training_op_config.lora_rank
+    block = BLOCK_SIZE_DEFAULT
+    if module.num_linears != 1:
+        raise ValueError("Low-rank compensation does not support stacked linears.")
+    if module.in_features % block != 0 or module.out_features % block != 0:
+        raise ValueError(
+            "Low-rank compensation requires in_features and out_features "
+            f"to be multiples of the MX block size {block}."
+        )
+    device = module.weight.device
+    dtype = module.weight.dtype
+    module.u = torch.nn.Parameter(
+        torch.empty(module.out_features, rank, device=device, dtype=dtype)
+    )
+    module.v = torch.nn.Parameter(
+        torch.empty(rank, module.in_features, device=device, dtype=dtype)
+    )
+    module.sigma = torch.nn.Parameter(
+        torch.empty(rank, device=device, dtype=torch.float32)
+    )
+    _reset_low_rank(module)
+
+
+def _reset_low_rank(module) -> None:
+    """One side starts at zero, so the branch is zero until ``V`` moves.
+
+    Meta parameters stay empty. ``to_empty`` plus ``init_states`` fills them
+    on the real device.
+    """
+    if module.u.is_meta:
+        return
+    torch.nn.init.normal_(module.u, mean=0.0, std=0.02)
+    torch.nn.init.zeros_(module.v)
+    torch.nn.init.ones_(module.sigma)
+
+
+def _low_rank_branch(x, v, sigma, u, config: TrainingOpConfig, hadamards=None):
+    """Quantized rank branch. ``sigma`` multiplies in fp32."""
+    hidden = lpt_linear(x, v, None, config, hadamards=hadamards)
+    hidden = (hidden.float() * sigma.float()).to(dtype=hidden.dtype)
+    return lpt_linear(hidden, u, None, config, hadamards=hadamards)
 
 
 def lpt_module(base: type) -> type:
@@ -136,6 +201,12 @@ def lpt_module(base: type) -> type:
             raise ValueError(
                 f"Unsupported attention precision: {self.training_op_config.precision}"
             )
+        if self.training_op_config.lora_rank:
+            if kind != "linear":
+                raise NotImplementedError(
+                    "Low-rank compensation is implemented for Linear only."
+                )
+            _add_low_rank_parameters(self)
 
     def extra_repr(self) -> str:
         parent = base.extra_repr(self)
@@ -149,10 +220,88 @@ def lpt_module(base: type) -> type:
         "__module__": __name__,
     }
     if kind == "linear":
-        def _linear(self, input, weight, bias):
-            return lpt_linear(input, weight, bias, self.training_op_config)
+        def forward(self, input):
+            # Read each parameter once. A data-parallel read all-gathers, and
+            # the remat region must see the gathered factors on recompute.
+            weight, bias = self.weight, self.bias
+            region = remat.region(
+                self._linear,
+                self.remat_region_name("linear"),
+                recompute=self.remat_should_recompute("linear"),
+            )
+            if self.training_op_config.lora_rank:
+                output = region(input, weight, bias, self.u, self.v, self.sigma)
+            else:
+                output = region(input, weight, bias)
+            return self._unflatten_output(output, weight)
 
+        def _layer_hadamards(self, device):
+            """Hadamard bases for this linear, drawn once and reused every step."""
+            cached = getattr(self, "_fixed_hadamards", None)
+            if cached is not None:
+                return cached
+            config = self.training_op_config
+            seed = _next_layer_hadamard_seed()
+
+            def one(enabled: bool, offset: int):
+                if not enabled:
+                    return None
+                return _fixed_hadamard(device, (seed + offset) & 0xFFFFFFFF)
+
+            cached = (
+                one(config.use_hadamard, 0),
+                one(config.use_fwd_hadamard, 1),
+                one(config.use_dx_hadamard, 2),
+            )
+            self._fixed_hadamards = cached
+            return cached
+
+        def _linear(self, input, weight, bias, u=None, v=None, sigma=None):
+            hadamards = None
+            if (
+                self.training_op_config.precision == "mxfp4"
+                and self.training_op_config.static_hadamard
+            ):
+                hadamards = self._layer_hadamards(weight.device)
+            y = lpt_linear(input, weight, bias, self.training_op_config, hadamards)
+            if u is not None:
+                with spmd.no_typecheck():
+                    y = y + _low_rank_branch(
+                        input, v, sigma, u, self.training_op_config, hadamards
+                    )
+                y = _annotate_like(y, input)
+            return y
+
+        def reset_parameters(self) -> None:
+            base.reset_parameters(self)
+            if getattr(self, "u", None) is not None:
+                _reset_low_rank(self)
+
+        def _init_self_parameters(self) -> None:
+            # ``param_init`` only names the parent linear's weight and bias.
+            saved = {}
+            if self.training_op_config.lora_rank:
+                for name in _LOW_RANK_PARAMETERS:
+                    saved[name] = self._parameters.pop(name)
+            try:
+                base._init_self_parameters(self)
+            finally:
+                self._parameters.update(saved)
+            if saved:
+                _reset_low_rank(self)
+
+        def iter_lpt_weights(self):
+            yield self.weight, self.training_op_config, self.lpt_qdq_axis
+            if self.training_op_config.lora_rank:
+                yield self.u, self.training_op_config, -1
+                yield self.v, self.training_op_config, -1
+
+        namespace["forward"] = forward
         namespace["_linear"] = _linear
+        namespace["_layer_hadamards"] = _layer_hadamards
+        namespace["reset_parameters"] = reset_parameters
+        namespace["_init_self_parameters"] = _init_self_parameters
+        namespace["iter_lpt_weights"] = iter_lpt_weights
     elif kind == "grouped":
         def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
             return lpt_grouped_mm(
@@ -221,11 +370,15 @@ def lpt_linear(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     config: TrainingOpConfig,
+    hadamards=None,
 ) -> torch.Tensor:
     """Run one low-precision linear on the stored weight and bias."""
     weight_2d, bias_1d = Linear._flatten_weight_and_bias(weight, bias)
     with spmd.no_typecheck():
         if config.precision == "mxfp4":
+            token_h = fwd_h = dx_h = None
+            if hadamards is not None:
+                token_h, fwd_h, dx_h = hadamards
             y = _to_mxfp4_then_scaled_mm(
                 x,
                 weight_2d,
@@ -237,6 +390,11 @@ def lpt_linear(
                 use_hadamard=config.use_hadamard,
                 use_macro_block_scaling=config.two_level_scaling == "blockwise",
                 use_uos=config.use_uos,
+                use_fwd_hadamard=config.use_fwd_hadamard,
+                use_dx_hadamard=config.use_dx_hadamard,
+                hadamard_transform=token_h,
+                fwd_hadamard_transform=fwd_h,
+                dx_hadamard_transform=dx_h,
             )
         elif config.precision == "nvfp4":
             y = _to_nvfp4_then_scaled_mm(

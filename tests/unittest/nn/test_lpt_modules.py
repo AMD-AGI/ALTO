@@ -34,6 +34,61 @@ def _mxfp4_config() -> TrainingOpConfig:
     )
 
 
+def test_mxfp4_linear_reuses_one_hadamard_per_layer():
+    config = TrainingOpConfig(
+        precision="mxfp4",
+        use_2dblock_x=False,
+        use_2dblock_w=True,
+        use_hadamard=True,
+        use_sr_grad=False,
+        use_dge=False,
+        use_fwd_hadamard=True,
+        use_dx_hadamard=True,
+        static_hadamard=True,
+    )
+    layer = LPTLinear(
+        LPTLinear.Config(in_features=64, out_features=64, bias=False, training_op_config=config)
+    ).cuda()
+    other = LPTLinear(
+        LPTLinear.Config(in_features=64, out_features=64, bias=False, training_op_config=config)
+    ).cuda()
+    with torch.no_grad():
+        other.weight.copy_(layer.weight)
+    x = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        first = layer(x)
+        second = layer(x)
+        other_y = other(x)
+    assert torch.equal(first, second)
+    assert not torch.equal(first, other_y)
+    token, fwd, dx = layer._fixed_hadamards
+    assert token is layer._layer_hadamards(x.device)[0]
+    assert not torch.equal(token.weight, fwd.weight)
+    assert not torch.equal(fwd.weight, dx.weight)
+
+
+def test_mxfp4_linear_redraws_hadamard_each_forward_by_default():
+    config = TrainingOpConfig(
+        precision="mxfp4",
+        use_2dblock_x=False,
+        use_2dblock_w=True,
+        use_hadamard=True,
+        use_sr_grad=False,
+        use_dge=False,
+        use_fwd_hadamard=True,
+        static_hadamard=False,
+    )
+    layer = LPTLinear(
+        LPTLinear.Config(in_features=64, out_features=64, bias=False, training_op_config=config)
+    ).cuda()
+    x = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        first = layer(x)
+        second = layer(x)
+    assert not torch.equal(first, second)
+    assert not hasattr(layer, "_fixed_hadamards")
+
+
 def test_lpt_linear_rejects_unset_training_op_config():
     config = LPTLinear.Config(in_features=4, out_features=4)
     assert isinstance(config, LPTModule.Config)

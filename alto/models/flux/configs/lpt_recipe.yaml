@@ -19,6 +19,8 @@ training_stage:
       use_hadamard: true
       use_fwd_hadamard: true
       use_dx_hadamard: true
+      # false: new Hadamard every forward. true: one transform per linear.
+      static_hadamard: true
       use_sr_grad: true
       use_uos: true
       use_dge: false

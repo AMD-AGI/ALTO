@@ -625,21 +625,23 @@ def _to_mxfp4_then_scaled_mm(
     use_uos: bool = False,
     use_fwd_hadamard: bool = False,
     use_dx_hadamard: bool = False,
+    hadamard_transform: Optional[HadamardTransform] = None,
+    fwd_hadamard_transform: Optional[HadamardTransform] = None,
+    dx_hadamard_transform: Optional[HadamardTransform] = None,
 ) -> torch.Tensor:
     with torch.no_grad():
-        hadamard_transform = (
-            HadamardFactory.create_transform(device=b.device) if use_hadamard else None
-        )
-        fwd_hadamard_transform = (
-            HadamardFactory.create_transform(device=b.device)
-            if use_fwd_hadamard
-            else None
-        )
-        dx_hadamard_transform = (
-            HadamardFactory.create_transform(device=b.device)
-            if use_dx_hadamard
-            else None
-        )
+        if use_hadamard and hadamard_transform is None:
+            hadamard_transform = HadamardFactory.create_transform(device=b.device)
+        elif not use_hadamard:
+            hadamard_transform = None
+        if use_fwd_hadamard and fwd_hadamard_transform is None:
+            fwd_hadamard_transform = HadamardFactory.create_transform(device=b.device)
+        elif not use_fwd_hadamard:
+            fwd_hadamard_transform = None
+        if use_dx_hadamard and dx_hadamard_transform is None:
+            dx_hadamard_transform = HadamardFactory.create_transform(device=b.device)
+        elif not use_dx_hadamard:
+            dx_hadamard_transform = None
     y = MXFP4LinearFunction.apply(
         a,
         b,

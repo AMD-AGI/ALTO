@@ -47,6 +47,11 @@ class LowPrecisionTrainingModifier(Modifier):
     rotate the forward output back. Independent of ``use_hadamard`` and
     ``use_fwd_hadamard``.
     """
+    static_hadamard: bool = False
+    """
+    Draw each MXFP4 linear's Hadamard once and reuse it. ``False`` draws a
+    new transform on every forward.
+    """
     lora_rank: int = 0
     """
     Rank of the low-rank outlier branch added to each targeted Linear.
@@ -187,6 +192,7 @@ class LowPrecisionTrainingModifier(Modifier):
                     use_uos=self.use_uos,
                     use_fwd_hadamard=self.use_fwd_hadamard,
                     use_dx_hadamard=self.use_dx_hadamard,
+                    static_hadamard=self.static_hadamard,
                     lora_rank=self.lora_rank,
                 )
                 self._resolved_config[scheme_obj] = targets

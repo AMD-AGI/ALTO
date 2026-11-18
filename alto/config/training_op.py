@@ -69,6 +69,12 @@ class TrainingOpConfig:
     on that axis after the backward GEMM.
     """
 
+    static_hadamard: bool = False
+    """
+    Reuse one Hadamard per MXFP4 linear instead of drawing a new one every
+    forward. ``False`` keeps the per-step randomization.
+    """
+
     lora_rank: int = 0
     """
     Rank of the outlier branch ``((X V) * sigma) U^T``. ``0`` disables it.

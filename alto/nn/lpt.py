@@ -37,6 +37,7 @@ from alto.kernels.fp4.mxfp4.mxfp_grouped_gemm.functional import (
     _quantize_then_mxfp_scaled_grouped_mm,
 )
 from alto.kernels.fp4.mxfp4.mxfp_linear import _to_mxfp4_then_scaled_mm
+from alto.kernels.hadamard_transform.transform import HadamardFactory
 from alto.kernels.fp4.mxfp4.mxfp_quantization import BLOCK_SIZE_DEFAULT
 from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,
@@ -90,6 +91,22 @@ class LPTModule:
 
 _LPT_CLASSES: dict[type, type] = {}
 _LOW_RANK_PARAMETERS = ("u", "v", "sigma")
+_LAYER_HADAMARD_SEED = 0x48414431
+
+
+def _next_layer_hadamard_seed() -> int:
+    """One seed per linear. The three axis transforms are offsets of this seed."""
+    global _LAYER_HADAMARD_SEED
+    seed = _LAYER_HADAMARD_SEED
+    _LAYER_HADAMARD_SEED = (seed + 0x9E3779B1) & 0xFFFFFFFF
+    return seed
+
+
+def _fixed_hadamard(device, seed: int):
+    """Random Hadamard drawn once from a CPU generator."""
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    return HadamardFactory.create_transform(device, generator=generator)
 
 
 def _add_low_rank_parameters(module) -> None:
@@ -130,11 +147,11 @@ def _reset_low_rank(module) -> None:
     torch.nn.init.ones_(module.sigma)
 
 
-def _low_rank_branch(x, v, sigma, u, config: TrainingOpConfig):
+def _low_rank_branch(x, v, sigma, u, config: TrainingOpConfig, hadamards=None):
     """Quantized rank branch. ``sigma`` multiplies in fp32."""
-    hidden = lpt_linear(x, v, None, config)
+    hidden = lpt_linear(x, v, None, config, hadamards=hadamards)
     hidden = (hidden.float() * sigma.float()).to(dtype=hidden.dtype)
-    return lpt_linear(hidden, u, None, config)
+    return lpt_linear(hidden, u, None, config, hadamards=hadamards)
 
 
 def lpt_module(base: type) -> type:
@@ -218,12 +235,39 @@ def lpt_module(base: type) -> type:
                 output = region(input, weight, bias)
             return self._unflatten_output(output, weight)
 
+        def _layer_hadamards(self, device):
+            """Hadamard bases for this linear, drawn once and reused every step."""
+            cached = getattr(self, "_fixed_hadamards", None)
+            if cached is not None:
+                return cached
+            config = self.training_op_config
+            seed = _next_layer_hadamard_seed()
+
+            def one(enabled: bool, offset: int):
+                if not enabled:
+                    return None
+                return _fixed_hadamard(device, (seed + offset) & 0xFFFFFFFF)
+
+            cached = (
+                one(config.use_hadamard, 0),
+                one(config.use_fwd_hadamard, 1),
+                one(config.use_dx_hadamard, 2),
+            )
+            self._fixed_hadamards = cached
+            return cached
+
         def _linear(self, input, weight, bias, u=None, v=None, sigma=None):
-            y = lpt_linear(input, weight, bias, self.training_op_config)
+            hadamards = None
+            if (
+                self.training_op_config.precision == "mxfp4"
+                and self.training_op_config.static_hadamard
+            ):
+                hadamards = self._layer_hadamards(weight.device)
+            y = lpt_linear(input, weight, bias, self.training_op_config, hadamards)
             if u is not None:
                 with spmd.no_typecheck():
                     y = y + _low_rank_branch(
-                        input, v, sigma, u, self.training_op_config
+                        input, v, sigma, u, self.training_op_config, hadamards
                     )
                 y = _annotate_like(y, input)
             return y
@@ -254,6 +298,7 @@ def lpt_module(base: type) -> type:
 
         namespace["forward"] = forward
         namespace["_linear"] = _linear
+        namespace["_layer_hadamards"] = _layer_hadamards
         namespace["reset_parameters"] = reset_parameters
         namespace["_init_self_parameters"] = _init_self_parameters
         namespace["iter_lpt_weights"] = iter_lpt_weights
@@ -325,11 +370,15 @@ def lpt_linear(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
     config: TrainingOpConfig,
+    hadamards=None,
 ) -> torch.Tensor:
     """Run one low-precision linear on the stored weight and bias."""
     weight_2d, bias_1d = Linear._flatten_weight_and_bias(weight, bias)
     with spmd.no_typecheck():
         if config.precision == "mxfp4":
+            token_h = fwd_h = dx_h = None
+            if hadamards is not None:
+                token_h, fwd_h, dx_h = hadamards
             y = _to_mxfp4_then_scaled_mm(
                 x,
                 weight_2d,
@@ -343,6 +392,9 @@ def lpt_linear(
                 use_uos=config.use_uos,
                 use_fwd_hadamard=config.use_fwd_hadamard,
                 use_dx_hadamard=config.use_dx_hadamard,
+                hadamard_transform=token_h,
+                fwd_hadamard_transform=fwd_h,
+                dx_hadamard_transform=dx_h,
             )
         elif config.precision == "nvfp4":
             y = _to_nvfp4_then_scaled_mm(

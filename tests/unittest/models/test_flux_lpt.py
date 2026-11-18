@@ -78,7 +78,7 @@ def test_flux_recipe_installs_mxfp4_linears():
     )
     assert type(config.model.final_layer_config.linear).__qualname__ == "Linear.Config"
     assert type(config.model.final_layer_config.adaln_linear).__qualname__ == "Linear.Config"
-    assert type(config.model.time_in_config.in_layer).__qualname__ == "LPTLinear.Config"
+    assert type(config.model.time_in_config.in_layer).__qualname__ == "Linear.Config"
     assert type(config.model.vector_in_config.in_layer).__qualname__ == "Linear.Config"
     assert type(config.model.vector_in_config.out_layer).__qualname__ == "Linear.Config"
     assert type(block.img_mod.lin).__qualname__ == "Linear.Config"

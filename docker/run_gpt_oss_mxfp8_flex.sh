@@ -8,6 +8,7 @@
 #   ./docker/run_gpt_oss_mxfp8_flex.sh mxfp8-attn    # 8-GPU 20b_megatron, MXFP8 attention
 #   ./docker/run_gpt_oss_mxfp8_flex.sh bf16-flex-aligned   # bf16-flex, documents padded to 32
 #   ./docker/run_gpt_oss_mxfp8_flex.sh mxfp8-attn-aligned  # mxfp8-attn, documents padded to 32
+#   ./docker/run_gpt_oss_mxfp8_flex.sh mxfp8-linear-attn-aligned  # + MXFP8 Linear and MoE
 #
 # Extra arguments go to examples/run.sh, e.g. `mxfp8-attn --training.steps 100`.
 # Every non-shell run tees its output to logs/ in the repo.
@@ -36,8 +37,9 @@ case "${MODE}" in
     mxfp8-attn) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_mxfp8_attn ./examples/run.sh ${EXTRA_ARGS}" ;;
     bf16-flex-aligned) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_pretrain_flex_aligned ./examples/run.sh ${EXTRA_ARGS}" ;;
     mxfp8-attn-aligned) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_mxfp8_attn_aligned ./examples/run.sh ${EXTRA_ARGS}" ;;
+    mxfp8-linear-attn-aligned) TRAIN_COMMAND="NGPU=8 MODULE=gpt_oss CONFIG=gpt_oss_20b_mxfp8_linear_attn_aligned ./examples/run.sh ${EXTRA_ARGS}" ;;
     *)
-        echo "Usage: $0 {shell|test|debug-bf16|debug-mxfp8|bf16-flex|mxfp8-attn|bf16-flex-aligned|mxfp8-attn-aligned} [run.sh args...]" >&2
+        echo "Usage: $0 {shell|test|debug-bf16|debug-mxfp8|bf16-flex|mxfp8-attn|bf16-flex-aligned|mxfp8-attn-aligned|mxfp8-linear-attn-aligned} [run.sh args...]" >&2
         exit 2
         ;;
 esac
@@ -49,7 +51,7 @@ if [[ "${MODE}" != shell ]]; then
 fi
 
 DATA_MOUNTS=()
-if [[ "${MODE}" == bf16-flex* || "${MODE}" == mxfp8-attn* ]]; then
+if [[ "${MODE}" == bf16-flex* || "${MODE}" == mxfp8-attn* || "${MODE}" == mxfp8-linear-* ]]; then
     : "${HF_HUB_DIR:?set HF_HUB_DIR to the host dir containing models--openai--gpt-oss-20b}"
     : "${MEGATRON_DATA_DIR:?set MEGATRON_DATA_DIR to the host dir containing c4-train.en_6_text_document.idx}"
     DATA_MOUNTS=(

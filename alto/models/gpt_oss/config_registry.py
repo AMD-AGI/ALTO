@@ -41,10 +41,12 @@ __all__ = [
     "gpt_oss_20b_pretrain_flex_aligned",
     "gpt_oss_20b_mxfp8_attn",
     "gpt_oss_20b_mxfp8_attn_aligned",
+    "gpt_oss_20b_mxfp8_linear_attn_aligned",
     "gpt_oss_20b_lpt",
 ]
 
 MXFP8_ATTN_RECIPE = "./alto/models/gpt_oss/configs/mxfp8_attn_recipe.yaml"
+MXFP8_LINEAR_ATTN_RECIPE = "./alto/models/gpt_oss/configs/mxfp8_linear_attn_recipe.yaml"
 
 GPT_OSS_20B_PATH = (
     "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/"
@@ -304,6 +306,16 @@ def gpt_oss_20b_mxfp8_attn_aligned() -> Trainer.Config:
     config = _align_documents(gpt_oss_20b_mxfp8_attn())
     config.dump_folder = (
         "gpt_oss_20b-pretrain-mxfp8-attn-aligned-cdelta-lr4e-4-outputs"
+    )
+    return config
+
+
+def gpt_oss_20b_mxfp8_linear_attn_aligned() -> Trainer.Config:
+    """``gpt_oss_20b_mxfp8_attn_aligned`` plus MXFP8 Linear and MoE experts."""
+    config = gpt_oss_20b_mxfp8_attn_aligned()
+    config.dump_folder = "gpt_oss_20b-pretrain-mxfp8-linear-attn-aligned-lr4e-4-outputs"
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe=MXFP8_LINEAR_ATTN_RECIPE)],
     )
     return config
 

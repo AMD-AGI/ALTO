@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: MIT
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-from torchtitan.components.data.megatron import megatron_packed_dataset
+from torchtitan.components.data import GrainDataLoader
+from torchtitan.components.data.megatron import megatron_dataset_config
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.model_converter import ModelConvertersContainer
 from torchtitan.components.validator import Validator
@@ -19,7 +19,7 @@ from torchtitan_recipes.tests.models.llama3 import (
 )
 
 from alto.components.converter import ModelOptConverter
-from alto.models.batch import set_batch_sizes
+from alto.models.batch import RowPositionsPackingConfig, set_batch_sizes
 from alto.patches.patcher import ModelPatcher
 
 __all__ = [
@@ -89,6 +89,7 @@ def llama3_debugmodel() -> Trainer.Config:
         local_batch_size=4,
         global_batch_size=16,
     )
+    config.dataloader.dataset = RowPositionsPackingConfig(dataset=DATASETS["c4_test"])
     config.activation_remat = None
     config.debug.seed = 1234
     return config
@@ -108,6 +109,7 @@ def llama3_debugmodel_opt() -> Trainer.Config:
         local_batch_size=4,
         global_batch_size=16,
     )
+    config.dataloader.dataset = RowPositionsPackingConfig(dataset=DATASETS["c4_test"])
     config.activation_remat = None
     config.debug.seed = 1234
     config.model_converters = ModelConvertersContainer.Config(
@@ -130,6 +132,7 @@ def llama3_debugmodel_lpt() -> Trainer.Config:
         local_batch_size=4,
         global_batch_size=16,
     )
+    config.dataloader.dataset = RowPositionsPackingConfig(dataset=DATASETS["c4_test"])
     config.activation_remat = None
     config.debug.seed = 1234
     config.model_converters = ModelConvertersContainer.Config(
@@ -155,7 +158,7 @@ def llama3_1b() -> Trainer.Config:
         global_batch_size=10,
     )
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -167,7 +170,7 @@ def llama3_1b() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -193,7 +196,7 @@ def llama3_1b_opt() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -205,7 +208,7 @@ def llama3_1b_opt() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -233,7 +236,7 @@ def llama3_1b_lpt() -> Trainer.Config:
         global_batch_size=10,
     )
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -245,7 +248,7 @@ def llama3_1b_lpt() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -274,7 +277,7 @@ def llama3_1b_gptq() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -286,7 +289,7 @@ def llama3_1b_gptq() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -315,7 +318,7 @@ def llama3_1b_awq() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -327,7 +330,7 @@ def llama3_1b_awq() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -356,7 +359,7 @@ def llama3_1b_mx9_wa() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -368,7 +371,7 @@ def llama3_1b_mx9_wa() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -397,7 +400,7 @@ def llama3_1b_mx6_wa() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -409,7 +412,7 @@ def llama3_1b_mx6_wa() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -444,7 +447,7 @@ def llama3_8b_pretrain() -> Trainer.Config:
     config.optim.lr_scheduler.decay_ratio = 0.9
     config.optim.lr_scheduler.decay_type = "cosine"
     config.dataloader = GrainDataLoader.Config(
-        dataset=megatron_packed_dataset(C4_TRAIN_IDX),
+        dataset=RowPositionsPackingConfig(dataset=megatron_dataset_config(C4_TRAIN_IDX)),
         shuffle=False,
     )
     config.parallelism.expert_parallel_degree = 1
@@ -478,7 +481,7 @@ def llama3_8b() -> Trainer.Config:
         global_batch_size=8,
     )
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -490,7 +493,7 @@ def llama3_8b() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -515,7 +518,7 @@ def llama3_8b_opt() -> Trainer.Config:
         global_batch_size=8,
     )
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -527,7 +530,7 @@ def llama3_8b_opt() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -564,7 +567,7 @@ def llama3_8b_lpt() -> Trainer.Config:
     config.optim.lr_scheduler.decay_ratio = 0.9
     config.optim.lr_scheduler.decay_type = "cosine"
     config.dataloader = GrainDataLoader.Config(
-        dataset=megatron_packed_dataset(C4_TRAIN_IDX),
+        dataset=RowPositionsPackingConfig(dataset=megatron_dataset_config(C4_TRAIN_IDX)),
         shuffle=False,
     )
     config.parallelism.expert_parallel_degree = 1
@@ -602,7 +605,7 @@ def llama3_8b_gptq() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -614,7 +617,7 @@ def llama3_8b_gptq() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -643,7 +646,7 @@ def llama3_8b_rtn() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -655,7 +658,7 @@ def llama3_8b_rtn() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -684,7 +687,7 @@ def llama3_8b_awq() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -696,7 +699,7 @@ def llama3_8b_awq() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -725,7 +728,7 @@ def llama3_8b_wanda() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -737,7 +740,7 @@ def llama3_8b_wanda() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -766,7 +769,7 @@ def llama3_8b_sparsegpt() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -778,7 +781,7 @@ def llama3_8b_sparsegpt() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -807,7 +810,7 @@ def llama3_8b_magnitude() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -819,7 +822,7 @@ def llama3_8b_magnitude() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -850,7 +853,7 @@ def llama3_8b_admm() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -862,7 +865,7 @@ def llama3_8b_admm() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -891,7 +894,7 @@ def llama3_8b_alps() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -903,7 +906,7 @@ def llama3_8b_alps() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -932,7 +935,7 @@ def llama3_8b_wanda_structured() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -944,7 +947,7 @@ def llama3_8b_wanda_structured() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -975,7 +978,7 @@ def llama3_8b_obs() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -987,7 +990,7 @@ def llama3_8b_obs() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -1016,7 +1019,7 @@ def llama3_8b_admm_structured() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -1028,7 +1031,7 @@ def llama3_8b_admm_structured() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -1059,7 +1062,7 @@ def llama3_8b_cosine_similarity() -> Trainer.Config:
     )
     config.optim.optimizer.optimizers[0].lr = 0.0
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -1071,7 +1074,7 @@ def llama3_8b_cosine_similarity() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -1102,7 +1105,7 @@ def instella_3b() -> Trainer.Config:
         global_batch_size=10,
     )
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -1114,7 +1117,7 @@ def instella_3b() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -1140,7 +1143,7 @@ def instella_3b_opt() -> Trainer.Config:
         global_batch_size=10,
     )
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -1152,7 +1155,7 @@ def instella_3b_opt() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )
@@ -1181,7 +1184,7 @@ def instella_3b_lpt() -> Trainer.Config:
         global_batch_size=10,
     )
     config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=RowPositionsPackingConfig(dataset=DATASETS["c4_test"]),
     )
     config.activation_remat = None
     config.checkpointer = CheckpointManager.Config(
@@ -1193,7 +1196,7 @@ def instella_3b_lpt() -> Trainer.Config:
         freq=10,
         steps=10,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["wikitext_test"]),
+            dataset=RowPositionsPackingConfig(dataset=DATASETS["wikitext_test"]),
             shuffle=False,
         ),
     )

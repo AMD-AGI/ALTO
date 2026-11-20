@@ -54,7 +54,8 @@ def create_quantization_recipe(
     :param scale_type: ``"float"`` (default) or ``"pot"`` for INT8 scales;
         PoT uses ceil(log2(amax / 127)) and scale 1 for zero range
     :param activation_strategy: dynamic INT8 input granularity, ``"tensor"`` or
-        ``"token"``; None preserves the per-module defaults
+        ``"token"``; None preserves the per-module defaults. ``"token"`` is
+        rejected when ``targets`` includes Conv2d
     :param dynamic_weights: calculate INT8 weight scales on every forward pass;
         False preserves the original static-weight behavior
     :return: a recipe for :func:`apply_quantization`
@@ -72,6 +73,9 @@ def create_quantization_recipe(
     targets = list(dict.fromkeys([targets] if isinstance(targets, str) else targets))
     if not targets or any(target not in _BLOCK_AXIS for target in targets):
         raise ValueError(f"targets must be drawn from {', '.join(_BLOCK_AXIS)}; got {targets}")
+    if activation_strategy == "token" and "Conv2d" in targets:
+        raise ValueError("Conv2d supports per-tensor activations only; use activation_strategy='tensor' "
+                         "or leave it as None")
     ignore = [ignore] if isinstance(ignore, str) else list(ignore)
 
     config_groups = {}

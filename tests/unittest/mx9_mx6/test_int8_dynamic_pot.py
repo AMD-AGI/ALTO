@@ -190,6 +190,12 @@ def test_conv2d_initialization_honours_ignore(apis, scheme, options):
     assert torch.equal(model[1].weight, reference[1].weight)
 
 
+@pytest.mark.parametrize("targets", [("Conv2d",), ("Linear", "Conv2d")])
+def test_token_activation_strategy_is_rejected_when_conv2d_is_targeted(apis, targets):
+    with pytest.raises(ValueError, match="Conv2d supports per-tensor activations only"):
+        apis.create_quantization_recipe("int8_dynamic", targets=targets, activation_strategy="token")
+
+
 @pytest.fixture
 def pylight_int8():
     return pytest.importorskip("pytorchlight.quantize.core.int_ops")

@@ -6,7 +6,7 @@
 Importing top-level ``alto`` pulls torchtitan entry points and probes the GPU
 driver, so the modules under test are loaded directly, as in the MX6/MX9
 integration tests. Most tests run on CPU; device-placement regressions and
-the MX kernel test also exercise GPUs when available. An MX recipe only
+the MX kernel tests also exercise GPUs when available. An MX recipe only
 reaches the Triton kernel in a forward pass with quantization enabled, and
 calibration runs with quantization disabled.
 """
@@ -427,3 +427,45 @@ def test_the_conv2d_block_axis_reaches_the_mx_kernel_for_batched_and_unbatched_i
         x = torch.randn(*shape, device="cuda")
         assert forward.fake_quantize(x, None, None, args, None, None).shape == x.shape
     assert calls == [((16, 32, 3, 3), -3), ((2, 32, 8, 8), -3), ((32, 8, 8), -3)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="MX dispatch launches the Triton kernel")
+@pytest.mark.parametrize("scheme", ["mx6", "mx9"])
+def test_an_mx_conv2d_recipe_quantizes_input_and_weight_with_the_packed_kernel(apis, monkeypatch, scheme):
+    import alto.kernels.mx as mx_kernels
+
+    original = mx_kernels.convert_to_mx
+
+    def qdq(t):
+        packed = original(t, target_dtype=scheme, axis=-3)
+        return mx_kernels.convert_from_mx(packed, scheme, t.dtype, t.shape, axis=-3)
+
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Conv2d(32, 16, 3, padding=1)).cuda()
+    reference = copy.deepcopy(model[0])
+    weight = model[0].weight.detach().clone()
+    x = torch.randn(2, 32, 8, 8, device="cuda")
+    with torch.no_grad():
+        reference.weight.copy_(qdq(weight))
+        expected = reference(qdq(x))
+
+    calls = []
+
+    def counted(data, *args, target_dtype=None, axis=-1, **kwargs):
+        calls.append((tuple(data.shape), target_dtype, axis))
+        return original(data, *args, target_dtype=target_dtype, axis=axis, **kwargs)
+
+    monkeypatch.setattr(mx_kernels, "convert_to_mx", counted)
+    apis.apply_quantization(model, apis.create_quantization_recipe(scheme, targets=["Conv2d"]))
+
+    conv = model[0]
+    assert conv.quantization_scheme.weights.format == conv.quantization_scheme.input_activations.format == scheme
+    assert conv.quantization_status == QuantizationStatus.FROZEN
+    assert not hasattr(conv, "weight_scale") and not hasattr(conv, "input_scale")
+    assert calls == []
+
+    with torch.no_grad():
+        output = model(x)
+    assert sorted(calls) == [((2, 32, 8, 8), scheme, -3), ((16, 32, 3, 3), scheme, -3)]
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    assert torch.equal(conv.weight, weight)

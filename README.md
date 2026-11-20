@@ -200,10 +200,11 @@ GEMM kernel.
 
 `scale_type` only changes the scale policy. Omitting the other options keeps
 static per-tensor weights and dynamic activations (per-token for Linear,
-per-tensor for Conv2d). Omitting all options preserves the original ordinary
-floating-point scales. `int8_static` can also use `scale_type="pot"` and still
-requires a calibration callback. Both scale policies use the same
-`int8_dynamic` or `int8_static` entry point.
+per-tensor for Conv2d). Conv2d supports per-tensor activations only, so a
+recipe that targets Conv2d rejects `activation_strategy="token"`. Omitting all
+options preserves the original ordinary floating-point scales. `int8_static`
+can also use `scale_type="pot"` and still requires a calibration callback.
+Both scale policies use the same `int8_dynamic` or `int8_static` entry point.
 
 The ALTO API accepts a module or subtree; the caller selects the precision for
 each part of its model. For example, an application can use INT8 on an encoder

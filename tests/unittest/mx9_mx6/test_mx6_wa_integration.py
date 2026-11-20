@@ -128,6 +128,7 @@ def test_mx6_wa_recipe_toy_linear_lifecycle(monkeypatch):
     model = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=False)).cuda()
     linear = model[0]
 
+    modifier.initialize_quantization(model)
     modifier.initialize([model])
 
     scheme = linear.quantization_scheme

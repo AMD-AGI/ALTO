@@ -157,15 +157,17 @@ def test_mxfp4_linear_autograd_function(shape, use_2dblock_x, use_2dblock_w, use
             dtype=torch.float32,
         )
         transform = HadamardFactory.create_transform(weights.device)
+        fwd_transform = HadamardFactory.create_transform(weights.device)
     else:
         transform = None
+        fwd_transform = None
 
     # Compute with our implementation
     mxfp4_linear_func = MXFP4LinearFunction.apply
     if compile:
         mxfp4_linear_func = torch.compile(mxfp4_linear_func, fullgraph=True)
     outputs = mxfp4_linear_func(inputs, weights, use_2dblock_x, use_2dblock_w, use_grad_sr, False, clip_mode,
-                                use_macro_block_scaling, transform, use_uos)
+                                use_macro_block_scaling, transform, use_uos, fwd_transform)
     loss = torch.nn.functional.mse_loss(outputs, target)
     loss.backward()
 

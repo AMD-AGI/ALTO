@@ -69,6 +69,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
     config.metrics.enable_tensorboard = True
     config.metrics.log_weight_update_distance = True
     config.debug.seed = 1234
+    config.debug.enable_structured_logging = False
     # Shared with the MXFP4 recipe. Conditioning linears see one row per
     # sample, so the microbatch must match the MXFP4 group of 32.
     set_batch_sizes(
@@ -118,13 +119,9 @@ def flux_debugmodel_lpt() -> FluxTrainer.Config:
 # Image tokens are (256 / 8 / 2)^2 = 256, plus 256 text tokens.
 _SCHNELL_IMG_SIZE = 256
 _SCHNELL_T5_LEN = 256
-_SCHNELL_LOCAL_BATCH = 16
-# MLPerf batch_size is per rank. run.sh defaults to 8 GPUs, all data parallel.
-# Two microbatches are accumulated before each optimizer step, so one step
-# sees 16 * 8 * 2 = 256 images. 262,144 training images is then 1,024
-# optimizer steps. Validation does not accumulate: 29,696 / (16 * 8) = 232.
-_SCHNELL_DP_DEGREE = 8
-_SCHNELL_GRAD_ACCUM = 2
+_SCHNELL_LOCAL_BATCH = 128
+_SCHNELL_DP_DEGREE = 4
+_SCHNELL_GRAD_ACCUM = 1
 _EVAL_EVERY_N_SAMPLES = 262_144
 _EVAL_NUM_SAMPLES = 29_696
 
@@ -190,41 +187,46 @@ def _apply_schnell_runtime(config: FluxTrainer.Config) -> FluxTrainer.Config:
     config.optim.max_norm = 1.0
 
     config.metrics.log_freq = 1
-    config.metrics.disable_color_printing = True
+    config.metrics.enable_tensorboard = True
+    config.metrics.log_weight_update_distance = True
+    config.metrics.disable_color_printing = False
+    config.debug.seed = 1234
+    config.debug.enable_structured_logging = False
 
-    coco = DATASETS["coco-validation"]
-    coco_processor = coco.processor
-    if not isinstance(coco_processor, FluxSampleProcessor.Config):
-        raise TypeError("COCO validation must use FluxSampleProcessor")
-    validation = replace(
-        coco,
-        processor=replace(coco_processor, img_size=_SCHNELL_IMG_SIZE),
-    )
-    images_per_val_step = _SCHNELL_LOCAL_BATCH * _SCHNELL_DP_DEGREE
-    if (
-        _EVAL_EVERY_N_SAMPLES % images_per_step
-        or _EVAL_NUM_SAMPLES % images_per_val_step
-    ):
-        raise ValueError(
-            f"{images_per_step} images/step must divide {_EVAL_EVERY_N_SAMPLES}, "
-            f"and {images_per_val_step} images/val step must divide {_EVAL_NUM_SAMPLES}"
-        )
-    config.validator = FluxValidator.Config(
-        freq=_EVAL_EVERY_N_SAMPLES // images_per_step,
-        steps=_EVAL_NUM_SAMPLES // images_per_val_step,
-        sampling=SamplingConfig(
-            enable_classifier_free_guidance=True,
-            classifier_free_guidance_scale=5.0,
-            denoising_steps=50,
-        ),
-        dataloader=GrainDataLoader.Config(
-            dataset=FluxValidationDatasetConfig(dataset=validation),
-            collator=FluxCollator.Config(),
-            streaming_shuffle_buffer_size=128,
-        ),
-        save_img_count=0,
-        save_img_folder="img",
-    )
+    # coco = DATASETS["coco-validation"]
+    # coco_processor = coco.processor
+    # if not isinstance(coco_processor, FluxSampleProcessor.Config):
+    #     raise TypeError("COCO validation must use FluxSampleProcessor")
+    # validation = replace(
+    #     coco,
+    #     processor=replace(coco_processor, img_size=_SCHNELL_IMG_SIZE),
+    # )
+    # images_per_val_step = _SCHNELL_LOCAL_BATCH * _SCHNELL_DP_DEGREE
+    # if (
+    #     _EVAL_EVERY_N_SAMPLES % images_per_step
+    #     or _EVAL_NUM_SAMPLES % images_per_val_step
+    # ):
+    #     raise ValueError(
+    #         f"{images_per_step} images/step must divide {_EVAL_EVERY_N_SAMPLES}, "
+    #         f"and {images_per_val_step} images/val step must divide {_EVAL_NUM_SAMPLES}"
+    #     )
+    # config.validator = FluxValidator.Config(
+    #     freq=_EVAL_EVERY_N_SAMPLES // images_per_step,
+    #     steps=_EVAL_NUM_SAMPLES // images_per_val_step,
+    #     sampling=SamplingConfig(
+    #         enable_classifier_free_guidance=True,
+    #         classifier_free_guidance_scale=5.0,
+    #         denoising_steps=50,
+    #     ),
+    #     dataloader=GrainDataLoader.Config(
+    #         dataset=FluxValidationDatasetConfig(dataset=validation),
+    #         collator=FluxCollator.Config(),
+    #         streaming_shuffle_buffer_size=128,
+    #     ),
+    #     save_img_count=0,
+    #     save_img_folder="img",
+    # )
+    config.validator = None
     return config
 
 

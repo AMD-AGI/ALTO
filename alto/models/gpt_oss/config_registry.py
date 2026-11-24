@@ -30,12 +30,14 @@ from torchtitan_recipes.tests.models.gpt_oss import (
 
 from alto.components.converter import ModelOptConverter
 from alto.models.batch import set_batch_sizes
+from alto.nn.attention import detach_flex_lse
 
 __all__ = [
     "gpt_oss_debugmodel",
     "gpt_oss_debugmodel_lpt",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
+    "gpt_oss_20b_pretrain_flex_detached_lse",
     "gpt_oss_20b_lpt",
 ]
 
@@ -159,7 +161,7 @@ def gpt_oss_20b() -> Trainer.Config:
     )
 
 
-def gpt_oss_20b_pretrain() -> Trainer.Config:
+def gpt_oss_20b_pretrain(attn_backend: str = "varlen") -> Trainer.Config:
     seq_len = 8192
     local_batch_size = 2
     global_batch_size = 32
@@ -168,7 +170,12 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
         expert_parallel_degree=4,
         tensor_parallel_degree=1,
     )
-    model = build_model_config("20b_megatron", seq_len=seq_len, parallelism=parallelism)
+    model = build_model_config(
+        "20b_megatron",
+        seq_len=seq_len,
+        parallelism=parallelism,
+        attn_backend=attn_backend,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -234,6 +241,18 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
             ),
         ),
     )
+
+
+def gpt_oss_20b_pretrain_flex_detached_lse() -> Trainer.Config:
+    """``gpt_oss_20b_pretrain`` on Flex attention, trained like the varlen original.
+
+    The sinks' LSE is detached because varlen's backward drops its gradient.
+    Data, schedule and every other setting are unchanged.
+    """
+    config = gpt_oss_20b_pretrain(attn_backend="flex")
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-flex-detached-lse-lr4e-4-outputs"
+    detach_flex_lse(config.model)
+    return config
 
 
 def gpt_oss_20b_lpt() -> Trainer.Config:

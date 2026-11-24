@@ -4,13 +4,22 @@ ALTO is a Python library for low-precision model training and optimization, buil
 
 ## Contents
 
-- [Features](#features)
-- [Supported models](#supported-models)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Examples](#examples)
-- [Export and evaluation](#export-and-evaluation)
+- [ALTO: Advanced Low-precision Training and Optimization](#alto-advanced-low-precision-training-and-optimization)
+  - [Contents](#contents)
+  - [Features](#features)
+    - [Low-precision training (LPT)](#low-precision-training-lpt)
+    - [Modifiers](#modifiers)
+  - [Supported models](#supported-models)
+  - [Requirements](#requirements)
+  - [Installation](#installation)
+  - [Usage](#usage)
+    - [Wire a recipe into TorchTitan](#wire-a-recipe-into-torchtitan)
+    - [Launch training](#launch-training)
+  - [Examples](#examples)
+    - [GPT-OSS — MXFP4 Training](#gpt-oss--mxfp4-training)
+  - [Export and evaluation](#export-and-evaluation)
+  - [Project links](#project-links)
+  - [Contact](#contact)
 
 ## Features
 
@@ -177,9 +186,9 @@ python ./alto/utils/exportation/export.py \
 
 ## Contact
 For questions, issues, or contributions, please reach out to the maintainers:
-- Guanchen Li — [@guanchenl](https://github.com/guanchenl) · GuanChen.Li@amd.com
-- Han Wang — [@hann-wang](https://github.com/hann-wang) · Han.Wang@amd.com
-- Yue Sun — [@ysa2215](https://github.com/ysa2215) · Yue.Sun2@amd.com
-- Zhitao Wang — [@zhitwang17](https://github.com/zhitwang17) · Zhitao.Wang@amd.com
+- @guanchenl
+- @hann-wang
+- @ysa2215
+- @zhitwang17
 
 See [CODEOWNERS](.github/CODEOWNERS) for the full ownership list.

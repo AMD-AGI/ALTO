@@ -4,13 +4,7 @@ description = "Advanced Lightweight Training and Optimization"
 version = "0.0.0"
 homepage = "https://github.com/AMD-AGI/ALTO"
 authors = [
-    "Guanchen Li <GuanChen.Li@amd.com>",
-    "Zhitao Wang <Zhitao.Wang@amd.com>",
-    "Yue Sun <Yue.Sun2@amd.com>",
-    "Han Wang <Han.Wang@amd.com>",
-    "Yixing Xu <Yixing.Xu@amd.com>",
-    "Xuanwu Yin <Xuanwu.Yin@amd.com>",
-    "Dong Li <d.li@amd.com>",
+    "AMD-AGI AI-Models Team",
 ]
 license = "MIT"
 readme = "README.md"

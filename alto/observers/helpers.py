@@ -1,8 +1,13 @@
-# Copied from https://github.com/vllm-project/llm-compressor/blob/4ce1bdfc197ccd95e2be0297bfa4a7c8d7d9a614/src/llmcompressor/observers/helpers.py
-# licensed under the Apache License 2.0
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
+# (see LICENSE in the root of this repository).
 #
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright contributors to the vLLM project
+# Original portions are licensed under the Apache-2.0 License (see upstream vLLM-project licensing).
+#
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+
+# modified from https://github.com/vllm-project/llm-compressor/blob/4ce1bdfc197ccd95e2be0297bfa4a7c8d7d9a614/src/llmcompressor/observers/helpers.py
 """Helper functions for observer token counting and analysis.
 
 Provides utility functions for analyzing observer statistics

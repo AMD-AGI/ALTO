@@ -1,8 +1,13 @@
-# copied from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/utils/pytorch/module.py
-# licensed under the Apache License 2.0
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# Modifications by Advanced Micro Devices, Inc. are licensed under the MIT License
+# (see LICENSE in the root of this repository).
 #
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright contributors to the vLLM project
+# Original portions are licensed under the Apache-2.0 License (see upstream vLLM-project licensing).
+#
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+
+# modified from https://github.com/vllm-project/llm-compressor/blob/f3f14af3ee56e35db7e1faf6da8833f84a570baf/src/llmcompressor/utils/pytorch/module.py
 """Utility / helper functions."""
 
 import difflib

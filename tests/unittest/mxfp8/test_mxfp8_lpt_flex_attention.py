@@ -14,6 +14,7 @@ from alto.models.gpt_oss.config_registry import (
     MXFP8_ATTN_RECIPE,
     gpt_oss_20b_mxfp8_attn,
     gpt_oss_20b_pretrain,
+    gpt_oss_20b_pretrain_flex_mxfp8_attn,
     gpt_oss_debugmodel_flex,
 )
 from alto.modifiers.lpt.base import LowPrecisionTrainingModifier
@@ -113,6 +114,25 @@ def test_gpt_oss_20b_mxfp8_attn_only_changes_attention_and_alignment():
 
     reference = gpt_oss_20b_pretrain()
     for name in ("training", "optim", "parallelism", "loss", "checkpointer", "debug"):
+        assert getattr(config, name) == getattr(reference, name), name
+
+
+def test_gpt_oss_20b_pretrain_flex_mxfp8_attn_only_changes_attention():
+    config = gpt_oss_20b_pretrain_flex_mxfp8_attn()
+    model_config = config.model
+    _recipe_modifier().on_convert_config(model_config)
+
+    lpt = list(model_config.traverse(LPTModule.Config))
+    assert len(lpt) == len(model_config.layers)
+    for fqn, inner, _parent, _attr in lpt:
+        assert fqn.endswith("attention.inner_attention"), fqn
+        assert inner.training_op_config.precision == "mxfp8_e4m3"
+    assert [c.recipe for c in config.model_converters.converters] == [MXFP8_ATTN_RECIPE]
+    assert config.dataloader.dataset.dataset.processor.seq_align is None
+    assert config.validator.dataloader.dataset.dataset.processor.seq_align is None
+
+    reference = gpt_oss_20b_pretrain()
+    for name in ("training", "optim", "parallelism", "loss", "checkpointer", "debug", "metrics"):
         assert getattr(config, name) == getattr(reference, name), name
 
 

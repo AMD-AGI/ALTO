@@ -41,6 +41,7 @@ __all__ = [
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
     "gpt_oss_20b_mxfp8_attn",
+    "gpt_oss_20b_pretrain_flex_mxfp8_attn",
 ]
 
 MXFP8_ATTN_RECIPE = "./alto/models/gpt_oss/configs/mxfp8_attn_recipe.yaml"
@@ -281,6 +282,20 @@ def gpt_oss_20b_mxfp8_attn() -> Trainer.Config:
     config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-mxfp8attn-cdelta-lr4e-4-outputs"
     config.dataloader.dataset = megatron_packed_dataset(C4_TRAIN_IDX, seq_align=32)
     config.validator.dataloader.dataset = megatron_packed_dataset(C4_VAL_IDX, seq_align=32)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe=MXFP8_ATTN_RECIPE)],
+    )
+    return config
+
+
+def gpt_oss_20b_pretrain_flex_mxfp8_attn() -> Trainer.Config:
+    """MXFP8 attention on ``gpt_oss_20b_pretrain``'s unpadded data and schedule.
+
+    Pairs with the BF16 ``gpt_oss_20b_pretrain_flex_detached_lse`` baseline: both
+    detach the sinks' LSE, so the two runs differ only in attention precision.
+    """
+    config = gpt_oss_20b_pretrain(attn_backend="flex")
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp8attn-cdelta-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe=MXFP8_ATTN_RECIPE)],
     )

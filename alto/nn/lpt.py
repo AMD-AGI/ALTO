@@ -501,8 +501,9 @@ def lpt_flex_attention_THK(
     """Run MXFP8 BlockMask attention on packed ``[T, H, D]`` inputs.
 
     Returns ``(out_THV, lse_TH)``. The mask comes entirely from ``block_mask``,
-    so ``score_mod`` is rejected rather than ignored. ``lse`` is differentiable
-    because GPT-OSS sinks rescale the output with it.
+    so ``score_mod`` is rejected rather than ignored. ``lse`` is detached because
+    varlen's backward drops ``grad_lse``: GPT-OSS sinks rescale the output with
+    it but train only the sinks, so MXFP8 Flex trains like varlen attention.
     """
     if score_mod is not None:
         raise ValueError("MXFP8 Flex attention takes mask semantics only through BlockMask.")
@@ -533,7 +534,7 @@ def lpt_flex_attention_THK(
         )
     out_THV = out_1HTV.squeeze(0).transpose(0, 1)
     lse_TH = lse_1HT.squeeze(0).transpose(0, 1)
-    return _annotate_like(out_THV, q_THK), lse_TH
+    return _annotate_like(out_THV, q_THK), lse_TH.detach()
 
 
 def _assign(parent, attr, value) -> None:

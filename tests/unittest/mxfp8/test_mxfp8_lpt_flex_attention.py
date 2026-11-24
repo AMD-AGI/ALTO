@@ -130,7 +130,7 @@ def _run_attention(module, q, k, v, sinks, metadata, scale):
 
 
 def _bf16_flex_reference(q, k, v, sinks, metadata, scale):
-    """FlexInnerAttention's math, run eagerly instead of through max-autotune compile."""
+    """FlexInnerAttention's math with varlen's detached LSE, run eagerly instead of compiled."""
     leaves = [t.detach().clone().requires_grad_(True) for t in (q, k, v, sinks)]
     q_, k_, v_, sinks_ = leaves
     out, aux = flex_attention(
@@ -142,7 +142,7 @@ def _bf16_flex_reference(q, k, v, sinks, metadata, scale):
     )
     out_THV = out.squeeze(0).transpose(0, 1)
     lse_TH = aux.lse.squeeze(0).transpose(0, 1)
-    return apply_attention_sink_rescale(out_THV, lse_TH, sinks_), leaves
+    return apply_attention_sink_rescale(out_THV, lse_TH.detach(), sinks_), leaves
 
 
 @cuda_only
@@ -182,6 +182,22 @@ def test_lpt_flex_matches_bf16_flex_with_sinks(sliding_window_size):
     for name, expected, actual in pairs:
         assert calc_cossim(expected, actual) > 0.99, name
         assert calc_snr(expected, actual) > 18, name
+
+
+@cuda_only
+def test_lpt_flex_detaches_lse_like_varlen():
+    """Sinks read the LSE, but no gradient flows back through it into dQ/dK."""
+    module_cls = lpt_module(FlexInnerAttention)
+    module_config = module_cls.Config(training_op_config=_mxfp8_config())
+    positions = _packed_positions([256], device="cuda")
+    q = torch.randn(256, 4, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    seen = []
+    module_cls(module_config)(
+        q, q, q,
+        attention_metadata=module_config.build_attention_metadata(positions),
+        out_transform=lambda o, lse: seen.append(lse.requires_grad) or o,
+    )
+    assert seen == [False]
 
 
 @cuda_only

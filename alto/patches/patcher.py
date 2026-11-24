@@ -4,6 +4,7 @@
 
 import dataclasses
 import importlib
+import sys
 
 import torch
 
@@ -80,8 +81,53 @@ class ModelPatcher:
                 setattr(model_module, attr_name, patched_attr)
 
     @classmethod
+    def patch_quantization_scales(cls):
+        """Add a PoT scale policy to the existing INT8 qparam calculation.
+
+        Dynamic range reduction and QDQ remain compressed-tensors operations.
+        Patch its shared qparam helper plus the aliases used by ALTO observers
+        so static weights and dynamic activations use the same scale policy.
+        """
+        from compressed_tensors.quantization import utils
+        from compressed_tensors.quantization.utils import helpers
+        from alto.modifiers.quantization.format_registry import validate_scale_type
+
+        observer_base = sys.modules.get("alto.observers.base")
+        original = helpers.calculate_qparams
+        if getattr(original, "_alto_scale_type", False):
+            # Observers can be imported after this patch was installed.
+            if observer_base is not None:
+                observer_base.calculate_qparams = original
+            return
+
+        @torch.no_grad()
+        def calculate_qparams(min_vals, max_vals, quantization_args, global_scale=None):
+            if getattr(quantization_args, "scale_type", "float") != "pot":
+                return original(min_vals, max_vals, quantization_args, global_scale=global_scale)
+            validate_scale_type(quantization_args)
+            if global_scale is not None:
+                raise ValueError("scale_type=pot does not support global_scale")
+            # PoT uses the positive INT8 endpoint (127) as its scale divisor.
+            # Derive this from the observed range to avoid rounding a scale twice.
+            scale = torch.maximum(min_vals.abs(), max_vals.abs()) / 127
+            scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+            scale = torch.pow(2, torch.ceil(torch.log2(scale)))
+            zero_point = torch.zeros_like(scale, dtype=quantization_args.zp_dtype)
+            if scale.ndim == 0:
+                scale, zero_point = scale.reshape(1), zero_point.reshape(1)
+            return scale, zero_point
+
+        calculate_qparams._alto_scale_type = True
+        helpers.calculate_qparams = calculate_qparams
+        utils.calculate_qparams = calculate_qparams
+        if observer_base is not None:
+            observer_base.calculate_qparams = calculate_qparams
+
+    @classmethod
     def patch_fake_quantize(cls):
         from compressed_tensors.quantization.lifecycle import forward as forward_module
+
+        cls.patch_quantization_scales()
 
         original_fake_quantize = forward_module.fake_quantize
 
@@ -127,4 +173,3 @@ class ModelPatcher:
             )
 
         forward_module.fake_quantize = fake_quantize
-

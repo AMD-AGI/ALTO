@@ -278,7 +278,7 @@ def gpt_oss_20b_mxfp8_attn() -> Trainer.Config:
     group spans two documents.
     """
     config = gpt_oss_20b_pretrain(attn_backend="flex")
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-mxfp8attn-cdelta-lr4e-4-outputs"
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-mxfp8attn-lr4e-4-outputs"
     config.dataloader.dataset = megatron_packed_dataset(C4_TRAIN_IDX, seq_align=32)
     config.validator.dataloader.dataset = megatron_packed_dataset(C4_VAL_IDX, seq_align=32)
     config.model_converters = ModelConvertersContainer.Config(

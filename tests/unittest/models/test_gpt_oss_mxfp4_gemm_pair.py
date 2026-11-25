@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 from alto.models.gpt_oss.config_registry import (
     LPT_RECIPE,
@@ -58,6 +60,14 @@ def test_mxfp4_gemm_pair_differs_only_in_attention_precision():
     assert gemms and set(gemms.values()) == {"mxfp4"}
     assert not any(fqn.endswith(("router.gate", "lm_head")) for fqn in gemms)
     assert bf16_precisions == gemms
+
+    dense = [fqn for fqn in gemms if fqn.endswith(("wqkv", "wo"))]
+    grouped = [fqn for fqn in gemms if fqn.endswith(("w13", "w2"))]
+    assert len(dense) == len(grouped) == 2 * len(mxfp8_attn.model.layers)
+    assert len(gemms) == len(dense) + len(grouped)
+    for layer in mxfp8_attn.model.layers:
+        owner = layer.feed_forward.routed_experts.w13._owner
+        assert issubclass(owner, GroupedLinear) and not issubclass(owner, GptOssGroupedLinear)
 
     for layer_id, layer in enumerate(bf16_attn.model.layers):
         expected = (

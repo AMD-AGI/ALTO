@@ -1,0 +1,19 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      # lpt_recipe.yaml plus use_uos.
+      scheme: "mxfp4"
+      targets: ["Linear", "GptOssGroupedLinear", "GroupedLinear"]
+      ignore: ["lm_head", "re:.*\\.router\\.gate"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      use_hadamard: true
+      use_sr_grad: true
+      # 3/8-ULP scale rounding, Primus-Turbo's scale_rounding_mode 2.
+      use_uos: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: none
+      deosc_step: 768
+      deosc_period: 100
+      deosc_ratio: 4.0

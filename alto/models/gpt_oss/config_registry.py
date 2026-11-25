@@ -50,6 +50,7 @@ __all__ = [
 
 LPT_RECIPE = "./alto/models/gpt_oss/configs/lpt_recipe.yaml"
 MXFP8_ATTN_RECIPE = "./alto/models/gpt_oss/configs/mxfp8_attn_recipe.yaml"
+MXFP4_GEMM_RECIPE = "./alto/models/gpt_oss/configs/mxfp4_gemm_recipe.yaml"
 MXFP4_GEMM_MXFP8_ATTN_RECIPE = "./alto/models/gpt_oss/configs/mxfp4_gemm_mxfp8_attn_recipe.yaml"
 
 GPT_OSS_20B_PATH = (
@@ -321,21 +322,22 @@ def gpt_oss_20b_pretrain_flex_mxfp8_attn() -> Trainer.Config:
 
 
 def gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse() -> Trainer.Config:
-    """``gpt_oss_20b_pretrain_flex_detached_lse`` with ``lpt_recipe.yaml``'s MXFP4 Linear and MoE GEMMs.
+    """``gpt_oss_20b_pretrain_flex_detached_lse`` with MXFP4 Linear and MoE GEMMs.
 
-    Attention stays BF16 Flex with the sinks' LSE detached. Pairs with
+    The GEMMs follow ``lpt_recipe.yaml`` plus UoS scale rounding. Attention stays
+    BF16 Flex with the sinks' LSE detached. Pairs with
     ``gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn``.
     """
     config = gpt_oss_20b_pretrain_flex_detached_lse()
     config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-detached-lse-lr4e-4-outputs"
     config.model_converters = ModelConvertersContainer.Config(
-        converters=[ModelOptConverter.Config(recipe=LPT_RECIPE)],
+        converters=[ModelOptConverter.Config(recipe=MXFP4_GEMM_RECIPE)],
     )
     return config
 
 
 def gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn() -> Trainer.Config:
-    """``gpt_oss_20b_pretrain_flex_mxfp8_attn`` with ``lpt_recipe.yaml``'s MXFP4 Linear and MoE GEMMs.
+    """``gpt_oss_20b_pretrain_flex_mxfp8_attn`` with the same MXFP4 GEMMs.
 
     Both schemes sit in one recipe. Pairs with
     ``gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse``: the two differ only

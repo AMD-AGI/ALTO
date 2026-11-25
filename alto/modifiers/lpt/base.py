@@ -96,8 +96,11 @@ class LowPrecisionTrainingModifier(Modifier):
         if not self.use_uos:
             return self
         schemes = self.scheme if isinstance(self.scheme, dict) else {self.scheme: None}
-        if any(scheme_name != "mxfp4" for scheme_name in schemes):
-            raise ValueError("UOS is only supported for mxfp4")
+        # MXFP8 LPT modules never read use_uos, so they may share a modifier with MXFP4.
+        if "mxfp4" not in schemes or any(
+            scheme_name not in ("mxfp4", "mxfp8_e4m3", "mxfp8_e5m2") for scheme_name in schemes
+        ):
+            raise ValueError("UOS is only supported for mxfp4, optionally next to mxfp8")
         if self.clip_mode != "none":
             raise ValueError("UOS is only supported with clip mode none")
         return self

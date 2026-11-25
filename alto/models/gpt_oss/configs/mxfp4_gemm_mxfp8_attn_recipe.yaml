@@ -14,6 +14,8 @@ training_stage:
       # MXFP4 GEMMs only; the MXFP8 attention kernel does not read these.
       use_hadamard: true
       use_sr_grad: true
+      # 3/8-ULP scale rounding, Primus-Turbo's scale_rounding_mode 2.
+      use_uos: true
       use_dge: false
       clip_mode: none
       two_level_scaling: none

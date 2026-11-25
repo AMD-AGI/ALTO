@@ -4,11 +4,13 @@
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from alto.models.gpt_oss.config_registry import (
     LPT_RECIPE,
     MXFP4_GEMM_MXFP8_ATTN_RECIPE,
+    MXFP4_GEMM_RECIPE,
     gpt_oss_20b_pretrain,
     gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse,
     gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn,
@@ -65,13 +67,25 @@ def test_mxfp4_gemm_pair_differs_only_in_attention_precision():
         assert type(layer.attention.inner_attention) is expected.Config, layer_id
 
 
-def test_combined_recipe_keeps_lpt_recipe_mxfp4_settings():
-    mxfp4 = _modifier_args(LPT_RECIPE)
+def test_mxfp4_gemm_recipes_are_lpt_recipe_plus_uos():
+    lpt = _modifier_args(LPT_RECIPE)
+    gemm_only = _modifier_args(MXFP4_GEMM_RECIPE)
     combined = _modifier_args(MXFP4_GEMM_MXFP8_ATTN_RECIPE)
-    assert combined["scheme"]["mxfp4"] == mxfp4["targets"]
-    for key, value in mxfp4.items():
-        if key not in ("scheme", "targets"):
-            assert combined[key] == value, key
+    assert gemm_only["targets"] == combined["scheme"]["mxfp4"] == lpt["targets"]
+    for recipe in (gemm_only, combined):
+        assert recipe["use_uos"] is True
+        for key, value in lpt.items():
+            if key not in ("scheme", "targets"):
+                assert recipe[key] == value, key
+
+
+def test_uos_may_share_a_modifier_with_mxfp8_but_needs_mxfp4():
+    LowPrecisionTrainingModifier(
+        scheme={"mxfp4": ["Linear"], "mxfp8_e4m3": ["FlexInnerAttention"]}, use_uos=True
+    )
+    for scheme in ("mxfp8_e4m3", {"mxfp4": ["Linear"], "nvfp4": ["GroupedLinear"]}):
+        with pytest.raises(ValueError, match="UOS"):
+            LowPrecisionTrainingModifier(scheme=scheme, use_uos=True)
 
 
 def test_mxfp4_gemm_pair_keeps_gpt_oss_20b_pretrain_settings():

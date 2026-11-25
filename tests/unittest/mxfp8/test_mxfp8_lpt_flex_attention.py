@@ -32,7 +32,7 @@ cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA/ROCm 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _mxfp8_config(consistent_delta: bool = False) -> TrainingOpConfig:
+def _mxfp8_config() -> TrainingOpConfig:
     return TrainingOpConfig(
         precision="mxfp8_e4m3",
         use_2dblock_x=False,
@@ -40,7 +40,6 @@ def _mxfp8_config(consistent_delta: bool = False) -> TrainingOpConfig:
         use_hadamard=False,
         use_sr_grad=False,
         use_dge=False,
-        attention_consistent_delta=consistent_delta,
     )
 
 
@@ -90,7 +89,6 @@ def test_gpt_oss_mxfp8_attn_recipe_installs_lpt_flex_modules():
     )
     assert sliding.inner_attention.sliding_window_size == 128
     assert type(full.inner_attention).__qualname__ == "LPTFlexInnerAttention.Config"
-    assert full.inner_attention.training_op_config.attention_consistent_delta is True
     assert type(full.qkv_linear.wqkv).__qualname__ == "ColumnParallelLinear.Config"
 
     with torch.device("meta"):
@@ -182,28 +180,3 @@ def test_lpt_flex_matches_bf16_flex_with_sinks(sliding_window_size):
     for name, expected, actual in pairs:
         assert calc_cossim(expected, actual) > 0.99, name
         assert calc_snr(expected, actual) > 18, name
-
-
-@cuda_only
-def test_lpt_flex_forwards_consistent_delta():
-    """dV = Pᵀ @ dO never reads delta; only dQ/dK move when the flag reaches the kernel."""
-    torch.manual_seed(3456)
-    positions = _packed_positions([256], device="cuda")
-    q = torch.randn(256, 4, 64, device="cuda", dtype=torch.bfloat16)
-    k = torch.randn_like(q)
-    v = torch.randn_like(q)
-    do = torch.randn_like(q)
-
-    def grads(consistent_delta):
-        module_cls = lpt_module(FlexInnerAttention)
-        module_config = module_cls.Config(training_op_config=_mxfp8_config(consistent_delta))
-        metadata = module_config.build_attention_metadata(positions)
-        leaves = [t.clone().requires_grad_(True) for t in (q, k, v)]
-        out = module_cls(module_config)(*leaves, attention_metadata=metadata)
-        (out * do).sum().backward()
-        return [t.grad for t in leaves]
-
-    (dq_off, dk_off, dv_off), (dq_on, dk_on, dv_on) = grads(False), grads(True)
-    torch.testing.assert_close(dv_off, dv_on, rtol=0, atol=0)
-    assert not torch.equal(dq_off, dq_on)
-    assert not torch.equal(dk_off, dk_on)

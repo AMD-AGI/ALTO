@@ -481,7 +481,6 @@ def mxfp8_attention_backward_reference_stage2(
     causal: bool,
     block_size: int = BLOCK_SIZE_DEFAULT,
     mask: torch.Tensor | None = None,
-    consistent_delta: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pure-PyTorch golden reference for the **Stage-2 (A1)** MXFP8 backward.
 
@@ -510,10 +509,9 @@ def mxfp8_attention_backward_reference_stage2(
         dK = dSᵀ @ Q      reduction seqlen_q   : dS 1D along sq ; Q 2D reuse
         dQ = dS @ K       reduction seqlen_k   : dS 1D along sk ; K 2D reuse
 
-    ``consistent_delta`` models the kernel switch of the same name: ``delta`` is
-    built from the quantized dO that dP consumes rather than the raw dO, so the
-    ``dp - delta`` subtraction cancels dO's quantization error instead of leaving
-    a row-constant bias in ``ds``.
+    Like the kernel, ``delta`` is built from the quantized dO that dP consumes
+    rather than the raw dO, so the ``dp - delta`` subtraction cancels dO's
+    quantization error instead of leaving a row-constant bias in ``ds``.
 
     Same top-left causal mask as the other references (matches SDPA on bhsd), so
     causal tests must keep ``seqlen_q == seqlen_k``. Args mirror
@@ -536,7 +534,6 @@ def mxfp8_attention_backward_reference_stage2(
         k_dq = k_dq.repeat_interleave(n_rep, dim=1)
         v_dq = v_dq.repeat_interleave(n_rep, dim=1)
 
-    do_f = do.to(torch.float32)
     o_f = o.to(torch.float32)
     lse = softmax_lse.to(torch.float32)
 
@@ -555,7 +552,7 @@ def mxfp8_attention_backward_reference_stage2(
     # dP = dO @ Vᵀ (reduction head_dim_v): dO 1D along head_dim_v, V 2D reuse.
     do_hd = qdq(do, axis=-1).to(torch.float32)
     dp = torch.matmul(do_hd, v_dq.transpose(-1, -2))
-    delta = (o_f * (do_hd if consistent_delta else do_f)).sum(dim=-1)
+    delta = (o_f * do_hd).sum(dim=-1)
     ds = p * (dp - delta[..., None])  # fp32 elementwise
 
     # dV = Pᵀ @ dO (reduction seqlen_q): P and dO 1D along sq.

@@ -202,7 +202,6 @@ def lpt_module(base: type) -> type:
                 q_THK, k_THK, v_THV,
                 block_mask=attention_metadata, score_mod=score_mod,
                 scale=scale, enable_gqa=enable_gqa,
-                config=self.training_op_config,
             )
             if out_transform is None:
                 return out_THV
@@ -496,7 +495,6 @@ def lpt_flex_attention_THK(
     score_mod,
     scale: float | None,
     enable_gqa: bool,
-    config: TrainingOpConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run MXFP8 BlockMask attention on packed ``[T, H, D]`` inputs.
 
@@ -529,7 +527,6 @@ def lpt_flex_attention_THK(
             use_exp2=True,
             layout="bhsd",
             block_mask=prepare_block_mask(block_mask),
-            consistent_delta=config.attention_consistent_delta,
         )
     out_THV = out_1HTV.squeeze(0).transpose(0, 1)
     lse_TH = lse_1HT.squeeze(0).transpose(0, 1)

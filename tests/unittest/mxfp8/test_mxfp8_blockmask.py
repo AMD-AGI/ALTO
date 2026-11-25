@@ -249,16 +249,12 @@ def test_blockmask_kernel_uses_per_batch_per_head_tables():
 
 
 @cuda_only
-# window=1 is a one-element softmax, so the true dQ/dK are zero; with a
-# consistent delta the reference returns exact zeros and cosine similarity
-# would only compare rounding noise.
-@pytest.mark.parametrize("window, consistent_delta", [
-    (1, False), (128, False), (256, False), (128, True), (256, True),
-])
+# No window=1: a one-element softmax has zero dQ/dK, the reference returns exact
+# zeros, and cosine similarity would only compare rounding noise.
+@pytest.mark.parametrize("window", [128, 256])
 @pytest.mark.parametrize("num_head_q, num_head_kv", [(4, 4), (8, 2)])
 @pytest.mark.parametrize("head_dim", [64, 192])
-def test_blockmask_backward_matches_same_quantization_reference(window, consistent_delta, num_head_q, num_head_kv,
-                                                                head_dim):
+def test_blockmask_backward_matches_same_quantization_reference(window, num_head_q, num_head_kv, head_dim):
     """dQ/dK/dV must consume the same sparse tables as the forward pass."""
     torch.manual_seed(5678)
     block_mask = create_block_mask(_causal_window(window), None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
@@ -268,7 +264,7 @@ def test_blockmask_backward_matches_same_quantization_reference(window, consiste
     v = torch.randn_like(k, requires_grad=True)
     do = torch.randn_like(q)
 
-    output = _call_kernel(q, k, v, prepared, consistent_delta=consistent_delta)[0]
+    output = _call_kernel(q, k, v, prepared)[0]
     (output * do).sum().backward()
 
     ref_output, ref_lse = mxfp8_blockmask_forward_reference(
@@ -277,7 +273,6 @@ def test_blockmask_backward_matches_same_quantization_reference(window, consiste
     dense_mask = _dense_mask(_causal_window(window), 1, num_head_q, 256, 256, "cuda")
     ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
         q.detach(), k.detach(), v.detach(), do, ref_output, ref_lse, head_dim**-0.5, causal=False, mask=dense_mask,
-        consistent_delta=consistent_delta,
     )
 
     for actual, expected in ((q.grad, ref_dq), (k.grad, ref_dk), (v.grad, ref_dv)):
@@ -316,11 +311,12 @@ def test_blockmask_backward_keeps_unattended_key_blocks_zero():
 @cuda_only
 def test_blockmask_backward_uses_per_batch_per_head_tables():
     """Backward must retain B/H table strides for both KV-side and Q-side walks."""
-    def shifted_diagonal(batch, head, q_idx, kv_idx):
-        return kv_idx == ((q_idx + batch + head) % 256)
+    # Two keys per query: a one-key softmax has zero dQ/dK, leaving nothing to compare.
+    def shifted_band(batch, head, q_idx, kv_idx):
+        return (q_idx + batch + head - kv_idx) % 256 < 2
 
     prepared = prepare_block_mask(
-        create_block_mask(shifted_diagonal, 2, 4, 256, 256, device="cuda", BLOCK_SIZE=128)
+        create_block_mask(shifted_band, 2, 4, 256, 256, device="cuda", BLOCK_SIZE=128)
     )
     q = torch.randn(2, 4, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     k = torch.randn_like(q, requires_grad=True)
@@ -329,7 +325,7 @@ def test_blockmask_backward_uses_per_batch_per_head_tables():
 
     output, lse, _ = _call_kernel(q, k, v, prepared)
     (output * do).sum().backward()
-    dense_mask = _dense_mask(shifted_diagonal, 2, 4, 256, 256, "cuda")
+    dense_mask = _dense_mask(shifted_band, 2, 4, 256, 256, "cuda")
     # The table-walk reference intentionally supports only broadcast B/H tables,
     # so this non-broadcast stride test must use the kernel's own O/LSE.
     ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(
@@ -364,11 +360,13 @@ def test_blockmask_backward_empty_query_tile_is_zero():
 @cuda_only
 def test_blockmask_backward_partial_tile_empty_rows_are_zero():
     """Empty rows inside a partial tile must have zero dQ and not poison dK/dV."""
-    def alternating_diagonal(batch, head, q_idx, kv_idx):
-        return (q_idx % 2 == 0) & (q_idx == kv_idx)
+    # Even rows also see the key before them: a one-key softmax has zero dQ/dK,
+    # leaving nothing to compare.
+    def alternating_band(batch, head, q_idx, kv_idx):
+        return (q_idx % 2 == 0) & (kv_idx <= q_idx) & (q_idx - kv_idx < 2)
 
     prepared = prepare_block_mask(
-        create_block_mask(alternating_diagonal, None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
+        create_block_mask(alternating_band, None, None, 256, 256, device="cuda", BLOCK_SIZE=128)
     )
     q = torch.randn(1, 2, 256, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     k = torch.randn_like(q, requires_grad=True)
@@ -377,7 +375,7 @@ def test_blockmask_backward_partial_tile_empty_rows_are_zero():
 
     output, _, _ = _call_kernel(q, k, v, prepared)
     (output * do).sum().backward()
-    dense_mask = _dense_mask(alternating_diagonal, 1, 2, 256, 256, "cuda")
+    dense_mask = _dense_mask(alternating_band, 1, 2, 256, 256, "cuda")
     ref_output, ref_lse = mxfp8_attention_forward_reference(q.detach(), k.detach(), v.detach(), 64**-0.5,
                                                              causal=False, mask=dense_mask)
     ref_dq, ref_dk, ref_dv = mxfp8_attention_backward_reference_stage2(

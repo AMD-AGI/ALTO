@@ -297,8 +297,7 @@ public_autograd_cases = [
 @cuda_only
 @pytest.mark.parametrize("config", public_autograd_cases)
 @pytest.mark.parametrize("causal", [True, False])
-@pytest.mark.parametrize("consistent_delta", [False, True])
-def test_public_autograd_matches_sdpa(config, causal, consistent_delta):
+def test_public_autograd_matches_sdpa(config, causal):
     """Public ``triton_attention_mxfp8`` forward/backward must wire gradients correctly.
 
     The lower-level backward op is tested across the large shape grid below. This
@@ -341,7 +340,6 @@ def test_public_autograd_matches_sdpa(config, causal, consistent_delta):
         return_scores=False,
         use_exp2=True,
         layout="bhsd",
-        consistent_delta=consistent_delta,
     )[0]
     o_kernel.backward(do)
 
@@ -372,7 +370,7 @@ def test_public_autograd_matches_sdpa(config, causal, consistent_delta):
 #   Stage-2 reference (same full quantization both sides -> gap = port bugs).
 # ---------------------------------------------------------------------------
 
-def _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o, lse, config, causal, consistent_delta):
+def _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o, lse, config, causal):
     return torch.ops.alto.attention_mxfp8_backward_triton_impl(
         do.contiguous(),
         q8.contiguous(),
@@ -392,11 +390,10 @@ def _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o, lse, config, 
         max_seqlen_q=config.seqlen_q,
         max_seqlen_k=config.seqlen_kv,
         use_exp2=True,
-        consistent_delta=consistent_delta,
     )
 
 
-def _check_backward_kernel_vs_reference(config, causal, batch=4, consistent_delta=False):
+def _check_backward_kernel_vs_reference(config, causal, batch=4):
     from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
 
     device = "cuda"
@@ -412,17 +409,8 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4, consistent_delt
     k8, k_scale = convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
     v8, v_scale = convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
 
-    dq_k, dk_k, dv_k = _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o_ref, lse_ref, config, causal,
-                                        consistent_delta)
-    dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(q,
-                                                                k,
-                                                                v,
-                                                                do,
-                                                                o_ref,
-                                                                lse_ref,
-                                                                sm_scale,
-                                                                causal,
-                                                                consistent_delta=consistent_delta)
+    dq_k, dk_k, dv_k = _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o_ref, lse_ref, config, causal)
+    dq_r, dk_r, dv_r = mxfp8_attention_backward_reference_stage2(q, k, v, do, o_ref, lse_ref, sm_scale, causal)
 
     rows = []
     pairs = [("dQ", dq_r, dq_k), ("dK", dk_r, dk_k), ("dV", dv_r, dv_k)]
@@ -442,116 +430,61 @@ def _check_backward_kernel_vs_reference(config, causal, batch=4, consistent_delt
 @cuda_only
 @pytest.mark.parametrize("config", test_cases)
 @pytest.mark.parametrize("causal", [True, False])
-@pytest.mark.parametrize("consistent_delta", [False, True])
-def test_backward_kernel_matches_reference(config, causal, consistent_delta):
+def test_backward_kernel_matches_reference(config, causal):
     """A1 backward kernel vs Stage-2 golden reference — isolates port bugs. CDNA4-only."""
-    _check_backward_kernel_vs_reference(config, causal, consistent_delta=consistent_delta)
+    _check_backward_kernel_vs_reference(config, causal)
 
 
 @cuda_only
 @pytest.mark.parametrize("config", non_causal_cases)
-@pytest.mark.parametrize("consistent_delta", [False, True])
-def test_backward_kernel_matches_reference_non_square(config, consistent_delta):
+def test_backward_kernel_matches_reference_non_square(config):
     """Backward kernel on seqlen_q != seqlen_k, the only shape family causal rejects."""
-    _check_backward_kernel_vs_reference(config, causal=False, batch=2, consistent_delta=consistent_delta)
+    _check_backward_kernel_vs_reference(config, causal=False, batch=2)
 
 
 # ---------------------------------------------------------------------------
-# consistent_delta — delta rebuilt from the e4m3 dO that dP consumes
+# delta — rebuilt from the e4m3 dO that dP consumes
 # ---------------------------------------------------------------------------
 
-consistent_delta_cases = [
-    AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=4, num_head_kv=4, head_dim_qk=128, head_dim_v=128),
-    AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=8, num_head_kv=2, head_dim_qk=128, head_dim_v=128),  # GQA
-    AttnConfig(seqlen_q=96, seqlen_kv=96, num_head_q=8, num_head_kv=2, head_dim_qk=96, head_dim_v=96),  # tail tiles
-]
-
-
-def _backward_both_delta_modes(q, k, v, do, config, causal):
-    """Same inputs through the backward op twice, toggling only consistent_delta."""
-    from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
-
-    o_ref, lse_ref = mxfp8_attention_forward_reference(q, k, v, config.head_dim_qk**(-0.5), causal)
-    q8, q_scale = convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
-    k8, k_scale = convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
-    v8, v_scale = convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
-
-    args = (q8, k8, v8, q_scale, k_scale, v_scale, do, o_ref, lse_ref, config, causal)
-    return _run_backward_op(*args, False), _run_backward_op(*args, True)
-
 
 @cuda_only
-@pytest.mark.parametrize("config", consistent_delta_cases)
-@pytest.mark.parametrize("causal", [True, False])
-def test_consistent_delta_touches_only_the_delta_path(config, causal):
-    """dV must be bit-identical, dQ/dK must move.
-
-    dV = Pᵀ @ dO never reads delta, so a change there means the switch leaked out
-    of the preprocess kernel. dQ/dK moving is what proves it took effect at all.
-    """
-    device = "cuda"
-    q, k, v = _make_qkv_bhsd(1, config, device, torch.bfloat16)
-    do = _make_do_bhsd(1, config, device, torch.bfloat16)
-
-    (dq_off, dk_off, dv_off), (dq_on, dk_on, dv_on) = _backward_both_delta_modes(q, k, v, do, config, causal)
-
-    torch.testing.assert_close(dv_off, dv_on, rtol=0, atol=0)
-    assert not torch.equal(dq_off, dq_on), "consistent_delta left dQ unchanged"
-    assert not torch.equal(dk_off, dk_on), "consistent_delta left dK unchanged"
-
-
-@cuda_only
-@pytest.mark.parametrize("config", consistent_delta_cases)
-@pytest.mark.parametrize("causal", [True, False])
-def test_consistent_delta_is_noop_on_an_e4m3_fixed_point(config, causal):
-    """Feed a dO the e4m3 round-trip leaves alone; the switch must then do nothing.
-
-    Pins the change to the dO round-trip: a wrong mask, a wrong block size, or a
-    stray edit to ``o`` would still shift delta on an input that quantizes to
-    itself.
-    """
-    device = "cuda"
-    q, k, v = _make_qkv_bhsd(1, config, device, torch.bfloat16)
-    do = _make_do_bhsd(1, config, device, torch.bfloat16)
-    do = _mxfp8_qdq(do, axis=-1, is_2d_block=False).to(torch.bfloat16)
-    assert torch.equal(do, _mxfp8_qdq(do, axis=-1, is_2d_block=False).to(torch.bfloat16)), \
-        "test input is not an e4m3 fixed point, so it cannot pin the round-trip"
-
-    (dq_off, dk_off, dv_off), (dq_on, dk_on, dv_on) = _backward_both_delta_modes(q, k, v, do, config, causal)
-
-    for name, off, on in [("dQ", dq_off, dq_on), ("dK", dk_off, dk_on), ("dV", dv_off, dv_on)]:
-        torch.testing.assert_close(off, on, rtol=0, atol=0, msg=f"{name} moved on an e4m3 fixed point")
-
-
-@cuda_only
-def test_consistent_delta_shrinks_the_row_sum_bias():
-    """Measure the row-constant bias in ds that the switch is meant to remove.
+def test_e4m3_delta_cancels_the_row_sum_bias():
+    """Measure the row-constant bias in ds that a raw-dO delta would leave.
 
     ``Σ_j ds_ij = 0`` in exact arithmetic. Make every key row identical and
     ``dQ = dS @ K`` collapses to ``(Σ_j ds_ij) · k``, so ‖dQ‖ reads that residual
-    off directly — the true dQ is zero. What is left with the switch on comes
-    from quantizing dS itself; what the switch removes is dO's share.
+    off directly — the true dQ is zero. A delta built from the raw dO would add
+    ``o · (dÔ - dO)`` to every row sum; what is left here comes from quantizing
+    dS itself.
 
     V carries a large shared row mean, as residual-stream activations do. That is
     what makes ``delta = Σ_j p_j dp_j`` comparable to the individual ``dp_j`` and
     puts dO's error in charge of the residual; with iid V the two are the same
     size, delta is near zero, and there is nothing to cancel.
     """
+    from alto.kernels.mxfp8.mxfp8_quantization import convert_to_mxfp8
+
     device = "cuda"
     config = AttnConfig(seqlen_q=128, seqlen_kv=128, num_head_q=4, num_head_kv=4, head_dim_qk=128, head_dim_v=128)
+    sm_scale = config.head_dim_qk**(-0.5)
     q, k, v = _make_qkv_bhsd(1, config, device, torch.bfloat16)
     k = k[:, :, :1, :].expand_as(k).contiguous()
     v = (v.float() + 8.0 * v[:, :, :1, :].float()).bfloat16()
     do = _make_do_bhsd(1, config, device, torch.bfloat16)
 
-    (dq_off, _, _), (dq_on, _, _) = _backward_both_delta_modes(q, k, v, do, config, causal=False)
+    o, lse = mxfp8_attention_forward_reference(q, k, v, sm_scale, causal=False)
+    q8, q_scale = convert_to_mxfp8(q, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    k8, k_scale = convert_to_mxfp8(k, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    v8, v_scale = convert_to_mxfp8(v, mxfp_format="e4m3", axis=-1, is_2d_block=True)
+    dq, _, _ = _run_backward_op(q8, k8, v8, q_scale, k_scale, v_scale, do, o, lse, config, causal=False)
 
-    norm_off = dq_off.float().norm().item()
-    norm_on = dq_on.float().norm().item()
+    do_e4m3 = _mxfp8_qdq(do, axis=-1, is_2d_block=False).float()
+    raw_do_row_bias = (o.float() * (do_e4m3 - do.float())).sum(dim=-1, keepdim=True)
+    norm_raw = (sm_scale * raw_do_row_bias * k.float()).norm().item()
+    norm = dq.float().norm().item()
     print()
-    print(tabulate([["‖dQ‖ (true value 0)", norm_off, norm_on, norm_on / norm_off]],
-                   headers=["Residual", "delta from raw dO", "delta from e4m3 dO", "ratio"],
+    print(tabulate([["‖dQ‖ (true value 0)", norm_raw, norm, norm / norm_raw]],
+                   headers=["Residual", "raw-dO bias", "kernel", "ratio"],
                    tablefmt="github"))
 
-    assert norm_on < 0.5 * norm_off, \
-        f"consistent_delta did not shrink the row-sum residual: {norm_off} -> {norm_on}"
+    assert norm < 0.5 * norm_raw, f"delta did not cancel dO's row-sum bias: {norm_raw} -> {norm}"

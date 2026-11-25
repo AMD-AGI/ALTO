@@ -1,0 +1,25 @@
+training_stage:
+  lpt_modifiers:
+    LowPrecisionTrainingModifier:
+      # One modifier for both schemes: a second LowPrecisionTrainingModifier
+      # would swap the MoE token dispatcher twice, which raises.
+      scheme:
+        # Same GEMM targets as lpt_recipe.yaml.
+        mxfp4: ["Linear", "GptOssGroupedLinear", "GroupedLinear"]
+        # MRO match: also covers SlidingWindowFlexInnerAttention on even layers.
+        mxfp8_e4m3: ["FlexInnerAttention"]
+      ignore: ["lm_head", "re:.*\\.router\\.gate"]
+      use_2dblock_x: false
+      use_2dblock_w: true
+      # MXFP4 GEMMs only; the MXFP8 attention kernel does not read these.
+      use_hadamard: true
+      use_sr_grad: true
+      use_dge: false
+      clip_mode: none
+      two_level_scaling: none
+      # Weight de-oscillation as in lpt_recipe.yaml; MXFP8 attention has no LPT weights.
+      deosc_step: 768
+      deosc_period: 100
+      deosc_ratio: 4.0
+      # MXFP8 attention only; the MXFP4 GEMMs do not read it.
+      attention_consistent_delta: true

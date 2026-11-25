@@ -7,10 +7,10 @@ validated before CDNA4 hardware is in the loop.
 
 import pytest
 import torch
-from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+from torch.nn.attention.flex_attention import create_block_mask, create_mask, flex_attention
 
 from alto.kernels.mxfp8.blockmask import blockmask_attention_fp32_reference, prepare_block_mask
-from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
+from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import get_shape_from_layout, triton_attention_mxfp8
 
 from .utils import (
     calc_cossim,
@@ -38,6 +38,23 @@ def _dense_mask(mask_mod, batch: int, heads: int, q_len: int, kv_len: int, devic
     return mask_mod(b, h, q, kv)
 
 
+def _assert_partial_tiles_match(prepared, dense):
+    """Every valid partial slot of both tables must hold its tile of ``dense`` (``[S, S]``, B = H = 1)."""
+    for q_block in range(prepared.kv_indices.shape[2]):
+        for slot in range(int(prepared.kv_num_blocks[0, 0, q_block])):
+            kv_block = int(prepared.kv_indices[0, 0, q_block, slot])
+            flat_slot = q_block * prepared.kv_indices.shape[3] + slot
+            expected = dense[q_block * 128:(q_block + 1) * 128, kv_block * 128:(kv_block + 1) * 128]
+            assert torch.equal(prepared.kv_partial_mask[flat_slot], expected)
+
+    for kv_block in range(prepared.q_indices.shape[2]):
+        for slot in range(int(prepared.q_num_blocks[0, 0, kv_block])):
+            q_block = int(prepared.q_indices[0, 0, kv_block, slot])
+            flat_slot = kv_block * prepared.q_indices.shape[3] + slot
+            expected = dense[q_block * 128:(q_block + 1) * 128, kv_block * 128:(kv_block + 1) * 128]
+            assert torch.equal(prepared.q_partial_mask[flat_slot], expected)
+
+
 def test_prepare_blockmask_materializes_partial_slots_and_caches():
     mask_mod = _causal_window(1)
     block_mask = create_block_mask(mask_mod, 1, 1, 256, 256, device="cpu", BLOCK_SIZE=128)
@@ -46,24 +63,37 @@ def test_prepare_blockmask_materializes_partial_slots_and_caches():
     assert prepare_block_mask(block_mask) is prepared
     assert prepared.kv_partial_mask.shape[1:] == (128, 128)
     assert prepared.q_partial_mask.shape[1:] == (128, 128)
+    _assert_partial_tiles_match(prepared, create_mask(mask_mod, 1, 1, 256, 256, device="cpu")[0, 0])
 
-    for q_block in range(prepared.kv_indices.shape[2]):
-        count = int(prepared.kv_num_blocks[0, 0, q_block])
-        for slot in range(count):
-            kv_block = int(prepared.kv_indices[0, 0, q_block, slot])
-            flat_slot = (q_block * prepared.kv_indices.shape[3]) + slot
-            expected = _dense_mask(mask_mod, 1, 1, 256, 256, "cpu")[0, 0,
-                q_block * 128:(q_block + 1) * 128, kv_block * 128:(kv_block + 1) * 128]
-            assert torch.equal(prepared.kv_partial_mask[flat_slot], expected)
 
-    for kv_block in range(prepared.q_indices.shape[2]):
-        count = int(prepared.q_num_blocks[0, 0, kv_block])
-        for slot in range(count):
-            q_block = int(prepared.q_indices[0, 0, kv_block, slot])
-            flat_slot = (kv_block * prepared.q_indices.shape[3]) + slot
-            expected = _dense_mask(mask_mod, 1, 1, 256, 256, "cpu")[0, 0,
-                q_block * 128:(q_block + 1) * 128, kv_block * 128:(kv_block + 1) * 128]
-            assert torch.equal(prepared.q_partial_mask[flat_slot], expected)
+def test_prepare_blockmask_stores_only_the_slots_rows_use():
+    """Flex sizes its tables for every KV block; partial-mask storage must not grow with S²."""
+    mask_mod = _causal_window(128)
+    prepared = prepare_block_mask(create_block_mask(mask_mod, 1, 1, 1024, 1024, device="cpu", BLOCK_SIZE=128))
+
+    for indices, counts, masks in ((prepared.kv_indices, prepared.kv_num_blocks, prepared.kv_partial_mask),
+                                   (prepared.q_indices, prepared.q_num_blocks, prepared.q_partial_mask)):
+        assert indices.shape[-1] == int(counts.max()) == 2
+        assert masks.shape[0] == indices.numel()
+    _assert_partial_tiles_match(prepared, create_mask(mask_mod, 1, 1, 1024, 1024, device="cpu")[0, 0])
+
+
+_DOC_IDS = torch.cat([torch.zeros(100, dtype=torch.long), torch.ones(156, dtype=torch.long)])
+
+
+def _scalar_diagonal(batch, head, q_idx, kv_idx):
+    return (q_idx == kv_idx).all()
+
+
+def _document_causal(batch, head, q_idx, kv_idx):
+    return (_DOC_IDS[q_idx] == _DOC_IDS[kv_idx]) & (kv_idx <= q_idx)
+
+
+@pytest.mark.parametrize("mask_mod", [_scalar_diagonal, _document_causal], ids=["reduction", "tensor_lookup"])
+def test_prepare_blockmask_evaluates_mask_mod_like_flex(mask_mod):
+    """Partial tiles must match Flex's per-token-pair evaluation, reductions and tensor lookups included."""
+    prepared = prepare_block_mask(create_block_mask(mask_mod, 1, 1, 256, 256, device="cpu", BLOCK_SIZE=128))
+    _assert_partial_tiles_match(prepared, create_mask(mask_mod, 1, 1, 256, 256, device="cpu")[0, 0])
 
 
 def test_sparse_blockmask_matches_dense_window_and_gqa_gradients():
@@ -111,6 +141,21 @@ def test_sparse_blockmask_empty_query_rows_are_zero():
     assert torch.count_nonzero(dv) == 0
 
 
+def test_sparse_blockmask_reference_zeroes_empty_rows_inside_partial_tiles():
+    """Odd rows see no key: o = lse = 0 as in the kernel, and no NaN reaches the gradients."""
+    def even_rows_causal(batch, head, q_idx, kv_idx):
+        return (q_idx % 2 == 0) & (kv_idx <= q_idx)
+
+    prepared = prepare_block_mask(create_block_mask(even_rows_causal, 1, 1, 256, 256, device="cpu", BLOCK_SIZE=128))
+    q, k, v = (torch.randn(1, 1, 256, 32, requires_grad=True) for _ in range(3))
+    output, lse = blockmask_attention_fp32_reference(q, k, v, prepared, 32**-0.5)
+
+    assert torch.count_nonzero(output[:, :, 1::2]) == 0
+    assert torch.count_nonzero(lse[:, :, 1::2]) == 0
+    for grad in torch.autograd.grad((output * torch.randn_like(output)).sum(), (q, k, v)):
+        assert torch.isfinite(grad).all()
+
+
 def _call_kernel(q, k, v, prepared, **overrides):
     kwargs = dict(
         bias=None,
@@ -134,7 +179,6 @@ def _call_kernel(q, k, v, prepared, **overrides):
 @pytest.mark.parametrize("overrides, message", [
     ({"causal": True}, "gets causality from the mask tables"),
     ({"layout": "thd"}, "requires layout 'bhsd'"),
-    ({"dropout_p": 0.1}, "does not support dropout"),
     ({"return_scores": True}, "does not return scores"),
 ])
 def test_blockmask_entry_rejects_inputs_it_cannot_honor(overrides, message):
@@ -146,6 +190,36 @@ def test_blockmask_entry_rejects_inputs_it_cannot_honor(overrides, message):
     v = torch.randn(1, 2, 128, 64)
     with pytest.raises(ValueError, match=message):
         _call_kernel(q, k, v, prepared, **overrides)
+
+
+@pytest.mark.parametrize("use_block_mask", [False, True])
+@pytest.mark.parametrize("overrides, message", [
+    ({"bias": torch.zeros(1, 2, 128, 128)}, "does not support bias"),
+    ({"alibi_slopes": torch.zeros(1, 2)}, "does not support bias or alibi"),
+    ({"dropout_p": 0.1}, "does not support dropout"),
+    ({"sm_scale": 0.0}, "positive finite sm_scale"),
+    ({"sm_scale": -0.125}, "positive finite sm_scale"),
+])
+def test_entry_rejects_inputs_no_kernel_handles(overrides, message, use_block_mask):
+    """Both entry paths must refuse these before the forward runs."""
+    block_mask = create_block_mask(_causal_window(128), 1, 1, 128, 128, device="cpu", BLOCK_SIZE=128)
+    prepared = prepare_block_mask(block_mask) if use_block_mask else None
+    q = torch.randn(1, 2, 128, 64)
+    with pytest.raises(ValueError, match=message):
+        _call_kernel(q, q, q, prepared, **overrides)
+
+
+@pytest.mark.parametrize("k_shape, v_shape, message", [
+    ((2, 2, 128, 64), (2, 2, 128, 64), "batch mismatch"),
+    ((1, 2, 128, 64), (1, 1, 128, 64), "K/V head counts differ"),
+    ((1, 4, 128, 64), (1, 4, 128, 64), "multiple of KV heads"),
+    ((1, 2, 128, 64), (1, 2, 256, 64), "K/V sequence lengths differ"),
+])
+def test_get_shape_from_layout_rejects_mismatched_qkv(k_shape, v_shape, message):
+    """A bad GQA ratio or K/V shape would make the kernels read past K/V instead of failing."""
+    q = torch.empty(1, 6, 128, 64)
+    with pytest.raises(AssertionError, match=message):
+        get_shape_from_layout(q, torch.empty(k_shape), torch.empty(v_shape), "bhsd")
 
 
 def test_blockmask_entry_rejects_sequence_length_mismatch():

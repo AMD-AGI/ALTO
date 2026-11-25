@@ -76,8 +76,11 @@ def get_shape_from_layout(q, k, v, layout, cu_seqlens_q=None, cu_seqlens_k=None,
     # FP8 stores one element per byte, so head_dim is not packed.
 
     # assert
-    assert batch_q == batch_k
-    assert head_size_q == head_size_k
+    assert batch_q == batch_k == batch_v, f"batch mismatch: q={batch_q}, k={batch_k}, v={batch_v}"
+    assert nheads_k == nheads_v, f"K/V head counts differ: k={nheads_k}, v={nheads_v}"
+    assert nheads_q % nheads_k == 0, f"query heads ({nheads_q}) must be a multiple of KV heads ({nheads_k})"
+    assert max_seqlen_k == max_seqlen_v, f"K/V sequence lengths differ: k={max_seqlen_k}, v={max_seqlen_v}"
+    assert head_size_q == head_size_k, f"Q/K head dims differ: q={head_size_q}, k={head_size_k}"
 
     return batch_q, nheads_q, nheads_k, head_size_q, head_size_v, max_seqlen_q, max_seqlen_k
 
@@ -2834,8 +2837,9 @@ def triton_attention_mxfp8(
     layout: str,
     block_mask: MXFP8BlockMask | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    _check_inputs(bias, alibi_slopes, dropout_p, sm_scale)
     if block_mask is not None:
-        _check_block_mask_inputs(q, k, block_mask, causal, layout, bias, alibi_slopes, dropout_p, return_scores)
+        _check_block_mask_inputs(q, k, block_mask, causal, layout, return_scores)
     return _triton_attention_mxfp8.apply(
         q,
         k,
@@ -2856,22 +2860,32 @@ def triton_attention_mxfp8(
     )
 
 
-def _check_block_mask_inputs(q, k, block_mask, causal, layout, bias, alibi_slopes, dropout_p, return_scores):
+def _check_inputs(bias, alibi_slopes, dropout_p, sm_scale):
+    """Reject inputs the kernels do not handle, before the forward runs.
+
+    The backward differentiates none of bias, alibi or dropout. A non-positive
+    scale would turn the -inf logits of masked entries into NaN or +inf.
+    """
+    if bias is not None or alibi_slopes is not None:
+        raise ValueError("MXFP8 attention does not support bias or alibi.")
+    if dropout_p != 0.0:
+        raise ValueError("MXFP8 attention does not support dropout.")
+    if not 0.0 < sm_scale < float("inf"):
+        raise ValueError(f"MXFP8 attention requires a positive finite sm_scale, got {sm_scale}.")
+
+
+def _check_block_mask_inputs(q, k, block_mask, causal, layout, return_scores):
     """Reject anything the BlockMask forward path does not actually compute.
 
-    The mask lives entirely in the Flex tables, so every other masking or
-    score-shaping input has to be off; otherwise the kernel would quietly ignore
-    it. Sequence lengths must be whole tiles so the kernel needs no boundary
-    handling on top of the table walk.
+    The mask lives entirely in the Flex tables, so every other masking input has
+    to be off; otherwise the kernel would quietly ignore it. Sequence lengths
+    must be whole tiles so the kernel needs no boundary handling on top of the
+    table walk.
     """
     if layout != "bhsd":
         raise ValueError(f"MXFP8 BlockMask attention requires layout 'bhsd', got {layout!r}.")
     if causal:
         raise ValueError("MXFP8 BlockMask attention gets causality from the mask tables; pass causal=False.")
-    if bias is not None or alibi_slopes is not None:
-        raise ValueError("MXFP8 BlockMask attention does not support bias or alibi.")
-    if dropout_p != 0.0:
-        raise ValueError("MXFP8 BlockMask attention does not support dropout.")
     if return_scores:
         raise ValueError("MXFP8 BlockMask attention does not return scores.")
 

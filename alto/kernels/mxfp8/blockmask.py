@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from weakref import WeakKeyDictionary
 
 import torch
+from torch._dynamo._trace_wrapped_higher_order_op import TransformGetItemToIndex
 from torch.nn.attention.flex_attention import BlockMask
 
 BLOCK_SIZE = 128
@@ -24,6 +25,8 @@ class MXFP8BlockMask:
     dimension.  Their index is the flattened ``[B, H, q_block, slot]`` (or
     corresponding Q-table) slot, including invalid slots.  Keeping that shape
     makes Triton's lookup a few integer operations rather than an indirection.
+    ``kv_indices`` and ``q_indices`` keep only as many slots as the widest row
+    uses, so that storage grows with the partial blocks rather than with S².
     """
 
     kv_num_blocks: torch.Tensor
@@ -69,6 +72,18 @@ def _require_counts(
     return value.contiguous()
 
 
+def _used_slots(indices: torch.Tensor, num_blocks: torch.Tensor) -> torch.Tensor:
+    """Drop the slot columns no row uses; Flex sizes the table for every block in a row."""
+    return indices[..., :int(num_blocks.max())].contiguous()
+
+
+def _per_token_pair(mask_mod):
+    """Map ``mask_mod`` over ``[tile, q, kv]`` one token pair at a time, as Flex's ``create_mask`` does."""
+    fn = torch.vmap(mask_mod, in_dims=(None, None, None, 0))
+    fn = torch.vmap(fn, in_dims=(None, None, 0, None))
+    return torch.vmap(fn, in_dims=(0, 0, 0, 0))
+
+
 def _materialize_partial(
     block_mask: BlockMask,
     num_blocks: torch.Tensor,
@@ -99,12 +114,8 @@ def _materialize_partial(
     else:
         q_positions = q_block[:, None] * q_block_size + torch.arange(q_block_size, device=device)[None, :]
         kv_positions = indexed_block[:, None] * kv_block_size + torch.arange(kv_block_size, device=device)[None, :]
-    masks = block_mask.mask_mod(
-        b[:, None, None],
-        h[:, None, None],
-        q_positions[:, :, None],
-        kv_positions[:, None, :],
-    ).to(dtype=torch.bool)
+    with TransformGetItemToIndex():
+        masks = _per_token_pair(block_mask.mask_mod)(b, h, q_positions, kv_positions).to(dtype=torch.bool)
     flat_slot = ((b * heads + h) * q_blocks + q_block) * slots + block_slot
     result[flat_slot] = masks
     return result
@@ -134,6 +145,8 @@ def prepare_block_mask(block_mask: BlockMask) -> MXFP8BlockMask:
     full_q_num_blocks = _require_counts(
         "full_q_num_blocks", block_mask.full_q_num_blocks, full_q_indices, like=q_indices
     )
+    kv_indices = _used_slots(kv_indices, kv_num_blocks)
+    q_indices = _used_slots(q_indices, q_num_blocks)
 
     prepared = MXFP8BlockMask(
         kv_num_blocks=kv_num_blocks,
@@ -223,11 +236,11 @@ def blockmask_attention_fp32_reference(
                 keys = torch.cat(key_parts, dim=0)
                 values = torch.cat(value_parts, dim=0)
                 allowed = torch.cat(mask_parts, dim=1)
+                has_key = allowed.any(dim=-1, keepdim=True)
                 scores = (q[batch_idx, head_idx, q_start:q_end].float() @ keys.float().transpose(0, 1)) * sm_scale
-                scores = scores.masked_fill(~allowed, float("-inf"))
-                row_lse = torch.logsumexp(scores, dim=-1)
-                probabilities = torch.softmax(scores, dim=-1)
-                probabilities = torch.nan_to_num(probabilities)
+                # Empty rows get finite scores so softmax/logsumexp stay NaN-free, then o = lse = 0 as in the kernel.
+                scores = scores.masked_fill(~allowed, float("-inf")).masked_fill(~has_key, 0.0)
+                probabilities = torch.softmax(scores, dim=-1) * has_key
                 output[batch_idx, head_idx, q_start:q_end] = (probabilities @ values.float()).to(q.dtype)
-                lse[batch_idx, head_idx, q_start:q_end] = torch.nan_to_num(row_lse)
+                lse[batch_idx, head_idx, q_start:q_end] = torch.logsumexp(scores, dim=-1) * has_key[:, 0]
     return output, lse

@@ -321,15 +321,24 @@ def gpt_oss_20b_pretrain_flex_mxfp8_attn() -> Trainer.Config:
     return config
 
 
-def gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse() -> Trainer.Config:
-    """``gpt_oss_20b_pretrain_flex_detached_lse`` with MXFP4 Linear and MoE GEMMs.
+def _pad_documents_to_32(config: Trainer.Config) -> None:
+    """Pad train and validation documents to the 32-token MX block, as ``gpt_oss_20b_lpt`` does."""
+    config.dataloader.dataset = megatron_packed_dataset(C4_TRAIN_IDX, seq_align=32)
+    config.validator.dataloader.dataset = megatron_packed_dataset(C4_VAL_IDX, seq_align=32)
 
-    The GEMMs follow ``lpt_recipe.yaml`` plus UoS scale rounding. Attention stays
-    BF16 Flex with the sinks' LSE detached. Pairs with
+
+def gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse() -> Trainer.Config:
+    """``gpt_oss_20b_lpt``'s data and MXFP4 GEMMs, plus UoS, on BF16 Flex attention.
+
+    Attention keeps the sinks' LSE detached, so its gradient matches the varlen
+    attention of ``gpt_oss_20b_lpt``. Pairs with
     ``gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn``.
     """
     config = gpt_oss_20b_pretrain_flex_detached_lse()
-    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-detached-lse-lr4e-4-outputs"
+    config.dump_folder = (
+        "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-detached-lse-aligned-lr4e-4-outputs"
+    )
+    _pad_documents_to_32(config)
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe=MXFP4_GEMM_RECIPE)],
     )
@@ -337,16 +346,16 @@ def gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse() -> Trainer.Config:
 
 
 def gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn() -> Trainer.Config:
-    """``gpt_oss_20b_pretrain_flex_mxfp8_attn`` with the same MXFP4 GEMMs.
+    """``gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse`` with MXFP8 Flex attention.
 
-    Both schemes sit in one recipe. Pairs with
-    ``gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse``: the two differ only
-    in attention precision.
+    Both schemes sit in one recipe; the two configs differ only in attention
+    precision.
     """
     config = gpt_oss_20b_pretrain_flex_mxfp8_attn()
     config.dump_folder = (
-        "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-mxfp8attn-cdelta-lr4e-4-outputs"
+        "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-mxfp8attn-cdelta-aligned-lr4e-4-outputs"
     )
+    _pad_documents_to_32(config)
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe=MXFP4_GEMM_MXFP8_ATTN_RECIPE)],
     )

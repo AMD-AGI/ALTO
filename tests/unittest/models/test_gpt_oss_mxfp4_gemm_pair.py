@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from alto.models.gpt_oss.config_registry import (
     LPT_RECIPE,
     MXFP4_GEMM_MXFP8_ATTN_RECIPE,
     MXFP4_GEMM_RECIPE,
-    gpt_oss_20b_pretrain,
+    gpt_oss_20b_lpt,
     gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse,
     gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn,
 )
@@ -88,13 +89,27 @@ def test_uos_may_share_a_modifier_with_mxfp8_but_needs_mxfp4():
             LowPrecisionTrainingModifier(scheme=scheme, use_uos=True)
 
 
-def test_mxfp4_gemm_pair_keeps_gpt_oss_20b_pretrain_settings():
-    reference = gpt_oss_20b_pretrain()
+def _strip_filter_lambdas(loader):
+    """``megatron_dataset_config`` builds a new filter lambda per call; drop it before comparing."""
+    packing = loader.dataset
+    return replace(loader, dataset=replace(packing, dataset=replace(packing.dataset, post_filters=())))
+
+
+def test_mxfp4_gemm_pair_matches_gpt_oss_20b_lpt_settings():
+    reference = gpt_oss_20b_lpt()
     for config in (
         gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse(),
         gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn(),
     ):
-        for name in ("training", "optim", "parallelism", "loss", "checkpointer", "debug", "metrics"):
+        for name in ("training", "optim", "parallelism", "loss", "debug", "metrics"):
             assert getattr(config, name) == getattr(reference, name), name
-        assert config.dataloader.dataset.dataset.processor.seq_align is None
-        assert config.validator.dataloader.dataset.dataset.processor.seq_align is None
+        for ours, ref in (
+            (config.dataloader, reference.dataloader),
+            (config.validator.dataloader, reference.validator.dataloader),
+        ):
+            assert ours.dataset.dataset.processor.seq_align == 32
+            assert _strip_filter_lambdas(ours) == _strip_filter_lambdas(ref)
+        assert (config.validator.freq, config.validator.steps) == (
+            reference.validator.freq,
+            reference.validator.steps,
+        )

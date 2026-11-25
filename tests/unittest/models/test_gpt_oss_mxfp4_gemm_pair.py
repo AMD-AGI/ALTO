@@ -119,7 +119,6 @@ def test_mxfp4_gemm_pair_matches_gpt_oss_20b_lpt_settings():
         ):
             assert ours.dataset.dataset.processor.seq_align == 32
             assert _strip_filter_lambdas(ours) == _strip_filter_lambdas(ref)
-        assert (config.validator.freq, config.validator.steps) == (
-            reference.validator.freq,
-            reference.validator.steps,
-        )
+        assert config.validator.freq == reference.validator.freq
+        # MLPerf's 1024 eval samples.
+        assert config.validator.steps == 2 * reference.validator.steps == 64

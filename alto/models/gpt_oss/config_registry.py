@@ -327,6 +327,15 @@ def _pad_documents_to_32(config: Trainer.Config) -> None:
     config.validator.dataloader.dataset = megatron_packed_dataset(C4_VAL_IDX, seq_align=32)
 
 
+def _validate_on_1024_samples(config: Trainer.Config) -> None:
+    """Validate on MLPerf's 1024 eval samples.
+
+    A validation step is one microbatch per DP rank with no gradient accumulation:
+    2 samples on each of 8 ranks, so 64 steps cover 1024 samples.
+    """
+    config.validator.steps = 64
+
+
 def gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse() -> Trainer.Config:
     """``gpt_oss_20b_lpt``'s data and MXFP4 GEMMs, plus UoS, on BF16 Flex attention.
 
@@ -336,9 +345,10 @@ def gpt_oss_20b_pretrain_flex_mxfp4_gemm_detached_lse() -> Trainer.Config:
     """
     config = gpt_oss_20b_pretrain_flex_detached_lse()
     config.dump_folder = (
-        "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-detached-lse-aligned-lr4e-4-outputs"
+        "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-detached-lse-aligned-val1024-lr4e-4-outputs"
     )
     _pad_documents_to_32(config)
+    _validate_on_1024_samples(config)
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe=MXFP4_GEMM_RECIPE)],
     )
@@ -353,9 +363,10 @@ def gpt_oss_20b_pretrain_flex_mxfp4_gemm_mxfp8_attn() -> Trainer.Config:
     """
     config = gpt_oss_20b_pretrain_flex_mxfp8_attn()
     config.dump_folder = (
-        "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-mxfp8attn-cdelta-aligned-lr4e-4-outputs"
+        "gpt_oss_20b-pretrain-subset-gbs32-flex-mxfp4gemm-mxfp8attn-cdelta-aligned-val1024-lr4e-4-outputs"
     )
     _pad_documents_to_32(config)
+    _validate_on_1024_samples(config)
     config.model_converters = ModelConvertersContainer.Config(
         converters=[ModelOptConverter.Config(recipe=MXFP4_GEMM_MXFP8_ATTN_RECIPE)],
     )

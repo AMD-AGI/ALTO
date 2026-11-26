@@ -219,7 +219,27 @@ def test_get_shape_from_layout_rejects_mismatched_qkv(k_shape, v_shape, message)
     """A bad GQA ratio or K/V shape would make the kernels read past K/V instead of failing."""
     q = torch.empty(1, 6, 128, 64)
     with pytest.raises(AssertionError, match=message):
-        get_shape_from_layout(q, torch.empty(k_shape), torch.empty(v_shape), "bhsd")
+        get_shape_from_layout(q, torch.empty(k_shape), torch.empty(v_shape), "bhsd",
+                              max_seqlen_q=128, max_seqlen_k=k_shape[2])
+
+
+@pytest.mark.parametrize("layout", ["bhsd", "bshd"])
+@pytest.mark.parametrize("max_seqlens", [(256, 128), (128, 256), (64, 128)])
+def test_get_shape_from_layout_rejects_maxima_that_differ_from_the_tensors(layout, max_seqlens):
+    """The forward grid and buffers are sized from the maxima, so a mismatch would read or write past Q/K/V."""
+    q = torch.empty((1, 2, 128, 64) if layout == "bhsd" else (1, 128, 2, 64))
+    get_shape_from_layout(q, q, q, layout, max_seqlen_q=128, max_seqlen_k=128)
+    with pytest.raises(AssertionError, match="differ from the Q/K sequence lengths"):
+        get_shape_from_layout(q, q, q, layout, max_seqlen_q=max_seqlens[0], max_seqlen_k=max_seqlens[1])
+
+
+@cuda_only
+def test_exp_scores_output_is_not_differentiable():
+    """The backward ignores the exp_scores gradient, so autograd must not offer one."""
+    q, k, v = (torch.randn(1, 2, 128, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True) for _ in range(3))
+    output, lse, exp_scores = _call_kernel(q, k, v, None)
+    assert output.requires_grad and lse.requires_grad
+    assert not exp_scores.requires_grad
 
 
 def test_blockmask_entry_rejects_sequence_length_mismatch():

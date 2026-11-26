@@ -59,17 +59,17 @@ PERF = os.environ.get('FLASH_ATTENTION_TRITON_AMD_PERF', '0').lower() in ('1', '
 
 def get_shape_from_layout(q, k, v, layout, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=None, max_seqlen_k=None):
     if layout == 'bhsd':
-        batch_q, nheads_q, max_seqlen_q, head_size_q = q.shape
-        batch_k, nheads_k, max_seqlen_k, head_size_k = k.shape
-        batch_v, nheads_v, max_seqlen_v, head_size_v = v.shape
+        batch_q, nheads_q, seqlen_q, head_size_q = q.shape
+        batch_k, nheads_k, seqlen_k, head_size_k = k.shape
+        batch_v, nheads_v, seqlen_v, head_size_v = v.shape
     elif layout == 'bshd':
-        batch_q, max_seqlen_q, nheads_q, head_size_q = q.shape
-        batch_k, max_seqlen_k, nheads_k, head_size_k = k.shape
-        batch_v, max_seqlen_v, nheads_v, head_size_v = v.shape
+        batch_q, seqlen_q, nheads_q, head_size_q = q.shape
+        batch_k, seqlen_k, nheads_k, head_size_k = k.shape
+        batch_v, seqlen_v, nheads_v, head_size_v = v.shape
     elif layout == 'thd':
-        batch_q, max_seqlen_q, nheads_q, head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
-        batch_k, max_seqlen_k, nheads_k, head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
-        batch_v, max_seqlen_v, nheads_v, head_size_v = len(cu_seqlens_k) - 1, max_seqlen_k, v.shape[1], v.shape[2]
+        batch_q, seqlen_q, nheads_q, head_size_q = len(cu_seqlens_q) - 1, max_seqlen_q, q.shape[1], q.shape[2]
+        batch_k, seqlen_k, nheads_k, head_size_k = len(cu_seqlens_k) - 1, max_seqlen_k, k.shape[1], k.shape[2]
+        batch_v, seqlen_v, nheads_v, head_size_v = len(cu_seqlens_k) - 1, max_seqlen_k, v.shape[1], v.shape[2]
     else:
         assert False, "Got unsupported layout."
 
@@ -79,10 +79,12 @@ def get_shape_from_layout(q, k, v, layout, cu_seqlens_q=None, cu_seqlens_k=None,
     assert batch_q == batch_k == batch_v, f"batch mismatch: q={batch_q}, k={batch_k}, v={batch_v}"
     assert nheads_k == nheads_v, f"K/V head counts differ: k={nheads_k}, v={nheads_v}"
     assert nheads_q % nheads_k == 0, f"query heads ({nheads_q}) must be a multiple of KV heads ({nheads_k})"
-    assert max_seqlen_k == max_seqlen_v, f"K/V sequence lengths differ: k={max_seqlen_k}, v={max_seqlen_v}"
+    assert seqlen_k == seqlen_v, f"K/V sequence lengths differ: k={seqlen_k}, v={seqlen_v}"
     assert head_size_q == head_size_k, f"Q/K head dims differ: q={head_size_q}, k={head_size_k}"
+    assert (max_seqlen_q, max_seqlen_k) == (seqlen_q, seqlen_k), (
+        f"max_seqlens ({max_seqlen_q}, {max_seqlen_k}) differ from the Q/K sequence lengths ({seqlen_q}, {seqlen_k})")
 
-    return batch_q, nheads_q, nheads_k, head_size_q, head_size_v, max_seqlen_q, max_seqlen_k
+    return batch_q, nheads_q, nheads_k, head_size_q, head_size_v, seqlen_q, seqlen_k
 
 
 def get_strides_from_layout(q, layout):
@@ -2718,6 +2720,7 @@ class _triton_attention_mxfp8(torch.autograd.Function):
         ctx.cu_seqlens_k = cu_seqlens_k
         ctx.max_seqlens_q = max_seqlens_q
         ctx.max_seqlens_k = max_seqlens_k
+        ctx.mark_non_differentiable(exp_scores)
 
         return output, softmax_lse, exp_scores
 

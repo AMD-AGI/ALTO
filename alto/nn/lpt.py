@@ -17,9 +17,11 @@ from dataclasses import dataclass, fields
 
 import spmd_types as spmd
 import torch
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config.override import derive
 from torchtitan.models.common.attention import (
+    FlexInnerAttention,
     ScaledDotProductInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
@@ -40,8 +42,10 @@ from alto.kernels.fp4.nvfp4.nvfp_grouped_gemm.functional import (
     _quantize_then_nvfp4_scaled_grouped_mm,
 )
 from alto.kernels.fp4.nvfp4.nvfp_linear import _to_nvfp4_then_scaled_mm
+from alto.kernels.mxfp8.blockmask import prepare_block_mask
 from alto.kernels.mxfp8.mxfp8_grouped_gemm import _quantize_then_mxfp8_scaled_grouped_mm
 from alto.kernels.mxfp8.mxfp8_linear import _to_mxfp8_then_scaled_mm
+from alto.kernels.mxfp8.triton_flash_attention_mxfp8 import triton_attention_mxfp8
 
 MatchFn = Callable[[str, type, str | list[str]], bool]
 
@@ -95,7 +99,10 @@ def lpt_module(base: type) -> type:
     ``GroupedLinear`` subclasses override ``_grouped_mm``. ``Linear`` subclasses
     override ``_linear``. ``ScaledDotProductInnerAttention`` overrides
     ``attention_BLHK``. ``VarlenInnerAttention`` overrides ``forward`` and keeps
-    packed-document ``cu_seqlens``. Column/row collectives and
+    packed-document ``cu_seqlens``. ``FlexInnerAttention`` overrides
+    ``forward``, because its kernel call is pinned to the class and has no
+    narrower hook; the mask still comes from the parent's BlockMask, so
+    sliding-window subclasses need nothing extra. Column/row collectives and
     ``GptOssGroupedLinear``'s per-expert bias stay on the parent class, so those
     types do not need a handwritten LPT module.
     """
@@ -110,11 +117,18 @@ def lpt_module(base: type) -> type:
         kind = "varlen"
     elif issubclass(base, ScaledDotProductInnerAttention):
         kind = "sdpa"
+    elif issubclass(base, FlexInnerAttention):
+        kind = "flex"
     else:
         raise TypeError(
             f"{base.__qualname__} is not a Linear, GroupedLinear, "
-            "VarlenInnerAttention, or ScaledDotProductInnerAttention, so it "
-            "has no LPT compute method to override."
+            "VarlenInnerAttention, ScaledDotProductInnerAttention, or "
+            "FlexInnerAttention, so it has no LPT compute method to override."
+        )
+    if kind == "flex" and base._get_aux_request is not FlexInnerAttention._get_aux_request:
+        raise TypeError(
+            f"{base.__qualname__} requests extra Flex aux outputs; the MXFP8 "
+            "kernel only returns lse."
         )
 
     name = f"LPT{base.__name__}"
@@ -135,6 +149,10 @@ def lpt_module(base: type) -> type:
         if kind == "varlen" and self.training_op_config.precision != "mxfp4":
             raise ValueError(
                 f"Unsupported attention precision: {self.training_op_config.precision}"
+            )
+        if kind == "flex" and self.training_op_config.precision != "mxfp8_e4m3":
+            raise ValueError(
+                f"Unsupported Flex precision: {self.training_op_config.precision}"
             )
 
     def extra_repr(self) -> str:
@@ -174,6 +192,25 @@ def lpt_module(base: type) -> type:
             yield from ()
 
         namespace["attention_BLHK"] = attention_BLHK
+        namespace["iter_lpt_weights"] = iter_lpt_weights
+    elif kind == "flex":
+        def forward(
+            self, q_THK, k_THK, v_THV, *, attention_metadata, score_mod=None,
+            scale=None, enable_gqa=False, out_transform=None, **kwargs,
+        ):
+            out_THV, lse_TH = lpt_flex_attention_THK(
+                q_THK, k_THK, v_THV,
+                block_mask=attention_metadata, score_mod=score_mod,
+                scale=scale, enable_gqa=enable_gqa,
+            )
+            if out_transform is None:
+                return out_THV
+            return out_transform(out_THV, lse_TH)
+
+        def iter_lpt_weights(self):
+            yield from ()
+
+        namespace["forward"] = forward
         namespace["iter_lpt_weights"] = iter_lpt_weights
     else:
         def forward(
@@ -449,6 +486,53 @@ def lpt_varlen_attention(
     return _annotate_like(output, q_THK)
 
 
+def lpt_flex_attention_THK(
+    q_THK: torch.Tensor,
+    k_THK: torch.Tensor,
+    v_THV: torch.Tensor,
+    *,
+    block_mask: BlockMask,
+    score_mod,
+    scale: float | None,
+    enable_gqa: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run MXFP8 BlockMask attention on packed ``[T, H, D]`` inputs.
+
+    Returns ``(out_THV, lse_TH)``. The mask comes entirely from ``block_mask``,
+    so ``score_mod`` is rejected rather than ignored. ``lse`` is differentiable
+    because GPT-OSS sinks rescale the output with it.
+    """
+    if score_mod is not None:
+        raise ValueError("MXFP8 Flex attention takes mask semantics only through BlockMask.")
+    if not isinstance(block_mask, BlockMask):
+        raise TypeError(f"MXFP8 Flex attention requires a BlockMask, got {type(block_mask)}.")
+    if not enable_gqa and q_THK.shape[1] != k_THK.shape[1]:
+        raise ValueError("GQA head counts require enable_gqa=True.")
+    q, k, v = (t.transpose(0, 1).unsqueeze(0).contiguous() for t in (q_THK, k_THK, v_THV))
+    with spmd.no_typecheck():
+        out_1HTV, lse_1HT, _ = triton_attention_mxfp8(
+            q,
+            k,
+            v,
+            alibi_slopes=None,
+            bias=None,
+            sm_scale=q.shape[-1] ** -0.5 if scale is None else scale,
+            dropout_p=0.0,
+            cu_seqlens_q=0,
+            cu_seqlens_k=0,
+            max_seqlens_q=q.shape[-2],
+            max_seqlens_k=k.shape[-2],
+            causal=False,
+            return_scores=False,
+            use_exp2=True,
+            layout="bhsd",
+            block_mask=prepare_block_mask(block_mask),
+        )
+    out_THV = out_1HTV.squeeze(0).transpose(0, 1)
+    lse_TH = lse_1HT.squeeze(0).transpose(0, 1)
+    return _annotate_like(out_THV, q_THK), lse_TH
+
+
 def _assign(parent, attr, value) -> None:
     if isinstance(parent, list):
         parent[attr] = value
@@ -491,6 +575,7 @@ def apply_lpt_module_configs(
         GroupedLinear.Config,
         ScaledDotProductInnerAttention.Config,
         VarlenInnerAttention.Config,
+        FlexInnerAttention.Config,
     )
     matches: dict[str, tuple[object, object, str | int, TrainingOpConfig]] = {}
     for training_op_config, targets in schemes:

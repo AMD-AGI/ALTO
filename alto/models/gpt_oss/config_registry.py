@@ -26,6 +26,7 @@ from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests.models.gpt_oss import (
     gpt_oss_debugmodel as gpt_oss_debugmodel_orig,
+    gpt_oss_debugmodel_flex as gpt_oss_debugmodel_flex_orig,
 )
 
 from alto.components.converter import ModelOptConverter
@@ -34,10 +35,15 @@ from alto.models.batch import set_batch_sizes
 __all__ = [
     "gpt_oss_debugmodel",
     "gpt_oss_debugmodel_lpt",
+    "gpt_oss_debugmodel_flex",
+    "gpt_oss_debugmodel_mxfp8_attn",
     "gpt_oss_20b",
     "gpt_oss_20b_pretrain",
     "gpt_oss_20b_lpt",
+    "gpt_oss_20b_mxfp8_attn",
 ]
+
+MXFP8_ATTN_RECIPE = "./alto/models/gpt_oss/configs/mxfp8_attn_recipe.yaml"
 
 GPT_OSS_20B_PATH = (
     "/huggingface/hub/models--openai--gpt-oss-20b/snapshots/"
@@ -95,6 +101,30 @@ def gpt_oss_debugmodel_lpt() -> Trainer.Config:
                 recipe="./alto/models/gpt_oss/configs/lpt_recipe.yaml",
             )
         ],
+    )
+    return config
+
+
+def gpt_oss_debugmodel_flex() -> Trainer.Config:
+    seq_len = 2048
+    config = gpt_oss_debugmodel_flex_orig(seq_len=seq_len)
+    config.profiler.enable_profiling = False
+    config.training.steps = 10
+    set_batch_sizes(
+        config.training,
+        seq_len=seq_len,
+        local_batch_size=4,
+        global_batch_size=16,
+    )
+    config.activation_remat = None
+    config.debug.seed = 1234
+    return config
+
+
+def gpt_oss_debugmodel_mxfp8_attn() -> Trainer.Config:
+    config = gpt_oss_debugmodel_flex()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe=MXFP8_ATTN_RECIPE)],
     )
     return config
 
@@ -159,7 +189,7 @@ def gpt_oss_20b() -> Trainer.Config:
     )
 
 
-def gpt_oss_20b_pretrain() -> Trainer.Config:
+def gpt_oss_20b_pretrain(attn_backend: str = "varlen") -> Trainer.Config:
     seq_len = 8192
     local_batch_size = 2
     global_batch_size = 32
@@ -168,7 +198,12 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
         expert_parallel_degree=4,
         tensor_parallel_degree=1,
     )
-    model = build_model_config("20b_megatron", seq_len=seq_len, parallelism=parallelism)
+    model = build_model_config(
+        "20b_megatron",
+        seq_len=seq_len,
+        parallelism=parallelism,
+        attn_backend=attn_backend,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -234,6 +269,22 @@ def gpt_oss_20b_pretrain() -> Trainer.Config:
             ),
         ),
     )
+
+
+def gpt_oss_20b_mxfp8_attn() -> Trainer.Config:
+    """MXFP8 attention through Flex BlockMask; Linear and MoE stay BF16.
+
+    Documents are padded to the 32-token MX block before packing, so no scale
+    group spans two documents.
+    """
+    config = gpt_oss_20b_pretrain(attn_backend="flex")
+    config.dump_folder = "gpt_oss_20b-pretrain-subset-gbs32-mxfp8attn-lr4e-4-outputs"
+    config.dataloader.dataset = megatron_packed_dataset(C4_TRAIN_IDX, seq_align=32)
+    config.validator.dataloader.dataset = megatron_packed_dataset(C4_VAL_IDX, seq_align=32)
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[ModelOptConverter.Config(recipe=MXFP8_ATTN_RECIPE)],
+    )
+    return config
 
 
 def gpt_oss_20b_lpt() -> Trainer.Config:
